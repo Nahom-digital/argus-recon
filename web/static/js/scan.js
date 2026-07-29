@@ -22,6 +22,7 @@ async function init() {
     SCAN = scan;
     renderPanel(scan);
     buildStatusFilter();
+    buildHostFilter();
     renderTable();
     wireTableControls();
     if (graph) initGraph(graph);
@@ -341,6 +342,19 @@ function buildStatusFilter() {
   sel.innerHTML = opts.join('');
 }
 
+/* Domain / subdomain filter — every host seen in this scan (apex first). */
+function buildHostFilter() {
+  const sel = document.getElementById('hostFilter');
+  if (!sel) return;
+  const domain = (SCAN.meta || {}).domain || '';
+  const hosts = [...new Set((SCAN.subdomains || []).map(s => s.host).filter(Boolean))]
+    .sort((a, b) => (a === domain ? -1 : b === domain ? 1 : a.localeCompare(b)));
+  const opts = ['<option value="">all hosts</option>'];
+  hosts.forEach(h => opts.push(
+    `<option value="${esc(h)}">${esc(h)}${h === domain ? ' (apex)' : ''}</option>`));
+  sel.innerHTML = opts.join('');
+}
+
 function renderTable() {
   const body = document.getElementById('tBody');
   const rows = filtered();
@@ -461,6 +475,9 @@ function wireTableControls() {
   document.getElementById('typeFilter').addEventListener('change', e => { F.type = e.target.value; renderTable(); });
   document.getElementById('statusFilter').addEventListener('change', e => { F.status = e.target.value; renderTable(); });
 
+  const host = document.getElementById('hostFilter');
+  if (host) host.addEventListener('change', e => setHostFilter(e.target.value, null));
+
   const scope = document.getElementById('scopeToggle');
   scope.addEventListener('click', () => {
     F.scope = F.scope === 'in' ? 'all' : 'in';
@@ -481,13 +498,19 @@ function wireTableControls() {
   if (exp) exp.addEventListener('click', toggleDetailMode);
 }
 
-function setHostFilter(host, el) {
+/* Central host filter — drives the request list AND the graph.
+   opts.filterGraph=false lets a graph node click sync the list/dropdown
+   without yanking the graph layout out from under the click. */
+function setHostFilter(host, el, opts) {
+  opts = opts || {};
   const same = F.host === host;
-  F.host = same ? null : host;
-  document.querySelectorAll('.sitem').forEach(s => s.classList.remove('active'));
-  if (!same && el) el.classList.add('active');
+  F.host = (same || !host) ? null : host;
+  const sel = document.getElementById('hostFilter');
+  if (sel) sel.value = F.host || '';
+  document.querySelectorAll('.sitem').forEach(s =>
+    s.classList.toggle('active', !!F.host && s.dataset.host === F.host));
   renderTable();
-  if (GRAPH && !same) GRAPH.focusHost(host);
+  if (GRAPH && opts.filterGraph !== false) GRAPH.filterHost(F.host);
 }
 
 /* ---- side sections collapse ---------------------------------------------- */
@@ -665,7 +688,9 @@ function buildGraph(graph, autoStart) {
     onSelect(node) {
       if (node.type === 'Subdomain') {
         const el = document.querySelector(`.sitem[data-host="${CSS.escape(node.label)}"]`);
-        setHostFilter(node.label, el);
+        // inspect: sync the list + dropdown, but don't collapse the graph
+        // under the click — use the dropdown / left panel to filter the graph.
+        setHostFilter(node.label, el, { filterGraph: false });
       }
     },
   });

@@ -7,10 +7,12 @@
 #     "argusscanner" so it keeps running on http://127.0.0.1:7666 even after
 #     you close the terminal (and after logout / reboot, via linger)
 #
-# Usage:   ./install.sh
+# Usage:   ./install.sh              install everything + start the service
+#          ./install.sh --upgrade    pull the latest from GitHub + restart
+#          ./install.sh --restart    bounce the running service
+#          ./install.sh --uninstall  remove the service
 # Manage:  systemctl --user {status|restart|stop|start} argusscanner
 # Logs:    journalctl --user -u argusscanner -f
-# Remove:  ./install.sh --uninstall
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -34,6 +36,56 @@ if [ "${1:-}" = "--uninstall" ]; then
   rm -f "$UNIT"
   systemctl --user daemon-reload 2>/dev/null || true
   say "done. (venv and scans left untouched; delete .venv manually if you want)"
+  exit 0
+fi
+
+# --------------------------------------------------------------------------- #
+# --upgrade : check GitHub for a newer version, pull it, refresh deps, restart
+# --------------------------------------------------------------------------- #
+if [ "${1:-}" = "--upgrade" ]; then
+  command -v git >/dev/null || { err "git is not installed"; exit 1; }
+  [ -d "$HERE/.git" ] || { err "this folder isn't a git checkout — clone the repo from GitHub to use --upgrade"; exit 1; }
+
+  say "checking GitHub for updates …"
+  git -C "$HERE" fetch --quiet origin || { err "git fetch failed (network / auth?)"; exit 1; }
+  branch="$(git -C "$HERE" rev-parse --abbrev-ref HEAD)"
+  local_rev="$(git -C "$HERE" rev-parse HEAD)"
+  remote_rev="$(git -C "$HERE" rev-parse "origin/$branch" 2>/dev/null || true)"
+  [ -n "$remote_rev" ] || { err "no upstream 'origin/$branch' to compare against"; exit 1; }
+
+  if [ "$local_rev" = "$remote_rev" ]; then
+    say "already up to date ($branch @ ${local_rev:0:7}) — nothing to upgrade."
+    exit 0
+  fi
+  behind="$(git -C "$HERE" rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo '?')"
+  say "update available: $behind new commit(s) on origin/$branch."
+
+  # never clobber local edits — stash them first
+  if ! git -C "$HERE" diff --quiet || ! git -C "$HERE" diff --cached --quiet; then
+    warn "local uncommitted changes detected — stashing them before pulling."
+    git -C "$HERE" stash push -u -m "argus --upgrade autostash" >/dev/null 2>&1 || true
+  fi
+
+  say "pulling latest …"
+  git -C "$HERE" pull --ff-only origin "$branch" \
+    || { err "fast-forward pull failed (branch diverged) — resolve manually with git"; exit 1; }
+
+  say "refreshing dependencies …"
+  # shellcheck source=/dev/null
+  source "$HERE/bootstrap.sh"; _argus_bootstrap "$HERE" || warn "dependency refresh reported problems"
+
+  systemctl --user daemon-reload 2>/dev/null || true
+  if systemctl --user is-enabled --quiet "$SERVICE.service" 2>/dev/null; then
+    say "restarting $SERVICE with the new version …"
+    systemctl --user restart "$SERVICE.service"
+    if systemctl --user is-active --quiet "$SERVICE.service"; then
+      say "✔ upgraded to ${remote_rev:0:7} and restarted → http://$HOST:$PORT"
+    else
+      err "service failed to restart — journalctl --user -u $SERVICE -e"; exit 1
+    fi
+  else
+    say "✔ upgraded to ${remote_rev:0:7}. Service not installed yet — run ./install.sh to set it up."
+  fi
   exit 0
 fi
 

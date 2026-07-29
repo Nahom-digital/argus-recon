@@ -48,6 +48,7 @@ function createGraph(canvas, data, opts) {
   // ---- view transform ----
   let k = 1, tx = 0, ty = 0;
   const hidden = new Set();               // hidden node types (legend)
+  let hostVisibleIds = null;              // null = all hosts; Set = only these ids
   let hover = null, selected = null, dragging = null, panning = false, locked = false;
   let alpha = 1, running = true, raf = null, started = false;
 
@@ -59,7 +60,11 @@ function createGraph(canvas, data, opts) {
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   }
 
-  function visible(n) { return !hidden.has(n.type); }
+  function visible(n) {
+    if (hidden.has(n.type)) return false;
+    if (hostVisibleIds && !hostVisibleIds.has(n.id)) return false;
+    return true;
+  }
 
   // ---- physics (grid-approximated repulsion + link springs + gravity) ----
   const CELL = 72;
@@ -312,6 +317,42 @@ function createGraph(canvas, data, opts) {
 
   function reheat() { alpha = 1; running = true; }
 
+  // ---- host filter (domain / subdomain) -----------------------------------
+  // Restrict the graph to one host's subtree: the Subdomain node and everything
+  // hanging off it (its endpoints, requests, fields, files, IPs, secrets),
+  // keeping the Domain node as an anchor. Other subdomains and their subtrees
+  // are hidden. `host` null/'' clears the filter and shows the whole graph.
+  function computeHostVisible(host) {
+    if (!host) return null;
+    const subNode = nodes.find(n => n.type === 'Subdomain' && n.label === host);
+    if (!subNode) return new Set();                 // unknown host -> hide all
+    const domNode = nodes.find(n => n.type === 'Domain');
+    const keep = new Set([subNode.id]);
+    if (domNode) keep.add(domNode.id);
+    const stack = [subNode.id];
+    while (stack.length) {
+      const id = stack.pop();
+      for (const nb of (adj.get(id) || [])) {
+        if (keep.has(nb)) continue;
+        const m = byId.get(nb);
+        if (!m) continue;
+        if (m.type === 'Domain') { keep.add(nb); continue; }          // anchor only
+        if (m.type === 'Subdomain' && nb !== subNode.id) continue;    // a sibling host (shared IP) — don't cross into it
+        keep.add(nb); stack.push(nb);
+      }
+    }
+    return keep;
+  }
+
+  function filterHost(host) {
+    hostVisibleIds = computeHostVisible(host);
+    if (selected && hostVisibleIds && !hostVisibleIds.has(selected.id)) {
+      selected = null; locked = false; if (card) card.classList.remove('show');
+    }
+    reheat();                       // re-cluster the now-smaller visible set
+    setTimeout(fit, 420);           // frame it once it has re-settled
+  }
+
   // ---- legend ----
   function buildLegend(elm) {
     if (!elm) return;
@@ -366,7 +407,7 @@ function createGraph(canvas, data, opts) {
   }
 
   return {
-    fit, reheat, buildLegend, activate,
+    fit, reheat, buildLegend, activate, filterHost,
     stats: data.stats,
     focusHost(host) {
       const n = nodes.find(x => x.type === 'Subdomain' && x.label === host);

@@ -132,7 +132,24 @@ Each scan writes `scans/{domain}_{timestamp}.json` and prints a summary.
 ./serve            # http://127.0.0.1:7666
 ```
 
-The server **registers itself as a single instance** (PID file). If it's already
+The server **registers itself as a single instance** (PID file).
+
+### Run it as an always-on service
+
+```bash
+./install.sh              # installs all deps + registers the 'argusscanner'
+                          # systemd user service (survives logout / reboot)
+./install.sh --upgrade    # pull the latest from GitHub, refresh deps, restart
+./install.sh --restart    # bounce the service
+./install.sh --uninstall  # remove the service
+```
+
+`install.sh` is fresh-server safe: it installs the base packages (python venv/pip,
+pipx, curl), the external recon tools, the Python venv, then starts the dashboard
+on http://127.0.0.1:7666 under systemd. Manage it directly with
+`systemctl --user status|restart|stop argusscanner` and follow logs with
+`journalctl --user -u argusscanner -f`.
+ If it's already
 running it prints the URL and exits instead of starting a second copy; if the port
 is held by another process it asks whether to free it or use another port.
 
@@ -151,9 +168,12 @@ is held by another process it asks whether to free it or use another port.
     nodes) **defer layout** behind an *Activate* button so the tab never freezes.
     The **⤢ expand** button hides the graph + table and opens a full-width detail
     report (DNS tables, historical-DNS expandables, infra, tech, secrets, files).
-  - *bottom*: every captured request; filter by scope / type / **status code** /
-    classification / search; expand a row for headers, response body, fields, the JS
-    call that fires it, and a decode affordance for encoded URLs/bodies.
+  - *bottom*: every captured request; filter by scope / **domain / subdomain** /
+    type / **status code** / classification / search; expand a row for headers,
+    response body, fields, the JS call that fires it, and a decode affordance for
+    encoded URLs/bodies. The **domain / subdomain** filter also drives the graph —
+    pick a host and the graph collapses to just that host's subtree (its endpoints,
+    requests, files, IPs and secrets), with the domain kept as an anchor.
 
 Visual style matches the claude.ai chat interface — warm flat surfaces, one clay
 accent, self-hosted Hanken Grotesk + IBM Plex Mono, a Tabler icon set, light/dark.
