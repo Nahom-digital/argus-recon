@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Argus Recon launcher — runs a scan through the project venv.
+#   ./argus example.com [--passive] [--deep] [--no-bbot] [--max-pages N] ...
+# On first run it creates the venv and installs requirements automatically.
+# Any main.py flag is passed straight through.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$here/bootstrap.sh"
+_argus_bootstrap "$here" || exit 1
+exec "$ARGUS_PY" "$here/main.py" "$@"

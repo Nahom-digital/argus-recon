@@ -1,0 +1,194 @@
+"""
+Deep DNS source (internal code "s").
+
+Pulls three things the passive engine and the local resolver cannot give on
+their own, gated behind an API key + the dashboard's "Deep" toggle:
+
+  * a much larger subdomain set,
+  * the *current* DNS record set (A / AAAA / MX / NS / SOA / TXT) with the
+    first-seen timestamp for each,
+  * the *historical* DNS timeline for each record type — previous IPs, previous
+    name servers, old MX, and when each change happened (first_seen / last_seen).
+
+Everything is best-effort: no key, a rate-limit, or a network error degrades to
+"nothing added" rather than raising. Records are normalised to a uniform shape:
+
+    {"value": str, "first_seen": str|None, "last_seen": str|None, "organization": str|None, ...}
+
+so the DNS panel in the dashboard renders one way regardless of record type.
+"""
+from __future__ import annotations
+
+import time
+
+from . import config
+from .schema import ScanResult
+from .util import get_logger, make_session
+
+log = get_logger("deepdns")
+
+CODE = config.SOURCE_CODES["securitytrails"]   # "s" — no tool name leaks downstream
+
+
+def available() -> bool:
+    return bool(config.SECURITYTRAILS_KEY)
+
+
+def _get(session, path: str) -> dict | None:
+    if not config.SECURITYTRAILS_KEY:
+        return None
+    url = f"{config.SECURITYTRAILS_BASE}{path}"
+    try:
+        resp = session.get(url, headers={"apikey": config.SECURITYTRAILS_KEY,
+                                         "Accept": "application/json"},
+                           timeout=config.HTTP_TIMEOUT)
+    except Exception as exc:
+        log.info(f"deep DNS request failed ({path}): {exc}")
+        return None
+    if resp.status_code == 429:
+        log.warning("deep DNS rate limit hit — backing off")
+        time.sleep(1.5)
+        return None
+    if resp.status_code == 401 or resp.status_code == 403:
+        log.warning("deep DNS key rejected (401/403) — check SECURITYTRAILS_KEY")
+        return None
+    if resp.status_code != 200:
+        log.info(f"deep DNS http {resp.status_code} for {path}")
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Normalisation
+# --------------------------------------------------------------------------- #
+def _norm_current(rtype: str, block: dict) -> list[dict]:
+    """Turn a current_dns block into uniform records (with first_seen)."""
+    out: list[dict] = []
+    first_seen = block.get("first_seen")
+    for v in block.get("values", []) or []:
+        rec: dict = {"value": None, "first_seen": first_seen, "last_seen": None}
+        if rtype in ("a", "aaaa"):
+            rec["value"] = v.get("ip") or v.get("ipv6")
+            rec["organization"] = v.get("ip_organization")
+        elif rtype == "mx":
+            rec["value"] = v.get("hostname")
+            rec["priority"] = v.get("priority")
+            rec["organization"] = v.get("hostname_organization")
+        elif rtype == "ns":
+            rec["value"] = v.get("nameserver")
+            rec["organization"] = v.get("nameserver_organization")
+        elif rtype == "soa":
+            rec["value"] = v.get("email")
+            rec["ttl"] = v.get("ttl")
+        elif rtype == "txt":
+            rec["value"] = v.get("value")
+        else:
+            rec["value"] = v.get("value") or v.get("ip") or v.get("hostname")
+        if rec["value"]:
+            out.append(rec)
+    return out
+
+
+def _norm_history(rtype: str, data: dict) -> list[dict]:
+    """Flatten the history timeline into per-value records with first/last seen."""
+    out: list[dict] = []
+    for rec in data.get("records", []) or []:
+        first_seen = rec.get("first_seen")
+        last_seen = rec.get("last_seen")
+        orgs = rec.get("organizations") or []
+        org = ", ".join(orgs) if isinstance(orgs, list) else str(orgs or "")
+        for v in rec.get("values", []) or []:
+            if isinstance(v, dict):
+                val = (v.get("ip") or v.get("ipv6") or v.get("nameserver")
+                       or v.get("hostname") or v.get("email") or v.get("value"))
+                extra = {k: v[k] for k in ("priority", "ttl") if v.get(k) is not None}
+            else:
+                val = str(v)
+                extra = {}
+            if not val:
+                continue
+            out.append({"value": val, "first_seen": first_seen,
+                        "last_seen": last_seen, "organization": org or None, **extra})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+def run(result: ScanResult, domain: str, *, history: bool = True) -> int:
+    """Enrich `result` with deep subdomains + current & historical DNS.
+    Returns the number of new subdomains added. No-op without a key."""
+    if not available():
+        log.info("deep DNS skipped (no key)")
+        return 0
+    t0 = time.time()
+    session = make_session()
+    added = 0
+
+    # 1. Subdomains -------------------------------------------------------- #
+    data = _get(session, f"/domain/{domain}/subdomains?children_only=false&include_inactive=true")
+    if data:
+        subs = data.get("subdomains", []) or []
+        result.dns["subdomain_count"] = data.get("subdomain_count", len(subs))
+        for prefix in subs:
+            host = f"{prefix}.{domain}".lower().strip(".")
+            before = host in result._subdomains          # type: ignore[attr-defined]
+            result.add_subdomain(host, source=CODE)
+            if not before:
+                added += 1
+        log.info(f"deep DNS: {len(subs)} subdomains ({added} new)")
+
+    # 2. Current DNS records + WHOIS -------------------------------------- #
+    details = _get(session, f"/domain/{domain}")
+    if details:
+        cur = details.get("current_dns", {}) or {}
+        for rtype in ("a", "aaaa", "mx", "ns", "soa", "txt"):
+            block = cur.get(rtype)
+            if isinstance(block, dict):
+                recs = _norm_current(rtype, block)
+                if recs:
+                    result.set_dns_records(rtype, recs, source=CODE)
+                    # A/AAAA current records are real infra — link them.
+                    if rtype in ("a", "aaaa"):
+                        sub = result.add_subdomain(domain)
+                        for r in recs:
+                            result._link_ip(sub, r["value"], source=CODE)  # type: ignore[attr-defined]
+
+    who = _get(session, f"/domain/{domain}/whois")
+    if who:
+        result.dns["whois"] = {
+            "registrar": who.get("registrarName") or who.get("registrar"),
+            "created": who.get("createdDate"),
+            "expires": who.get("expiresDate"),
+            "updated": who.get("updatedDate"),
+            "name_servers": who.get("nameServers"),
+            "contact_email": _first_email(who),
+        }
+
+    # 3. Historical DNS timeline ----------------------------------------- #
+    if history:
+        for rtype in config.DNS_HISTORY_TYPES:
+            hist = _get(session, f"/history/{domain}/dns/{rtype}")
+            if hist:
+                recs = _norm_history(rtype, hist)
+                if recs:
+                    result.set_dns_history(rtype, recs, source=CODE)
+        hcount = sum(len(v) for v in result.dns["history"].values())
+        log.info(f"deep DNS: {hcount} historical records across "
+                 f"{len(result.dns['history'])} record types")
+
+    result.mark_module("deepdns", "ok",
+                       note=f"{added} subdomains, "
+                            f"{sum(len(v) for v in result.dns['records'].values())} DNS records",
+                       duration=time.time() - t0)
+    return added
+
+
+def _first_email(who: dict) -> str | None:
+    for c in who.get("contacts", []) or []:
+        if isinstance(c, dict) and c.get("email"):
+            return c["email"]
+    return None

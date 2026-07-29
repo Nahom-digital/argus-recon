@@ -1,0 +1,325 @@
+"""
+Central configuration for Argus Recon.
+
+Everything tunable lives here: filesystem paths, network behaviour, the external
+tool commands each module shells out to, and the pattern libraries used by the
+field-intent classifier and the JS secret scanner. Modules import from here so
+there is a single place to adjust behaviour.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# --------------------------------------------------------------------------- #
+# Paths
+# --------------------------------------------------------------------------- #
+ROOT = Path(__file__).resolve().parent.parent
+SCANS_DIR = ROOT / "scans"
+WORDLISTS_DIR = ROOT / "wordlists"
+WEB_DIR = ROOT / "web"
+ENV_FILE = ROOT / ".env"
+
+SCANS_DIR.mkdir(exist_ok=True)
+WORDLISTS_DIR.mkdir(exist_ok=True)
+
+
+# --------------------------------------------------------------------------- #
+# .env — minimal loader (no external dependency). Keys already present in the
+# real environment win; the file only fills what is unset.
+# --------------------------------------------------------------------------- #
+def load_env(path: Path = ENV_FILE) -> dict:
+    values: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            values[key] = val
+            os.environ.setdefault(key, val)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return values
+
+
+def save_env_key(key: str, value: str, path: Path = ENV_FILE) -> None:
+    """Write/replace a single KEY=value line in .env, preserving the rest."""
+    value = (value or "").strip()
+    lines: list[str] = []
+    found = False
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    out: list[str] = []
+    for line in lines:
+        if line.strip().startswith(f"{key}=") or line.strip().startswith(f"{key} ="):
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(f"{key}={value}")
+    path.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+    os.environ[key] = value
+
+
+_ENV = load_env()
+
+# --------------------------------------------------------------------------- #
+# External tool commands (overridable via environment)
+# --------------------------------------------------------------------------- #
+BBOT_BIN = os.environ.get("ARGUS_BBOT", "bbot")
+WHATWEB_BIN = os.environ.get("ARGUS_WHATWEB", "whatweb")
+FFUF_BIN = os.environ.get("ARGUS_FFUF", "ffuf")
+FEROX_BIN = os.environ.get("ARGUS_FEROX", "feroxbuster")
+
+# --------------------------------------------------------------------------- #
+# Network behaviour
+# --------------------------------------------------------------------------- #
+USER_AGENT = os.environ.get(
+    "ARGUS_UA",
+    "Mozilla/5.0 (X11; Linux x86_64) ArgusRecon/1.0 (+https://localhost)",
+)
+HTTP_TIMEOUT = int(os.environ.get("ARGUS_HTTP_TIMEOUT", "12"))
+CRAWL_THREADS = int(os.environ.get("ARGUS_CRAWL_THREADS", "12"))
+CRAWL_MAX_PAGES = int(os.environ.get("ARGUS_CRAWL_MAX_PAGES", "600"))   # per subdomain safety cap
+CRAWL_MAX_DEPTH = int(os.environ.get("ARGUS_CRAWL_MAX_DEPTH", "6"))
+MAX_JS_BYTES = int(os.environ.get("ARGUS_MAX_JS_BYTES", "3000000"))     # skip huge bundles above this
+MAX_BODY_STORE = int(os.environ.get("ARGUS_MAX_BODY_STORE", "20000"))   # chars of response body kept in JSON
+
+VERIFY_TLS = os.environ.get("ARGUS_VERIFY_TLS", "0") == "1"             # recon targets often have bad certs
+
+# ipinfo.io token is optional; without one the free tier still returns core fields.
+IPINFO_TOKEN = os.environ.get("IPINFO_TOKEN", "").strip()
+
+# --------------------------------------------------------------------------- #
+# SecurityTrails — deep DNS / subdomain / historical-DNS source (module "s").
+# The key is read from the environment / .env (SECURITYTRAILS_KEY). Without a
+# key, "Deep" mode is unavailable and the tool relies on the local resolver +
+# the other passive sources only.
+# --------------------------------------------------------------------------- #
+SECURITYTRAILS_KEY = os.environ.get("SECURITYTRAILS_KEY", "").strip()
+SECURITYTRAILS_BASE = os.environ.get("SECURITYTRAILS_BASE",
+                                     "https://api.securitytrails.com/v1")
+# Historical DNS record types we pull the timeline for (deep mode).
+DNS_HISTORY_TYPES = ["a", "aaaa", "mx", "ns", "soa", "txt"]
+# Record types resolved locally (always, even without a key) for the DNS panel.
+DNS_RECORD_TYPES = ["A", "AAAA", "MX", "NS", "CNAME", "TXT", "SOA"]
+
+# --------------------------------------------------------------------------- #
+# Source codes — findings are tagged with a short code rather than the real tool
+# name so the dashboard / exported JSON do not disclose the toolchain. The real
+# names live only in the README. (own components keep readable names)
+# --------------------------------------------------------------------------- #
+SOURCE_CODES = {
+    "bbot": "b",            # subdomain / infra engine
+    "whatweb": "W",         # tech fingerprint
+    "ffuf": "f",            # content bruteforce
+    "securitytrails": "s",  # deep DNS / history
+    "crtsh": "c",           # certificate transparency
+    "ipinfo": "i",          # IP enrichment
+}
+# Human labels for the dashboard legend (still no real tool names).
+SOURCE_LABELS = {
+    "b": "passive enum",
+    "W": "fingerprint",
+    "f": "content brute",
+    "s": "deep DNS",
+    "c": "cert transparency",
+    "i": "IP enrichment",
+    "crawler": "crawler",
+    "js": "JS analysis",
+    "robots": "robots.txt",
+    "sitemap": "sitemap.xml",
+    "seed": "seed",
+    "input": "target input",
+    "dns": "DNS resolver",
+}
+
+# Graph: above this node count the dashboard defers physics until the user
+# activates it (module 6 in the fix list).
+GRAPH_LAZY_THRESHOLD = int(os.environ.get("ARGUS_GRAPH_LAZY", "500"))
+
+# --------------------------------------------------------------------------- #
+# Neo4j
+# --------------------------------------------------------------------------- #
+NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "argusrecon")
+NEO4J_DATABASE = os.environ.get("NEO4J_DATABASE", "neo4j")
+
+# --------------------------------------------------------------------------- #
+# Web dashboard
+# --------------------------------------------------------------------------- #
+WEB_HOST = os.environ.get("ARGUS_WEB_HOST", "127.0.0.1")
+WEB_PORT = int(os.environ.get("ARGUS_WEB_PORT", "7666"))
+
+# --------------------------------------------------------------------------- #
+# Bruteforce
+# --------------------------------------------------------------------------- #
+# Standard extension set the spec calls for, always appended to the generated list.
+BRUTE_EXTENSIONS = ["xml", "json", "conf", "bak", "env", "sql", "yml"]
+BRUTE_STATUS_MATCH = os.environ.get("ARGUS_BRUTE_STATUS", "200,204,301,302,307,401,403,405,500")
+BRUTE_THREADS = int(os.environ.get("ARGUS_BRUTE_THREADS", "40"))
+
+# A compact, stack-agnostic base list. Stack-specific paths are added at runtime
+# by bruteforce.generate_wordlist() based on the fingerprint.
+BASE_WORDS = [
+    "admin", "administrator", "login", "logout", "signin", "signup", "register",
+    "dashboard", "panel", "api", "api/v1", "api/v2", "graphql", "app", "assets",
+    "static", "public", "uploads", "upload", "files", "images", "img", "css", "js",
+    "config", "configuration", "settings", "setup", "install", "installer",
+    "backup", "backups", "old", "new", "test", "testing", "dev", "development",
+    "staging", "stage", "prod", "production", "tmp", "temp", "cache", "logs", "log",
+    "debug", "status", "health", "healthz", "metrics", "actuator", "server-status",
+    "phpinfo", "info", "server-info", "console", "shell", "cmd", "internal",
+    "private", "secret", "secrets", "hidden", "db", "database", "sql", "dump",
+    "user", "users", "account", "accounts", "profile", "auth", "oauth", "sso",
+    "token", "reset", "forgot", "password", "vendor", "node_modules", "cgi-bin",
+    "wp-admin", "wp-content", "wp-login.php", "robots.txt", "sitemap.xml",
+    ".git", ".git/config", ".git/HEAD", ".env", ".env.local", ".env.production",
+    ".svn", ".htaccess", ".htpasswd", ".DS_Store", "docker-compose.yml",
+    "Dockerfile", "package.json", "composer.json", "web.config", "crossdomain.xml",
+    ".well-known/security.txt", "swagger", "swagger.json", "swagger-ui",
+    "openapi.json", "api-docs", "readme", "README.md", "changelog", "CHANGELOG.md",
+]
+
+# Stack-specific paths keyed by tokens that may appear in the WhatWeb fingerprint.
+STACK_WORDLISTS = {
+    "wordpress": [
+        "wp-admin/", "wp-login.php", "wp-content/", "wp-includes/",
+        "wp-config.php", "wp-config.php.bak", "wp-json/", "wp-json/wp/v2/users",
+        "xmlrpc.php", "wp-cron.php", "wp-content/debug.log",
+        "wp-content/uploads/", "wp-admin/install.php", "wp-admin/setup-config.php",
+    ],
+    "drupal": [
+        "user/login", "admin/", "?q=user", "CHANGELOG.txt", "core/CHANGELOG.txt",
+        "sites/default/settings.php", "sites/default/files/", "update.php",
+        "install.php", "web.config", "core/install.php",
+    ],
+    "joomla": [
+        "administrator/", "configuration.php", "configuration.php-dist",
+        "administrator/manifests/files/joomla.xml", "htaccess.txt", "web.config.txt",
+    ],
+    "laravel": [
+        ".env", ".env.example", "storage/logs/laravel.log", "telescope/",
+        "_ignition/health-check", "artisan", "vendor/", "public/",
+        "storage/framework/", "config/app.php",
+    ],
+    "symfony": [
+        "app_dev.php", "_profiler/", "config.php", "app/config/parameters.yml",
+        ".env", "web/app_dev.php", "web/config.php", "bin/console",
+    ],
+    "django": [
+        "admin/", "static/admin/", "__debug__/", "api/", "media/",
+        "settings.py", ".env", "manage.py",
+    ],
+    "flask": [
+        "console", "debug", ".env", "config.py", "app.py", "static/",
+    ],
+    "rails": [
+        "rails/info/properties", "rails/info/routes", "config/database.yml",
+        "config/secrets.yml", "config/master.key", "assets/", ".env",
+    ],
+    "spring": [
+        "actuator", "actuator/health", "actuator/env", "actuator/mappings",
+        "actuator/heapdump", "actuator/beans", "actuator/httptrace",
+        "swagger-ui.html", "v2/api-docs", "v3/api-docs",
+    ],
+    "express": [
+        "api/", "package.json", ".env", "config.js", "server.js", "app.js",
+    ],
+    "nginx": ["nginx_status", "status", ".well-known/"],
+    "apache": ["server-status", "server-info", ".htaccess", ".htpasswd"],
+    "iis": ["web.config", "trace.axd", "elmah.axd", "iisstart.htm"],
+    "tomcat": ["manager/html", "host-manager/html", "examples/", "docs/"],
+    "php": ["phpinfo.php", "info.php", "test.php", "phpmyadmin/", "adminer.php"],
+    "jenkins": ["script", "asynchPeople/", "systemInfo", "credentials/"],
+    "gitlab": ["users/sign_in", "help", "api/v4/projects", "explore"],
+}
+
+# --------------------------------------------------------------------------- #
+# Field-intent classifier (module 8) — name substring -> (category, severity)
+# Order matters: the first matching pattern wins for a given field name.
+# --------------------------------------------------------------------------- #
+FIELD_PATTERNS = [
+    # (regex substring, category, human label, severity 1-3)
+    (r"pass(word|wd|phrase)?|pwd", "credentials", "Password", 3),
+    (r"^user(name|_?name|_?id)?$|^uname$|^login$|^acct$", "identity", "Username / login", 2),
+    (r"e?[-_]?mail\b|email", "pii", "Email address", 2),
+    (r"\botp\b|one[-_]?time|\btotp\b|\bmfa\b|2fa|verif(y|ication)_?code|\bpin\b", "otp", "OTP / MFA code", 3),
+    (r"api[-_]?key|apikey|client[-_]?secret|access[-_]?key|secret[-_]?key|private[-_]?key|\bsecret\b", "secret", "API key / secret", 3),
+    (r"csrf|xsrf|authenticity[-_]?token|nonce", "csrf", "CSRF token", 1),
+    (r"bearer|access[-_]?token|refresh[-_]?token|id[-_]?token|\bjwt\b|session|\bsid\b|auth[-_]?token", "session", "Session / auth token", 3),
+    (r"card[-_]?number|\bcvv\b|\bcvc\b|\bccv\b|credit[-_]?card|\bccnum\b|\biban\b|routing|account[-_]?number", "financial", "Payment data", 3),
+    (r"\bssn\b|social[-_]?security|passport|national[-_]?id|tax[-_]?id|\bdob\b|birth", "pii", "Sensitive PII", 3),
+    (r"phone|\btel\b|mobile|contact[-_]?number", "pii", "Phone number", 2),
+    (r"first[-_]?name|last[-_]?name|full[-_]?name|surname|address|street|city|zip|postal|country", "pii", "Personal detail", 1),
+    (r"redirect|return[-_]?(url|to)|\bnext\b|callback|continue|\bdest\b|goto|forward", "open-redirect", "Redirect target", 2),
+    (r"\bfile\b|filename|filepath|\bpath\b|upload|download|document|attachment", "file-op", "File / path operand", 2),
+    (r"is[-_]?admin|\brole\b|privilege|is[-_]?staff|superuser|\bdebug\b|\btest[-_]?mode\b", "privilege", "Privilege / debug flag", 3),
+    (r"(user|account|customer|order|invoice|obj(ect)?)[-_]?id$|^id$|^uid$|^gid$", "idor", "Object identifier", 2),
+    (r"^q$|search|query|keyword|term", "search", "Search input", 1),
+    (r"amount|price|qty|quantity|balance|total", "value", "Numeric value", 1),
+    (r"url|uri|link|endpoint|host|domain|server", "ssrf", "URL / host operand", 2),
+]
+
+CLASSIFICATION_SEVERITY = {1: "low", 2: "medium", 3: "high"}
+
+# --------------------------------------------------------------------------- #
+# Secret scanner patterns for JS (module 5). (name, regex, severity)
+# --------------------------------------------------------------------------- #
+SECRET_PATTERNS = [
+    ("AWS Access Key ID", r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[0-9A-Z]{16}\b", "high"),
+    ("AWS Secret Access Key", r"(?i)aws.{0,24}?['\"][0-9a-zA-Z/+]{40}['\"]", "high"),
+    ("Google API Key", r"\bAIza[0-9A-Za-z\-_]{35}\b", "high"),
+    ("Google OAuth Client ID", r"\b[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com\b", "medium"),
+    ("Firebase URL", r"\bhttps://[a-z0-9-]+\.firebaseio\.com\b", "medium"),
+    ("Slack Token", r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b", "high"),
+    ("Slack Webhook", r"https://hooks\.slack\.com/services/T[0-9A-Za-z_]+/B[0-9A-Za-z_]+/[0-9A-Za-z]+", "high"),
+    ("Stripe Secret Key", r"\bsk_live_[0-9a-zA-Z]{24,}\b", "high"),
+    ("Stripe Publishable Key", r"\bpk_live_[0-9a-zA-Z]{24,}\b", "low"),
+    ("Stripe Restricted Key", r"\brk_live_[0-9a-zA-Z]{24,}\b", "high"),
+    ("GitHub Token", r"\bgh[pousr]_[0-9A-Za-z]{36,}\b", "high"),
+    ("GitLab PAT", r"\bglpat-[0-9A-Za-z_-]{20,}\b", "high"),
+    ("SendGrid API Key", r"\bSG\.[0-9A-Za-z_-]{22}\.[0-9A-Za-z_-]{43}\b", "high"),
+    ("Twilio API Key", r"\bSK[0-9a-fA-F]{32}\b", "high"),
+    ("Mailgun API Key", r"\bkey-[0-9a-zA-Z]{32}\b", "high"),
+    ("Square Access Token", r"\bsq0atp-[0-9A-Za-z\-_]{22}\b", "high"),
+    ("JSON Web Token", r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", "medium"),
+    ("Private Key Block", r"-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP|PRIVATE) (?:PRIVATE )?KEY-----", "high"),
+    ("Basic Auth in URL", r"\bhttps?://[^/\s:@]+:[^/\s:@]+@[^/\s]+", "high"),
+    # --- additional providers (module 8: strengthen coverage) --------------- #
+    ("GitHub OAuth Secret", r"(?i)github.{0,20}?['\"][0-9a-f]{40}['\"]", "high"),
+    ("GitHub App Token", r"\b(?:ghs|ghu)_[0-9A-Za-z]{36,}\b", "high"),
+    ("Heroku API Key", r"(?i)heroku.{0,20}?['\"][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}['\"]", "high"),
+    ("Mapbox Token", r"\bpk\.eyJ[0-9A-Za-z_-]{20,}\.[0-9A-Za-z_-]{20,}\b", "medium"),
+    ("Algolia API Key", r"(?i)algolia.{0,20}?['\"][a-z0-9]{32}['\"]", "medium"),
+    ("Facebook Access Token", r"\bEAACEdEose0cBA[0-9A-Za-z]+\b", "high"),
+    ("Facebook App Secret", r"(?i)fb.{0,15}?(?:secret|app).{0,15}?['\"][0-9a-f]{32}['\"]", "high"),
+    ("Twitter Bearer Token", r"\bAAAAAAAAAA[0-9A-Za-z%]{40,}\b", "medium"),
+    ("Cloudinary URL", r"\bcloudinary://[0-9]{10,}:[0-9A-Za-z_-]+@[0-9a-z-]+\b", "high"),
+    ("PayPal Braintree Token", r"\baccess_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}\b", "high"),
+    ("Discord Bot Token", r"\b[MNO][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27}\b", "high"),
+    ("Discord Webhook", r"https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]+/[0-9A-Za-z_-]+", "medium"),
+    ("Telegram Bot Token", r"\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\b", "high"),
+    ("OpenAI API Key", r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,}\b", "high"),
+    ("Anthropic API Key", r"\bsk-ant-[A-Za-z0-9_-]{20,}\b", "high"),
+    ("npm Access Token", r"\bnpm_[0-9A-Za-z]{36}\b", "high"),
+    ("PyPI Upload Token", r"\bpypi-AgEIcHlwaS[0-9A-Za-z_-]{50,}\b", "high"),
+    ("Postgres/MySQL URI", r"\b(?:postgres(?:ql)?|mysql)://[^/\s:@]+:[^/\s:@]+@[^/\s]+", "high"),
+    ("MongoDB URI", r"\bmongodb(?:\+srv)?://[^/\s:@]+:[^/\s:@]+@[^/\s]+", "high"),
+    ("Redis URI", r"\bredis://[^/\s:@]*:[^/\s:@]+@[^/\s]+", "high"),
+    ("AMQP URI", r"\bamqps?://[^/\s:@]+:[^/\s:@]+@[^/\s]+", "high"),
+    ("Authorization Bearer", r"(?i)authorization['\"]?\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9._~+/=-]{16,}", "medium"),
+    ("Google Service Account", r'"type"\s*:\s*"service_account"', "high"),
+    ("Generic Secret Assignment",
+     r"(?i)\b(?:api[_-]?key|apikey|secret|client[_-]?secret|access[_-]?token|auth[_-]?token|password|passwd|token|private[_-]?key)\b\s*[:=]\s*['\"][^'\"]{8,80}['\"]",
+     "medium"),
+]

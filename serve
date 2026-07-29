@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Argus Recon dashboard — serves the local web UI on http://127.0.0.1:7666
+# On first run it creates the venv and installs requirements automatically.
+# The server registers a PID file and won't start a second instance; if the
+# port is taken by something else it asks whether to free it or use another.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$here/bootstrap.sh"
+_argus_bootstrap "$here" || exit 1
+cd "$here/web"
+exec "$ARGUS_PY" server.py "$@"

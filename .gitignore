@@ -1,0 +1,8 @@
+.venv/
+.impeccable/
+__pycache__/
+*.pyc
+scans/*.json
+scans/.jobs/
+!scans/.gitkeep
+.env

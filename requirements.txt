@@ -1,0 +1,16 @@
+# Argus Recon — Python dependencies (install into a venv)
+#   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+#
+# External CLI tools are NOT pip packages — install separately (see README):
+#   bbot (pipx install bbot), whatweb, ffuf (or feroxbuster), and optionally Neo4j.
+
+flask>=3.0
+flask-cors>=5.0
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+dnspython>=2.6
+jsbeautifier>=1.15
+python-whois>=0.9
+tldextract>=5.1
+neo4j>=5.0

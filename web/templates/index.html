@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Argus Recon — scans{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/home.css') }}">{% endblock %}
+
+{% block content %}
+<div class="home">
+  <div class="home-head">
+    <div class="lede">
+      <h1>Recon scans</h1>
+      <p>Single-domain deep reconnaissance. Each scan maps subdomains, infrastructure,
+         tech stack, every endpoint and request, discovered files, and classified sensitive fields.</p>
+    </div>
+  </div>
+
+  <form class="newscan" id="newscan" autocomplete="off">
+    <input class="input" id="domainInput" placeholder="target-domain.com" spellcheck="false" aria-label="Target domain">
+    <div class="opts">
+      <label class="chk" id="deepChk" title="Extra subdomains + full DNS records + historical DNS"><input type="checkbox" id="optDeep"> deep DNS</label>
+      <label class="chk"><input type="checkbox" id="optPassive"> passive</label>
+      <label class="chk"><input type="checkbox" id="optNoGraph"> skip graph</label>
+    </div>
+    <button class="btn primary" type="submit" id="scanBtn">
+      <svg class="ic"><use href="#i-radar-2"></use></svg> Run scan
+    </button>
+  </form>
+
+  <div class="statusbar" id="statusbar"></div>
+
+  <!-- first-run / settings: deep-DNS key -->
+  <div class="modal-scrim" id="keyModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="keyTitle">
+      <div class="modal-head"><svg class="ic"><use href="#i-settings"></use></svg>
+        <h3 id="keyTitle">Enable deep DNS</h3></div>
+      <p class="modal-body">Deep DNS pulls a larger subdomain set plus full and historical DNS
+        records. Paste your API key to enable it, or skip to run without it (deep DNS stays locked).
+        The key is stored locally in <code>.env</code> and never leaves this machine.</p>
+      <input class="input" id="keyInput" type="password" placeholder="paste API key" spellcheck="false" autocomplete="off">
+      <div class="modal-actions">
+        <button class="btn ghost" id="keySkip">Skip for now</button>
+        <button class="btn primary" id="keySave"><svg class="ic"><use href="#i-key"></use></svg> Save &amp; enable</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="jobsWrap"></div>
+
+  <div class="section-label">Scan library</div>
+  <div id="scanList"><div class="scan-list">
+    <div class="scan-row"><div class="id"><div class="skel" style="height:18px;width:180px"></div>
+      <div class="skel" style="height:11px;width:240px;margin-top:8px"></div></div></div>
+  </div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='js/home.js') }}"></script>{% endblock %}

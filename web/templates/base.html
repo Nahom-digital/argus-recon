@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Argus Recon{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('static', filename='icons/favicon.svg') }}" type="image/svg+xml">
+  <script>
+    // set theme before paint to avoid a flash
+    (function(){try{var t=localStorage.getItem('argus-theme');
+      if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
+  </script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  {{ sprite }}
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('index') }}">
+      <span class="mark"><svg class="ic"><use href="#i-radar-2"></use></svg></span>
+      Argus Recon <small>deep recon</small>
+    </a>
+    {% block crumbs %}{% endblock %}
+    <div class="spacer"></div>
+    {% block topbar_actions %}{% endblock %}
+    <button class="btn icon ghost theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
+      <svg class="ic sun"><use href="#i-sun"></use></svg>
+      <svg class="ic moon"><use href="#i-moon"></use></svg>
+    </button>
+  </header>
+  <main id="app">{% block content %}{% endblock %}</main>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

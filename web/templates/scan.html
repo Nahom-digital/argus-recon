@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Argus Recon — {{ scan_id }}{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/scan.css') }}">{% endblock %}
+
+{% block crumbs %}
+<nav class="crumbs">
+  <a href="{{ url_for('index') }}">scans</a>
+  <svg class="ic" style="width:13px;height:13px"><use href="#i-chevron-right"></use></svg>
+  <span class="cur" id="crumbDomain">{{ scan_id }}</span>
+</nav>
+{% endblock %}
+
+{% block topbar_actions %}
+<a class="btn sm ghost" id="rawLink" href="{{ url_for('api_scan', scan_id=scan_id) }}" target="_blank" rel="noopener">
+  <svg class="ic"><use href="#i-braces"></use></svg> JSON
+</a>
+{% endblock %}
+
+{% block content %}
+<div class="scan-layout" data-scan-id="{{ scan_id }}">
+
+  <!-- LEFT PANEL -->
+  <aside class="side" id="side">
+    <div class="side-sec" data-sec="overview">
+      <button class="sh"><svg class="ic lead"><use href="#i-radar-2"></use></svg>
+        <h3>Overview</h3><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
+      <div class="sbody" id="ovBody"></div>
+    </div>
+    <div class="side-sec" data-sec="subdomains">
+      <button class="sh"><svg class="ic lead"><use href="#i-world"></use></svg>
+        <h3>Subdomains</h3><span class="count" id="cSubs">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
+      <div class="sbody"><div class="slist" id="subList"></div></div>
+    </div>
+    <div class="side-sec" data-sec="infra">
+      <button class="sh"><svg class="ic lead"><use href="#i-server-2"></use></svg>
+        <h3>Infrastructure</h3><span class="count" id="cIps">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
+      <div class="sbody" id="ipList"></div>
+    </div>
+    <div class="side-sec collapsed" data-sec="dns">
+      <button class="sh"><svg class="ic lead"><use href="#i-network"></use></svg>
+        <h3>DNS</h3><span class="count" id="cDns">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
+      <div class="sbody" id="dnsBody"></div>
+    </div>
+    <div class="side-sec" data-sec="tech">
+      <button class="sh"><svg class="ic lead"><use href="#i-fingerprint"></use></svg>
+        <h3>Tech stack</h3><span class="count" id="cTech">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
+      <div class="sbody"><div class="techwrap" id="techList"></div></div>
+    </div>
+    <div class="side-sec" data-sec="secrets">
+      <button class="sh"><svg class="ic lead"><use href="#i-key"></use></svg>
+        <h3>Secrets</h3><span class="count" id="cSecrets">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
+      <div class="sbody" id="secretList"></div>
+    </div>
+    <div class="side-sec collapsed" data-sec="files">
+      <button class="sh"><svg class="ic lead"><use href="#i-file-code"></use></svg>
+        <h3>Discovered files</h3><span class="count" id="cFiles">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
+      <div class="sbody" id="fileList"></div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <section class="main">
+    <!-- GRAPH -->
+    <div class="graph-wrap" id="graphWrap">
+      <canvas id="graph"></canvas>
+      <div class="graph-overlay">
+        <div class="g-source">
+          <svg class="ic" style="width:14px;height:14px;color:var(--muted)"><use href="#i-topology-star-3"></use></svg>
+          <span class="src-badge" id="graphSource">graph</span>
+        </div>
+        <div class="g-controls">
+          <button class="btn icon sm" id="gFit" title="Fit to view"><svg class="ic"><use href="#i-chart-dots-3"></use></svg></button>
+          <button class="btn icon sm" id="gReheat" title="Re-run layout"><svg class="ic"><use href="#i-refresh"></use></svg></button>
+          <button class="btn icon sm" id="gExpand" title="Expand detail view"><svg class="ic"><use href="#i-arrows-maximize"></use></svg></button>
+        </div>
+        <div class="legend" id="legend"></div>
+        <div class="node-card" id="nodeCard"></div>
+      </div>
+    </div>
+
+    <!-- REQUESTS TABLE -->
+    <div class="table-wrap">
+      <div class="tbar">
+        <div class="tsearch">
+          <svg class="ic"><use href="#i-search"></use></svg>
+          <input class="input" id="tSearch" placeholder="filter url, method, field…" spellcheck="false">
+        </div>
+        <div class="fchip on" data-scope="all" id="scopeToggle">
+          <svg class="ic" style="width:13px;height:13px"><use href="#i-eye"></use></svg><span id="scopeLabel">in-scope</span>
+        </div>
+        <select class="input" id="typeFilter" aria-label="Type filter">
+          <option value="">all types</option>
+          <option value="page">page</option>
+          <option value="link">link</option>
+          <option value="form">form</option>
+          <option value="xhr">xhr / fetch</option>
+          <option value="js">js</option>
+          <option value="resource">resource</option>
+        </select>
+        <select class="input" id="statusFilter" aria-label="Status filter">
+          <option value="">all status</option>
+        </select>
+        <div class="fchip" data-cls="1" id="clsToggle">
+          <svg class="ic" style="width:13px;height:13px"><use href="#i-shield-half-filled"></use></svg>classified only
+        </div>
+        <div class="tcount" id="tCount"></div>
+      </div>
+      <div class="thead">
+        <span>Method</span><span>URL</span><span>Type</span><span>Classification</span><span style="text-align:right">Status</span>
+      </div>
+      <div class="tbody" id="tBody"></div>
+    </div>
+  </section>
+
+  <!-- FULL-WIDTH DETAIL VIEW (toggled from the graph's expand button) -->
+  <section class="detail-view" id="detailView" hidden></section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/graph.js') }}"></script>
+<script src="{{ url_for('static', filename='js/scan.js') }}"></script>
+{% endblock %}
