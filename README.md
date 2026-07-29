@@ -160,20 +160,31 @@ is held by another process it asks whether to free it or use another port.
 - **Scan view**
   - *left*: subdomains (status + tech + IP + **source**), infrastructure (each IP →
     which subdomains + source), **DNS** (A/AAAA/MX/NS/CNAME/TXT/SOA + history + WHOIS),
-    tech stack (→ which subdomains), secrets (+ which source found each), discovered
-    **files** (expand for source + request + response), module run log
+    **tech stack** (each fingerprint → the subdomains it was detected on *and* the
+    IPs those hosts resolve to — every chip filters), secrets (+ which source found
+    each), discovered **files** (expand for source + request + response), module run log
   - *center*: interactive force-directed graph. **Click a node to lock it** — a rich
     card shows every attribute + source, with a **decode** button for any base64 /
-    JWT / URL-encoded value; the card stays until you press ×. Large graphs (>500
-    nodes) **defer layout** behind an *Activate* button so the tab never freezes.
+    JWT / URL-encoded value; the card stays until you press ×. Large graphs
+    **defer layout** behind an *Activate* button so the tab never freezes.
     The **⤢ expand** button hides the graph + table and opens a full-width detail
-    report (DNS tables, historical-DNS expandables, infra, tech, secrets, files).
+    report — DNS tables, historical-DNS expandables, subdomains, infra, tech,
+    secrets, files — **one table per row, each the full width of the page**, so no
+    data set has to be read through a horizontal scrollbar.
   - *bottom*: every captured request; filter by scope / **domain / subdomain** /
-    type / **status code** / classification / search; expand a row for headers,
-    response body, fields, the JS call that fires it, and a decode affordance for
-    encoded URLs/bodies. The **domain / subdomain** filter also drives the graph —
-    pick a host and the graph collapses to just that host's subtree (its endpoints,
-    requests, files, IPs and secrets), with the domain kept as an anchor.
+    **IP** / type / **status code** / classification / search; expand a row for
+    headers, response body, fields, the JS call that fires it, and a decode
+    affordance for encoded URLs/bodies. Host and IP filters drive the graph too:
+    a host collapses it to that host's subtree, an IP to every host on that address,
+    with the domain kept as an anchor.
+
+  **Graph detail layers.** `Endpoint`, `Request`, `Field`, `JS`, `File` and
+  `External` are the bulk of a scan — thousands of nodes that only mean anything
+  inside one host. They stay hidden, and their legend entry shows a **lock**,
+  until a **specific subdomain** is selected; the legend still reports their real
+  totals, so the true size of the attack surface is visible the whole time. Pick a
+  host and those layers unlock, land around it, and the view frames itself. "All
+  hosts" (or an IP filter, which can span several hosts) keeps them locked.
 
 Visual style matches the claude.ai chat interface — warm flat surfaces, one clay
 accent, self-hosted Hanken Grotesk + IBM Plex Mono, a Tabler icon set, light/dark.

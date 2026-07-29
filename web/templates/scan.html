@@ -88,8 +88,11 @@
         <div class="fchip on" data-scope="all" id="scopeToggle">
           <svg class="ic" style="width:13px;height:13px"><use href="#i-eye"></use></svg><span id="scopeLabel">in-scope</span>
         </div>
-        <select class="input" id="hostFilter" aria-label="Domain / subdomain filter" title="Filter list and graph by domain / subdomain">
+        <select class="input" id="hostFilter" aria-label="Domain / subdomain filter" title="Filter list and graph by domain / subdomain — also unlocks endpoints, files and fields in the graph">
           <option value="">all hosts</option>
+        </select>
+        <select class="input" id="ipFilter" aria-label="IP filter" title="Filter list and graph by resolved IP">
+          <option value="">all IPs</option>
         </select>
         <select class="input" id="typeFilter" aria-label="Type filter">
           <option value="">all types</option>

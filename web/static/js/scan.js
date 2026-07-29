@@ -6,7 +6,12 @@
 const ROW_CAP = 1500;
 const GRAPH_LAZY = 500;              // above this, defer physics until activated
 let SCAN = null, GRAPH = null, detailMode = false;
-const F = { search: '', type: '', status: '', scope: 'in', classifiedOnly: false, host: null };
+const F = { search: '', type: '', status: '', scope: 'in', classifiedOnly: false, host: null, ip: null };
+
+/* IP <-> host index, built once per scan from both directions (a subdomain
+   lists its IPs, an IP record lists the hosts that resolve to it). */
+const IP_HOSTS = new Map();          // ip   -> Set(host)
+const HOST_IPS = new Map();          // host -> Set(ip)
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -20,9 +25,11 @@ async function init() {
       getJSON(`/api/scan/${encodeURIComponent(id)}/graph`).catch(() => null),
     ]);
     SCAN = scan;
+    buildIpIndex(scan);
     renderPanel(scan);
     buildStatusFilter();
     buildHostFilter();
+    buildIpFilter();
     renderTable();
     wireTableControls();
     if (graph) initGraph(graph);
@@ -30,6 +37,26 @@ async function init() {
     document.querySelector('.main').innerHTML =
       `<div class="empty" style="margin:auto">${icon('alert-triangle')}<h4>Could not load scan</h4><p>${esc(e.message)}</p></div>`;
   }
+}
+
+function buildIpIndex(s) {
+  IP_HOSTS.clear(); HOST_IPS.clear();
+  const link = (ip, host) => {
+    if (!ip || !host) return;
+    if (!IP_HOSTS.has(ip)) IP_HOSTS.set(ip, new Set());
+    IP_HOSTS.get(ip).add(host);
+    if (!HOST_IPS.has(host)) HOST_IPS.set(host, new Set());
+    HOST_IPS.get(host).add(ip);
+  };
+  (s.subdomains || []).forEach(sd => (sd.ips || []).forEach(ip => link(ip, sd.host)));
+  ((s.infra && s.infra.ips) || []).forEach(r => (r.subdomains || []).forEach(h => link(r.ip, h)));
+}
+const hostsOfIp = ip => [...(IP_HOSTS.get(ip) || [])].sort();
+/* every IP behind a set of hosts, de-duplicated (used by the tech stack) */
+function ipsOfHosts(hosts) {
+  const out = new Set();
+  hosts.forEach(h => (HOST_IPS.get(h) || new Set()).forEach(ip => out.add(ip)));
+  return [...out].sort();
 }
 
 /* ---- left panel ----------------------------------------------------------- */
@@ -111,9 +138,9 @@ function ipCard(ip) {
   const hostList = hosts.length ? `<div class="ip-hosts">${hosts.slice(0, 10).map(h =>
     `<span class="chip-host" data-host="${esc(h)}" title="${esc(h)}">${esc(h)}</span>`).join('')}${hosts.length > 10 ? `<span class="faint" style="font-size:11px;align-self:center">+${hosts.length - 10}</span>` : ''}</div>` : '';
   const srcs = (ip.sources && ip.sources.length)
-    ? `<div class="ip-src">${ip.sources.map(sc => `<span class="src-chip mini" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`).join('')}</div>` : '';
-  return `<div class="ipcard">
-    <div class="ipaddr">${icon('server-2')} ${esc(ip.ip)}${srcs}</div>
+    ? `<span class="ip-src">${ip.sources.map(sc => `<span class="src-chip mini" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`).join('')}</span>` : '';
+  return `<div class="ipcard" data-ip="${esc(ip.ip)}">
+    <button class="ipaddr" data-ip="${esc(ip.ip)}" title="filter list and graph by ${esc(ip.ip)}">${icon('server-2')} ${esc(ip.ip)}${srcs}</button>
     ${ip.org ? `<div class="iporg">${esc(ip.org)}</div>` : ''}
     <div class="ipmeta">${meta.map(x => `<span>${x}</span>`).join('<span class="faint">·</span>')}
       <span class="faint">·</span><span>${hosts.length} host${hosts.length === 1 ? '' : 's'}</span></div>
@@ -121,17 +148,32 @@ function ipCard(ip) {
   </div>`;
 }
 
-/* Tech: each fingerprint -> which subdomains it was seen on (item 4) */
+/* Tech: each fingerprint -> the subdomains it was seen on AND the IPs those
+   hosts resolve to, so a stack can be traced to the box serving it. Chips are
+   click-to-filter (host chip -> host filter, IP chip -> IP filter). */
 function renderTech(subs) {
   const map = {};
   subs.forEach(sd => (sd.tech || []).forEach(t => { (map[t] = map[t] || []).push(sd.host); }));
   const entries = Object.entries(map).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
   setCount('cTech', entries.length);
-  document.getElementById('techList').innerHTML = entries.map(([t, hosts]) =>
-    `<div class="techrow"><span class="tag mono">${esc(t)}</span>
-      <span class="tech-hosts">${hosts.slice(0, 3).map(h =>
-      `<span class="chip-host" data-host="${esc(h)}" title="${esc(h)}">${esc(h)}</span>`).join('')}${hosts.length > 3 ? `<span class="faint" style="font-size:11px">+${hosts.length - 3}</span>` : ''}</span>
-    </div>`).join('') || emptyMini('no fingerprints');
+  document.getElementById('techList').innerHTML = entries.map(([t, hosts]) => {
+    const ips = ipsOfHosts(hosts);
+    return `<div class="techrow">
+      <div class="th"><span class="tag mono">${esc(t)}</span>
+        <span class="tmeta faint">${hosts.length} host${hosts.length === 1 ? '' : 's'}${
+      ips.length ? ` · ${ips.length} IP${ips.length === 1 ? '' : 's'}` : ''}</span></div>
+      <div class="tech-hosts">${chipRow(hosts, 4, h =>
+      `<span class="chip-host" data-host="${esc(h)}" title="filter by ${esc(h)}">${esc(h)}</span>`)}</div>
+      ${ips.length ? `<div class="tech-ips">${chipRow(ips, 4, ip =>
+      `<span class="chip-ip" data-ip="${esc(ip)}" title="filter by ${esc(ip)}">${icon('server-2')}${esc(ip)}</span>`)}</div>` : ''}
+    </div>`;
+  }).join('') || emptyMini('no fingerprints');
+}
+
+/* first `n` items rendered by `f`, plus a "+N" remainder marker */
+function chipRow(items, n, f) {
+  return items.slice(0, n).map(f).join('') +
+    (items.length > n ? `<span class="faint" style="font-size:11px;align-self:center">+${items.length - n}</span>` : '');
 }
 
 /* DNS panel: current records grouped by type + a compact history preview + WHOIS */
@@ -255,12 +297,14 @@ function short(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + 
 function emptyMini(t) { return `<div class="muted" style="padding:8px 10px;font-size:12px">${esc(t)}</div>`; }
 function setCount(id, n) { const e = document.getElementById(id); if (e) e.textContent = fmtNum(n); }
 
-/* wire clickable host chips + file rows after each panel render */
+/* wire clickable host / IP chips + file rows after each panel render */
 function wirePanelInteractions() {
   document.querySelectorAll('.sitem[data-host]').forEach(el =>
-    el.addEventListener('click', () => setHostFilter(el.dataset.host, el)));
+    el.addEventListener('click', () => setHostFilter(el.dataset.host)));
   document.querySelectorAll('.chip-host[data-host]').forEach(el =>
-    el.addEventListener('click', (e) => { e.stopPropagation(); setHostFilter(el.dataset.host, null); }));
+    el.addEventListener('click', (e) => { e.stopPropagation(); setHostFilter(el.dataset.host); }));
+  document.querySelectorAll('.chip-ip[data-ip], .ipaddr[data-ip]').forEach(el =>
+    el.addEventListener('click', (e) => { e.stopPropagation(); setIpFilter(el.dataset.ip); }));
   document.querySelectorAll('.frow').forEach(r => {
     r.querySelector('.fsummary').addEventListener('click', () => toggleFile(r));
   });
@@ -317,6 +361,7 @@ function filtered() {
     if (!matchType(e.type)) return false;
     if (!matchStatus(e.status)) return false;
     if (F.host && e.host !== F.host) return false;
+    if (F.ip && !(IP_HOSTS.get(F.ip) || new Set()).has(e.host)) return false;
     if (q) {
       const hay = (e.url + ' ' + e.method + ' ' + (e.sources || []).join(' ') + ' ' + (e.fields || []).map(f => f.name).join(' ')).toLowerCase();
       if (!hay.includes(q)) return false;
@@ -353,6 +398,28 @@ function buildHostFilter() {
   hosts.forEach(h => opts.push(
     `<option value="${esc(h)}">${esc(h)}${h === domain ? ' (apex)' : ''}</option>`));
   sel.innerHTML = opts.join('');
+}
+
+/* IP filter — every resolved IP in this scan, busiest first, labelled with how
+   many hosts sit on it and who owns it. Selecting one narrows the request list
+   and the graph to everything served from that address. */
+function buildIpFilter() {
+  const sel = document.getElementById('ipFilter');
+  if (!sel) return;
+  const recs = ((SCAN.infra && SCAN.infra.ips) || []).slice();
+  // any IP seen on a subdomain but missing an infra record still gets an entry
+  const known = new Set(recs.map(r => r.ip));
+  IP_HOSTS.forEach((_, ip) => { if (!known.has(ip)) recs.push({ ip }); });
+  recs.sort((a, b) => hostsOfIp(b.ip).length - hostsOfIp(a.ip).length || a.ip.localeCompare(b.ip));
+  const opts = ['<option value="">all IPs</option>'];
+  recs.forEach(r => {
+    const n = hostsOfIp(r.ip).length;
+    const org = (r.org || '').split(/[,(]/)[0].trim();
+    const label = `${r.ip}${n ? ` · ${n} host${n === 1 ? '' : 's'}` : ''}${org ? ` · ${org}` : ''}`;
+    opts.push(`<option value="${esc(r.ip)}">${esc(label)}</option>`);
+  });
+  sel.innerHTML = opts.join('');
+  sel.disabled = recs.length === 0;
 }
 
 function renderTable() {
@@ -476,7 +543,10 @@ function wireTableControls() {
   document.getElementById('statusFilter').addEventListener('change', e => { F.status = e.target.value; renderTable(); });
 
   const host = document.getElementById('hostFilter');
-  if (host) host.addEventListener('change', e => setHostFilter(e.target.value, null));
+  if (host) host.addEventListener('change', e => setHostFilter(e.target.value));
+
+  const ip = document.getElementById('ipFilter');
+  if (ip) ip.addEventListener('change', e => setIpFilter(e.target.value));
 
   const scope = document.getElementById('scopeToggle');
   scope.addEventListener('click', () => {
@@ -498,19 +568,44 @@ function wireTableControls() {
   if (exp) exp.addEventListener('click', toggleDetailMode);
 }
 
-/* Central host filter — drives the request list AND the graph.
-   opts.filterGraph=false lets a graph node click sync the list/dropdown
-   without yanking the graph layout out from under the click. */
-function setHostFilter(host, el, opts) {
-  opts = opts || {};
-  const same = F.host === host;
-  F.host = (same || !host) ? null : host;
-  const sel = document.getElementById('hostFilter');
-  if (sel) sel.value = F.host || '';
+/* Central host filter — drives the request list AND the graph. Clicking the
+   same host again clears it. Selecting one host is also what unlocks the
+   graph's endpoint / file / field layers. */
+function setHostFilter(host) {
+  F.host = (F.host === host || !host) ? null : host;
+  if (F.host) F.ip = null;             // host is the narrower of the two
+  syncFilterUI();
+  renderTable();
+  syncGraphFilter();
+}
+
+/* IP filter — same contract, scoped to every host resolving to that address. */
+function setIpFilter(ip) {
+  F.ip = (F.ip === ip || !ip) ? null : ip;
+  if (F.ip) F.host = null;
+  syncFilterUI();
+  renderTable();
+  syncGraphFilter();
+}
+
+/* keep the dropdowns and the left-panel selection state in step with F */
+function syncFilterUI() {
+  const hs = document.getElementById('hostFilter');
+  if (hs) hs.value = F.host || '';
+  const is = document.getElementById('ipFilter');
+  if (is) is.value = F.ip || '';
   document.querySelectorAll('.sitem').forEach(s =>
     s.classList.toggle('active', !!F.host && s.dataset.host === F.host));
-  renderTable();
-  if (GRAPH && opts.filterGraph !== false) GRAPH.filterHost(F.host);
+  document.querySelectorAll('.ipcard').forEach(c =>
+    c.classList.toggle('active', !!F.ip && c.dataset.ip === F.ip));
+}
+
+/* Graph scope: one host -> that subtree with detail unlocked; one IP -> every
+   host on it, detail still locked (only a single subdomain unlocks it). */
+function syncGraphFilter() {
+  if (!GRAPH) return;
+  const hosts = F.host ? [F.host] : F.ip ? hostsOfIp(F.ip) : null;
+  GRAPH.setFilter({ hosts, detail: !!F.host });
 }
 
 /* ---- side sections collapse ---------------------------------------------- */
@@ -535,35 +630,48 @@ function toggleDetailMode() {
   }
 }
 
+/* Every table gets the full width of the page and its own row — nothing sits
+   side by side, so no data set has to be read through a horizontal scrollbar. */
 function renderDetail() {
   const dv = document.getElementById('detailView');
   const s = SCAN, m = s.meta || {}, st = m.stats || {};
-  const chips = [
-    ['subdomains', st.subdomains], ['IPs', st.ips], ['DNS records', st.dns_records],
-    ['history', st.dns_history], ['endpoints', st.in_scope_endpoints],
-    ['files', st.files], ['secrets', st.secrets],
-  ].filter(c => c[1]).map(c => `<span class="dv-stat"><b>${fmtNum(c[1])}</b> ${c[0]}</span>`).join('');
+  const techCount = new Set((s.subdomains || []).flatMap(sd => sd.tech || [])).size;
+  const jumps = [
+    ['dns', 'DNS', (st.dns_records || 0) + (st.dns_history || 0)],
+    ['subdomains', 'subdomains', st.subdomains],
+    ['infra', 'IPs', st.ips],
+    ['tech', 'tech', techCount],
+    ['secrets', 'secrets', st.secrets],
+    ['files', 'files', st.files],
+  ].filter(j => j[2] == null || j[2]).map(([id, label, n]) =>
+    `<button class="dv-stat" data-jump="dv-${id}">${n != null ? `<b>${fmtNum(n)}</b> ` : ''}${label}</button>`).join('');
   dv.innerHTML = `
     <div class="dv-head">
-      <div><h2>${esc(m.domain || '')}</h2><div class="dv-substats">${chips}</div></div>
+      <div><h2>${esc(m.domain || '')}</h2><div class="dv-substats">${jumps}</div></div>
       <button class="btn" id="dvCollapse">${icon('arrows-minimize')} Back to graph</button>
     </div>
     <div class="dv-grid">
       ${dvDnsCard(s.dns || {})}
-      ${dvInfraCard((s.infra && s.infra.ips) || [])}
       ${dvSubdomainsCard(s.subdomains || [])}
+      ${dvInfraCard((s.infra && s.infra.ips) || [])}
       ${dvTechCard(s.subdomains || [])}
       ${dvSecretsCard(s.secrets || [])}
       ${dvFilesCard(s.files || [])}
     </div>`;
   dv.querySelector('#dvCollapse').addEventListener('click', toggleDetailMode);
+  dv.querySelectorAll('[data-jump]').forEach(b => b.addEventListener('click', () => {
+    const el = document.getElementById(b.dataset.jump);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
   dv.querySelectorAll('.chip-host[data-host]').forEach(el =>
-    el.addEventListener('click', () => { toggleDetailMode(); setHostFilter(el.dataset.host, null); }));
+    el.addEventListener('click', () => { toggleDetailMode(); setHostFilter(el.dataset.host); }));
+  dv.querySelectorAll('.chip-ip[data-ip]').forEach(el =>
+    el.addEventListener('click', () => { toggleDetailMode(); setIpFilter(el.dataset.ip); }));
   wireDecode(dv);
 }
 
-function dvCard(title, ic, count, body) {
-  return `<section class="dv-card"><div class="dv-ch">${icon(ic)}<h3>${esc(title)}</h3>
+function dvCard(title, ic, count, body, id) {
+  return `<section class="dv-card"${id ? ` id="dv-${id}"` : ''}><div class="dv-ch">${icon(ic)}<h3>${esc(title)}</h3>
     ${count != null ? `<span class="count">${fmtNum(count)}</span>` : ''}</div>${body}</section>`;
 }
 
@@ -572,7 +680,7 @@ function dvDnsCard(dns) {
   const nRec = Object.values(recs).reduce((a, v) => a + v.length, 0);
   const nHist = Object.values(hist).reduce((a, v) => a + v.length, 0);
   if (!nRec && !nHist) return dvCard('DNS', 'network', 0,
-    `<div class="empty" style="padding:24px">${icon('network')}<h4>No DNS data</h4><p>Run a Deep scan for full records and historical DNS.</p></div>`);
+    `<div class="empty" style="padding:24px">${icon('network')}<h4>No DNS data</h4><p>Run a Deep scan for full records and historical DNS.</p></div>`, 'dns');
   let body = '';
   const curTypes = DNS_ORDER.filter(t => recs[t] && recs[t].length);
   if (curTypes.length) {
@@ -598,76 +706,98 @@ function dvDnsCard(dns) {
         </tbody></table></details>`;
     }
   }
-  return dvCard('DNS records & history', 'network', nRec + nHist, `<div class="dv-body">${body}</div>`);
+  return dvCard('DNS records & history', 'network', nRec + nHist, `<div class="dv-body">${body}</div>`, 'dns');
 }
 
 function dvInfraCard(ips) {
-  if (!ips.length) return dvCard('Infrastructure', 'server-2', 0, `<div class="dv-body faint" style="padding:16px">No IPs.</div>`);
-  const rows = ips.map(ip => `<tr>
-    <td class="mono">${esc(ip.ip)}</td>
-    <td>${esc(ip.org || '')}</td>
-    <td class="mono">${esc(ip.asn || '')}</td>
-    <td>${esc(ip.country || '')} ${ip.datacenter ? '· hosting' : ip.type ? '· ' + esc(ip.type) : ''}</td>
-    <td>${(ip.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
-    <td>${(ip.subdomains || []).map(h => `<span class="chip-host" data-host="${esc(h)}">${esc(h)}</span>`).join(' ')}</td>
-  </tr>`).join('');
+  if (!ips.length) return dvCard('Infrastructure', 'server-2', 0, `<div class="dv-body faint" style="padding:16px">No IPs.</div>`, 'infra');
+  const rows = ips.map(ip => {
+    const hosts = ip.subdomains || [];
+    return `<tr>
+      <td class="mono"><span class="chip-ip" data-ip="${esc(ip.ip)}">${icon('server-2')}${esc(ip.ip)}</span></td>
+      <td>${esc(ip.org || '')}</td>
+      <td class="mono">${esc(ip.asn || '')}</td>
+      <td>${esc(ip.country || '')} ${ip.datacenter ? '· hosting' : ip.type ? '· ' + esc(ip.type) : ''}</td>
+      <td>${(ip.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
+      <td class="mono">${hosts.length}</td>
+      <td>${hosts.map(h => `<span class="chip-host" data-host="${esc(h)}">${esc(h)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
+    </tr>`;
+  }).join('');
   return dvCard('Infrastructure', 'server-2', ips.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>IP</th><th>Org</th><th>ASN</th><th>Type</th><th>Src</th><th>Resolves for</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    `<div class="dv-body"><table class="dv-table"><thead><tr><th>IP</th><th>Org</th><th>ASN</th><th>Type</th><th>Src</th><th>Hosts</th><th>Resolves for</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    'infra');
 }
 
 function dvSubdomainsCard(subs) {
-  if (!subs.length) return dvCard('Subdomains', 'world', 0, `<div class="dv-body faint" style="padding:16px">None.</div>`);
+  if (!subs.length) return dvCard('Subdomains', 'world', 0, `<div class="dv-body faint" style="padding:16px">None.</div>`, 'subdomains');
   const rows = subs.map(sd => `<tr>
     <td class="mono"><span class="chip-host" data-host="${esc(sd.host)}">${esc(sd.host)}</span></td>
     <td class="${statusClass((sd.http || {}).status)} mono">${(sd.http || {}).status || (sd.resolved ? '·' : 'dns')}</td>
-    <td class="mono faint">${esc((sd.ips || []).join(', '))}</td>
-    <td>${(sd.tech || []).slice(0, 5).map(x => `<span class="tag mono">${esc(x)}</span>`).join(' ')}</td>
+    <td>${(sd.ips || []).map(ip => `<span class="chip-ip" data-ip="${esc(ip)}">${icon('server-2')}${esc(ip)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
+    <td>${(sd.tech || []).map(x => `<span class="tag mono">${esc(x)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
     <td>${(sd.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
   </tr>`).join('');
   return dvCard('Subdomains', 'world', subs.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Host</th><th>Status</th><th>IPs</th><th>Tech</th><th>Src</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Host</th><th>Status</th><th>IPs</th><th>Tech</th><th>Src</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    'subdomains');
 }
 
+/* Tech stack: what was detected, on which subdomains, and on which IPs those
+   subdomains resolve to — not just a bare list of fingerprints. */
 function dvTechCard(subs) {
   const map = {};
   subs.forEach(sd => (sd.tech || []).forEach(t => { (map[t] = map[t] || []).push(sd.host); }));
-  const entries = Object.entries(map).sort((a, b) => b[1].length - a[1].length);
-  if (!entries.length) return dvCard('Tech stack', 'fingerprint', 0, `<div class="dv-body faint" style="padding:16px">No fingerprints.</div>`);
-  const rows = entries.map(([t, hosts]) => `<tr>
-    <td><span class="tag mono">${esc(t)}</span></td><td class="mono">${hosts.length}</td>
-    <td>${hosts.slice(0, 12).map(h => `<span class="chip-host" data-host="${esc(h)}">${esc(h)}</span>`).join(' ')}${hosts.length > 12 ? ` <span class="faint">+${hosts.length - 12}</span>` : ''}</td>
-  </tr>`).join('');
+  const entries = Object.entries(map).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  if (!entries.length) return dvCard('Tech stack', 'fingerprint', 0, `<div class="dv-body faint" style="padding:16px">No fingerprints.</div>`, 'tech');
+  const rows = entries.map(([t, hosts]) => {
+    const ips = ipsOfHosts(hosts);
+    return `<tr>
+      <td><span class="tag mono">${esc(t)}</span></td>
+      <td class="mono">${hosts.length}</td>
+      <td>${hosts.map(h => `<span class="chip-host" data-host="${esc(h)}">${esc(h)}</span>`).join(' ')}</td>
+      <td class="mono">${ips.length}</td>
+      <td>${ips.map(ip => `<span class="chip-ip" data-ip="${esc(ip)}">${icon('server-2')}${esc(ip)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
+    </tr>`;
+  }).join('');
   return dvCard('Tech stack', 'fingerprint', entries.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Technology</th><th>Hosts</th><th>Seen on</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Technology</th><th>Hosts</th><th>Detected on</th><th>IPs</th><th>Served from</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    'tech');
 }
 
 function dvSecretsCard(secrets) {
-  if (!secrets.length) return dvCard('Secrets', 'key', 0, `<div class="dv-body faint" style="padding:16px">None flagged.</div>`);
+  if (!secrets.length) return dvCard('Secrets', 'key', 0, `<div class="dv-body faint" style="padding:16px">None flagged.</div>`, 'secrets');
   const rows = secrets.map(x => `<tr>
     <td><span class="sev ${sevClass(x.severity)}">${esc(x.severity)}</span></td>
-    <td>${esc(x.type)}</td><td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis">${esc(x.match)}</td>
+    <td>${esc(x.type)}</td><td class="mono wrap">${esc(x.match)}</td>
     <td>${(x.found_by || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
-    <td class="mono faint">${esc(splitUrl(x.source).host + splitUrl(x.source).path)}</td>
+    <td class="mono faint wrap">${esc(splitUrl(x.source).host + splitUrl(x.source).path)}</td>
   </tr>`).join('');
   return dvCard('Secrets', 'key', secrets.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Sev</th><th>Type</th><th>Match</th><th>Src</th><th>Location</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Sev</th><th>Type</th><th>Match</th><th>Src</th><th>Location</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    'secrets');
 }
 
 function dvFilesCard(files) {
-  if (!files.length) return dvCard('Discovered files', 'file-code', 0, `<div class="dv-body faint" style="padding:16px">None.</div>`);
-  const rows = files.map(f => `<tr>
-    <td><span class="tag mono">${esc(f.subtype || f.kind)}</span></td>
-    <td class="mono">${esc(splitUrl(f.url).host)}${esc(splitUrl(f.url).path)}</td>
-    <td class="${statusClass(f.status)} mono">${f.status || '·'}</td>
-    <td>${(f.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
-  </tr>`).join('');
+  if (!files.length) return dvCard('Discovered files', 'file-code', 0, `<div class="dv-body faint" style="padding:16px">None.</div>`, 'files');
+  const rows = files.map(f => {
+    const u = splitUrl(f.url);
+    return `<tr>
+      <td><span class="tag mono">${esc(f.subtype || f.kind)}</span></td>
+      <td class="mono"><span class="chip-host" data-host="${esc(u.host)}">${esc(u.host)}</span></td>
+      <td class="mono wrap">${esc(u.path)}</td>
+      <td class="${statusClass(f.status)} mono">${f.status || '·'}</td>
+      <td class="mono faint">${esc(f.size != null ? fmtBytes(f.size) : '')}</td>
+      <td class="faint">${esc((f.content_type || '').split(';')[0])}</td>
+      <td>${(f.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
+    </tr>`;
+  }).join('');
   return dvCard('Discovered files', 'file-code', files.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Kind</th><th>URL</th><th>Status</th><th>Src</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Kind</th><th>Host</th><th>Path</th><th>Status</th><th>Size</th><th>Type</th><th>Src</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    'files');
 }
 
 /* ---- graph ---------------------------------------------------------------- */
 function initGraph(graph) {
-  const canvas = document.getElementById('graph');
   const n = graph.stats.nodes;
   document.getElementById('graphSource').textContent =
     (graph.source === 'neo4j' ? 'neo4j' : 'json') + ` · ${n} nodes`;
@@ -677,7 +807,11 @@ function initGraph(graph) {
         <h4>No graph data</h4><p>This scan captured no in-scope structure to graph.</p></div></div>`);
     return;
   }
-  if (n > GRAPH_LAZY) showActivate(graph, n);
+  // Only the layers drawn up front decide whether we need the activation gate —
+  // endpoints/files/fields stay locked until a subdomain is picked.
+  const detail = window.GRAPH_DETAIL_TYPES || new Set();
+  const upfront = graph.nodes.reduce((a, x) => a + (detail.has(x.type) ? 0 : 1), 0);
+  if (upfront > GRAPH_LAZY) showActivate(graph, upfront);
   else buildGraph(graph, true);
 }
 
@@ -686,12 +820,19 @@ function buildGraph(graph, autoStart) {
   GRAPH = createGraph(canvas, graph, {
     autoStart,
     onSelect(node) {
+      // Clicking a subdomain scopes everything to it — list, dropdown and the
+      // graph's detail layers.
       if (node.type === 'Subdomain') {
-        const el = document.querySelector(`.sitem[data-host="${CSS.escape(node.label)}"]`);
-        // inspect: sync the list + dropdown, but don't collapse the graph
-        // under the click — use the dropdown / left panel to filter the graph.
-        setHostFilter(node.label, el, { filterGraph: false });
+        setHostFilter(node.label);
+      } else if (node.type === 'IP') {
+        setIpFilter(node.label);
       }
+    },
+    // a locked legend layer was clicked — send the user to the control that
+    // unlocks it
+    onLocked() {
+      const sel = document.getElementById('hostFilter');
+      if (sel) { sel.focus(); sel.classList.add('nudge'); setTimeout(() => sel.classList.remove('nudge'), 900); }
     },
   });
   GRAPH.buildLegend(document.getElementById('legend'));

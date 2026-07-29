@@ -10,6 +10,13 @@
 const NODE_TYPES = ['Domain', 'Subdomain', 'IP', 'ASN', 'Endpoint', 'JS',
   'Request', 'Field', 'Secret', 'File', 'External'];
 
+/* Per-page detail: these carry the bulk of a scan (thousands of nodes) and are
+   only meaningful inside one host. They stay hidden — and their legend entry
+   locked — until a specific subdomain is selected, so the "all hosts" view
+   stays readable. The legend still reports their real totals, so the true size
+   of the surface is always visible even while they are locked. */
+const DETAIL_TYPES = new Set(['Endpoint', 'Request', 'Field', 'JS', 'File', 'External']);
+
 function typeColor(t) {
   const key = '--n-' + t.toLowerCase();
   return cssVar(key) || cssVar('--n-endpoint') || '#888';
@@ -49,49 +56,75 @@ function createGraph(canvas, data, opts) {
   let k = 1, tx = 0, ty = 0;
   const hidden = new Set();               // hidden node types (legend)
   let hostVisibleIds = null;              // null = all hosts; Set = only these ids
+  let detailUnlocked = false;             // DETAIL_TYPES shown only for one host
+  let legendEl = null, fitPending = false;
   let hover = null, selected = null, dragging = null, panning = false, locked = false;
-  let alpha = 1, running = true, raf = null, started = false;
+  let alpha = 1, running = true, raf = null, started = false, dirty = true;
 
   function resize() {
     W = wrap.clientWidth; H = wrap.clientHeight;
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * DPR; canvas.height = H * DPR;
+    dirty = true;
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   }
 
   function visible(n) {
+    if (DETAIL_TYPES.has(n.type) && !detailUnlocked) return false;
     if (hidden.has(n.type)) return false;
     if (hostVisibleIds && !hostVisibleIds.has(n.id)) return false;
     return true;
   }
 
+  /* Visibility only changes when a filter or a legend toggle changes it — never
+     during the simulation. Resolve it once into a flag + a dense list so the
+     per-frame loops don't re-test three sets per node and per edge. */
+  const visList = [];
+  function refreshVis() {
+    visList.length = 0;
+    for (const n of nodes) { n.vis = visible(n); if (n.vis) visList.push(n); }
+  }
+
   // ---- physics (grid-approximated repulsion + link springs + gravity) ----
   const CELL = 72;
+  // A crowded cell (right after a layer is revealed, everything starts stacked)
+  // would make repulsion quadratic. Sample a bounded number of neighbours per
+  // cell, rotating which ones each tick, and scale the force by what was
+  // skipped — the crowd disperses just as fast, at a fixed cost per node.
+  const CELL_SAMPLE = 10;
+  const GKEY = (cx, cy) => (cx + 8192) * 65536 + (cy + 8192);   // numeric grid key
+  let ticks = 0;
   function tick() {
+    ticks++;
     const grid = new Map();
-    for (const n of nodes) {
-      if (!visible(n)) continue;
-      const cx = Math.floor(n.x / CELL), cy = Math.floor(n.y / CELL);
-      const key = cx + ',' + cy;
-      (grid.get(key) || grid.set(key, []).get(key)).push(n);
+    for (const n of visList) {
+      const key = GKEY(Math.floor(n.x / CELL), Math.floor(n.y / CELL));
+      const cell = grid.get(key);
+      if (cell) cell.push(n); else grid.set(key, [n]);
     }
     // repulsion within neighboring cells
-    for (const n of nodes) {
-      if (!visible(n) || n.fixed) continue;
+    for (const n of visList) {
+      if (n.fixed) continue;
       const cx = Math.floor(n.x / CELL), cy = Math.floor(n.y / CELL);
       let fx = 0, fy = 0;
       for (let gx = cx - 1; gx <= cx + 1; gx++)
         for (let gy = cy - 1; gy <= cy + 1; gy++) {
-          const cell = grid.get(gx + ',' + gy);
+          const cell = grid.get(GKEY(gx, gy));
           if (!cell) continue;
-          for (const m of cell) {
+          const len = cell.length;
+          const take = len < CELL_SAMPLE ? len : CELL_SAMPLE;
+          const w = len / take;                         // weight of the skipped ones
+          let idx = take < len ? ticks % len : 0;
+          for (let ci = 0; ci < take; ci++) {
+            const m = cell[idx];
+            if (++idx === len) idx = 0;
             if (m === n) continue;
             let dx = n.x - m.x, dy = n.y - m.y;
             let d2 = dx * dx + dy * dy;
             if (d2 < 0.01) { dx = (Math.random() - 0.5); dy = (Math.random() - 0.5); d2 = 1; }
             if (d2 > CELL * CELL * 4) continue;
-            const f = 480 / d2;
+            const f = 480 * w / d2;
             const d = Math.sqrt(d2);
             fx += (dx / d) * f; fy += (dy / d) * f;
           }
@@ -101,7 +134,7 @@ function createGraph(canvas, data, opts) {
     }
     // link springs
     for (const e of edges) {
-      if (!visible(e.s) || !visible(e.t)) continue;
+      if (!e.s.vis || !e.t.vis) continue;
       const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 1;
       const ideal = 38 + e.s.r + e.t.r;
@@ -111,73 +144,125 @@ function createGraph(canvas, data, opts) {
       if (!e.t.fixed) { e.t.vx -= ox; e.t.vy -= oy; }
     }
     // gravity to center + integrate
-    for (const n of nodes) {
-      if (!visible(n) || n.fixed || n === dragging) continue;
+    for (const n of visList) {
+      if (n.fixed || n === dragging) continue;
       n.vx -= n.x * 0.009 * alpha;
       n.vy -= n.y * 0.009 * alpha;
       n.x += Math.max(-25, Math.min(25, n.vx));
       n.y += Math.max(-25, Math.min(25, n.vy));
     }
-    alpha *= 0.985;
-    if (alpha < 0.02) { alpha = 0; running = false; }
+    alpha *= 0.975;
+    if (alpha < 0.02) {
+      alpha = 0; running = false;
+      dirty = true;                     // repaint once more, now with the edges
+      // a filter change asked to be framed once the layout stopped moving
+      if (fitPending && !dragging) { fitPending = false; fit(); }
+    }
   }
 
   // ---- rendering ----
   function worldToScreen(n) { return [n.x * k + tx, n.y * k + ty]; }
   function screenToWorld(px, py) { return [(px - tx) / k, (py - ty) / k]; }
 
+  /* Theme colours are read once per theme change. Reading a CSS variable forces
+     a style recalc, so doing it per edge (thousands per frame) is what used to
+     make a fully revealed graph crawl. */
+  let TH = {};
+  function readTheme() {
+    const cs = getComputedStyle(document.documentElement);
+    const g = key => (cs.getPropertyValue(key) || '').trim();
+    const faint = g('--faint') || '#999';
+    TH = {
+      ink: g('--ink') || '#111', ink2: g('--ink-2') || '#333',
+      edge: withAlpha(faint, 0.14), edgeDim: withAlpha(faint, 0.05),
+      halo: withAlpha(g('--bg') || '#fff', 0.9),
+      labelBg: withAlpha(g('--surface') || '#fff', 0.82),
+    };
+  }
+
   function draw() {
     ctx.clearRect(0, 0, W, H);
     const dim = hover || selected;
     const near = dim ? adj.get(dim.id) : null;
 
-    // edges
+    // edges: everything unrelated to the focused node is stroked as one path.
+    // On a big graph they are also the bulk of the raster cost, so while the
+    // layout is still moving we draw nodes only — the mesh lands the moment it
+    // comes to rest.
+    const settling = running && visList.length > 600;
     ctx.lineWidth = 1;
-    for (const e of edges) {
-      if (!visible(e.s) || !visible(e.t)) continue;
-      const active = dim && (e.s === dim || e.t === dim);
-      const [x1, y1] = worldToScreen(e.s), [x2, y2] = worldToScreen(e.t);
-      ctx.strokeStyle = active
-        ? withAlpha(e.s === dim ? e.t.color : e.s.color, 0.85)
-        : withAlpha(cssVar('--faint') || '#999', dim ? 0.05 : 0.14);
-      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.strokeStyle = dim ? TH.edgeDim : TH.edge;
+    const lit = [];
+    if (!settling) {
+      ctx.beginPath();
+      for (const e of edges) {
+        if (!e.s.vis || !e.t.vis) continue;
+        if (dim && (e.s === dim || e.t === dim)) { lit.push(e); continue; }
+        ctx.moveTo(e.s.x * k + tx, e.s.y * k + ty);
+        ctx.lineTo(e.t.x * k + tx, e.t.y * k + ty);
+      }
+      ctx.stroke();
+      for (const e of lit) {
+        ctx.strokeStyle = withAlpha(e.s === dim ? e.t.color : e.s.color, 0.85);
+        ctx.beginPath();
+        ctx.moveTo(e.s.x * k + tx, e.s.y * k + ty);
+        ctx.lineTo(e.t.x * k + tx, e.t.y * k + ty);
+        ctx.stroke();
+      }
     }
 
-    // nodes
+    // nodes: bucketed by colour so each colour is a single fill
+    const rk = Math.min(1.6, Math.max(0.42, k * 0.9));
     const labelZoom = k > 1.15;
-    for (const n of nodes) {
-      if (!visible(n)) continue;
-      const [x, y] = worldToScreen(n);
+    const buckets = new Map(), outlined = [], labelled = [];
+    for (const n of visList) {
       const isNear = dim && (n === dim || (near && near.has(n.id)));
       const faded = dim && !isNear;
-      ctx.globalAlpha = faded ? 0.18 : 1;
-      ctx.beginPath();
-      ctx.arc(x, y, n.r * Math.min(1.6, Math.max(0.8, k * 0.9)), 0, 6.2832);
-      ctx.fillStyle = n.color;
-      ctx.fill();
-      if (n === selected || n === hover) {
-        ctx.lineWidth = 2; ctx.strokeStyle = cssVar('--ink'); ctx.stroke();
-      } else if (n.type === 'Domain' || n.type === 'Subdomain') {
-        ctx.lineWidth = 1.5; ctx.strokeStyle = withAlpha(cssVar('--bg'), 0.9); ctx.stroke();
-      }
-      // labels for important / hovered nodes
-      const showLabel = !faded && (n === dim || n.type === 'Domain'
+      const key = (faded ? 'f' : 'n') + n.color;
+      let b = buckets.get(key);
+      if (!b) buckets.set(key, b = { color: n.color, faded, list: [] });
+      b.list.push(n);
+      if (n === selected || n === hover) outlined.push(n);
+      else if (!faded && (n.type === 'Domain' || n.type === 'Subdomain')) outlined.push(n);
+      if (!faded && (n === dim || n.type === 'Domain'
         || (n.type === 'Subdomain' && (labelZoom || n.deg > 6))
-        || (isNear && labelZoom));
-      if (showLabel) {
-        const lbl = shortLabel(n);
-        ctx.globalAlpha = faded ? 0.3 : 1;
-        ctx.font = (n.type === 'Domain' ? '600 12px ' : '500 11px ') + "'Hanken Grotesk',sans-serif";
-        const tw = ctx.measureText(lbl).width;
-        const lx = x + n.r + 4, ly = y;
-        ctx.fillStyle = withAlpha(cssVar('--surface'), 0.82);
-        ctx.fillRect(lx - 2, ly - 7, tw + 4, 14);
-        ctx.fillStyle = cssVar('--ink-2');
-        ctx.textBaseline = 'middle';
-        ctx.fillText(lbl, lx, ly);
+        || (isNear && labelZoom))) labelled.push(n);
+    }
+    for (const b of buckets.values()) {
+      ctx.globalAlpha = b.faded ? 0.18 : 1;
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      for (const n of b.list) {
+        const x = n.x * k + tx, y = n.y * k + ty, r = n.r * rk;
+        ctx.moveTo(x + r, y);
+        ctx.arc(x, y, r, 0, 6.2832);
       }
+      ctx.fill();
     }
     ctx.globalAlpha = 1;
+
+    // outlines: focused node, plus the halo that lifts hosts off the mesh
+    for (const n of outlined) {
+      const on = n === selected || n === hover;
+      ctx.lineWidth = on ? 2 : 1.5;
+      ctx.strokeStyle = on ? TH.ink : TH.halo;
+      ctx.beginPath();
+      ctx.arc(n.x * k + tx, n.y * k + ty, n.r * rk, 0, 6.2832);
+      ctx.stroke();
+    }
+
+    // labels for important / hovered nodes
+    ctx.textBaseline = 'middle';
+    for (const n of labelled) {
+      const lbl = shortLabel(n);
+      ctx.font = (n.type === 'Domain' ? '600 12px ' : '500 11px ') + "'Hanken Grotesk',sans-serif";
+      const tw = ctx.measureText(lbl).width;
+      const lx = n.x * k + tx + n.r + 4, ly = n.y * k + ty;
+      ctx.fillStyle = TH.labelBg;
+      ctx.fillRect(lx - 2, ly - 7, tw + 4, 14);
+      ctx.fillStyle = TH.ink2;
+      ctx.fillText(lbl, lx, ly);
+    }
   }
 
   function shortLabel(n) {
@@ -201,16 +286,16 @@ function createGraph(canvas, data, opts) {
 
   // ---- loop ----
   function frame() {
-    if (running) tick();
-    draw();
+    if (running) { tick(); dirty = true; }
+    if (dirty) { draw(); dirty = false; }
     raf = requestAnimationFrame(frame);
   }
+  function mark() { dirty = true; }        // view changed without the physics
 
   // ---- hit testing ----
   function nodeAt(px, py) {
     let best = null, bestD = 16 * 16;
-    for (const n of nodes) {
-      if (!visible(n)) continue;
+    for (const n of visList) {
       const [x, y] = worldToScreen(n);
       const d = (x - px) * (x - px) + (y - py) * (y - py);
       const rr = Math.max(8, n.r * k + 4);
@@ -230,16 +315,18 @@ function createGraph(canvas, data, opts) {
       wake(); return;
     }
     if (panning && last) {
-      tx += px - last.x; ty += py - last.y; last = { x: px, y: py }; return;
+      tx += px - last.x; ty += py - last.y; last = { x: px, y: py }; mark(); return;
     }
     const n = nodeAt(px, py);
     if (n !== hover) {
       hover = n;
       canvas.style.cursor = n ? 'pointer' : 'grab';
+      mark();
       // hover only highlights adjacency — the card is shown on click (and locks)
     }
   }
   function onDown(ev) {
+    fitPending = false;                 // the user is framing it themselves now
     const rect = canvas.getBoundingClientRect();
     const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
     const n = nodeAt(px, py);
@@ -258,12 +345,14 @@ function createGraph(canvas, data, opts) {
   }
   function onWheel(ev) {
     ev.preventDefault();
+    fitPending = false;
     const rect = canvas.getBoundingClientRect();
     const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
     const [wx, wy] = screenToWorld(px, py);
     const f = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
-    k = Math.max(0.15, Math.min(6, k * f));
+    k = Math.max(0.04, Math.min(6, k * f));
     tx = px - wx * k; ty = py - wy * k;
+    mark();
   }
   function wake() { if (alpha < 0.25) alpha = 0.25; running = true; }
 
@@ -297,76 +386,153 @@ function createGraph(canvas, data, opts) {
        <div class="nc-props">${rows || '<span class="muted" style="font-size:12px">no attributes</span>'}</div>`;
     card.classList.add('show');
     card.querySelector('.nc-close').addEventListener('click', () => {
-      card.classList.remove('show'); selected = null; locked = false;
+      card.classList.remove('show'); selected = null; locked = false; mark();
     });
     wireDecode(card);
   }
-  function selectNode(n) { selected = n; locked = true; showCard(n); if (opts.onSelect) opts.onSelect(n); }
+  function selectNode(n) { selected = n; locked = true; mark(); showCard(n); if (opts.onSelect) opts.onSelect(n); }
 
   // ---- fit ----
   function fit() {
-    const vis = nodes.filter(visible);
+    const vis = visList;
     if (!vis.length) return;
     let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
     for (const n of vis) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y); }
     const gw = Math.max(1, maxX - minX), gh = Math.max(1, maxY - minY);
-    k = Math.max(0.2, Math.min(2.2, Math.min(W / (gw + 90), H / (gh + 90))));
+    k = Math.max(0.04, Math.min(2.2, Math.min(W / (gw + 90), H / (gh + 90))));
     tx = W / 2 - (minX + maxX) / 2 * k;
     ty = H / 2 - (minY + maxY) / 2 * k;
+    mark();
   }
 
   function reheat() { alpha = 1; running = true; }
 
-  // ---- host filter (domain / subdomain) -----------------------------------
-  // Restrict the graph to one host's subtree: the Subdomain node and everything
-  // hanging off it (its endpoints, requests, fields, files, IPs, secrets),
-  // keeping the Domain node as an anchor. Other subdomains and their subtrees
-  // are hidden. `host` null/'' clears the filter and shows the whole graph.
-  function computeHostVisible(host) {
-    if (!host) return null;
-    const subNode = nodes.find(n => n.type === 'Subdomain' && n.label === host);
-    if (!subNode) return new Set();                 // unknown host -> hide all
+  // ---- host / IP filter ----------------------------------------------------
+  // Restrict the graph to the subtree of one or more hosts: each Subdomain node
+  // and everything hanging off it (its endpoints, requests, fields, files, IPs,
+  // secrets), keeping the Domain node as an anchor. Sibling subdomains reached
+  // through a shared IP are not crossed into. An empty/absent list clears the
+  // restriction and shows the whole graph.
+  function computeVisible(hosts) {
+    if (!hosts || !hosts.length) return null;
+    const wanted = new Set(hosts);
+    const subNodes = nodes.filter(n => n.type === 'Subdomain' && wanted.has(n.label));
+    if (!subNodes.length) return new Set();         // unknown host(s) -> hide all
+    const subIds = new Set(subNodes.map(n => n.id));
     const domNode = nodes.find(n => n.type === 'Domain');
-    const keep = new Set([subNode.id]);
+    const keep = new Set(subIds);
     if (domNode) keep.add(domNode.id);
-    const stack = [subNode.id];
+    const stack = [...subIds];
     while (stack.length) {
       const id = stack.pop();
       for (const nb of (adj.get(id) || [])) {
         if (keep.has(nb)) continue;
         const m = byId.get(nb);
         if (!m) continue;
-        if (m.type === 'Domain') { keep.add(nb); continue; }          // anchor only
-        if (m.type === 'Subdomain' && nb !== subNode.id) continue;    // a sibling host (shared IP) — don't cross into it
+        if (m.type === 'Domain') { keep.add(nb); continue; }        // anchor only
+        if (m.type === 'Subdomain' && !subIds.has(nb)) continue;    // a sibling host (shared IP) — don't cross into it
         keep.add(nb); stack.push(nb);
       }
     }
     return keep;
   }
 
-  function filterHost(host) {
-    hostVisibleIds = computeHostVisible(host);
-    if (selected && hostVisibleIds && !hostVisibleIds.has(selected.id)) {
-      selected = null; locked = false; if (card) card.classList.remove('show');
+  /* A layer that has never been drawn still sits on the initial spiral, far
+     from where it belongs. Walk out from the nodes already in place and drop
+     each newcomer next to its parent, so unlocking a layer settles in a beat
+     instead of flinging nodes across the canvas. */
+  function seedNewlyVisible() {
+    const queue = nodes.filter(n => n.seeded && visible(n)).map(n => n.id);
+    const seen = new Set(queue);
+    while (queue.length) {
+      const anchor = byId.get(queue.shift());
+      for (const nb of (adj.get(anchor.id) || [])) {
+        if (seen.has(nb)) continue;
+        const m = byId.get(nb);
+        if (!m || !visible(m)) continue;
+        seen.add(nb);
+        if (!m.seeded) {
+          // fan the newcomers around their parent instead of stacking them,
+          // so the first tick starts from something close to laid out
+          const i = anchor.spawn = (anchor.spawn || 0) + 1;
+          const a = i * 2.399963;                       // golden angle
+          const rad = 26 + Math.sqrt(i) * 16;
+          m.x = anchor.x + Math.cos(a) * rad;
+          m.y = anchor.y + Math.sin(a) * rad;
+          m.vx = m.vy = 0;
+          m.seeded = true;
+        }
+        queue.push(nb);
+      }
     }
-    reheat();                       // re-cluster the now-smaller visible set
-    setTimeout(fit, 420);           // frame it once it has re-settled
+    for (const n of nodes) if (visible(n)) n.seeded = true;
   }
 
+  /* setFilter({hosts, detail}) — the single entry point the dashboard uses.
+     `detail` unlocks DETAIL_TYPES; it is only ever true when exactly one
+     subdomain is selected. */
+  function setFilter(f) {
+    f = f || {};
+    const wantDetail = !!f.detail;
+    const justUnlocked = wantDetail && !detailUnlocked;
+    detailUnlocked = wantDetail;
+    // reveal the detail layers on unlock, even if they were toggled off before
+    if (justUnlocked) DETAIL_TYPES.forEach(t => hidden.delete(t));
+    hostVisibleIds = computeVisible(f.hosts);
+    if (selected && !visible(selected)) {
+      selected = null; locked = false; if (card) card.classList.remove('show');
+    }
+    seedNewlyVisible();
+    refreshVis();
+    if (legendEl) buildLegend(legendEl);
+    reheat();                                    // re-cluster the visible set
+    // frame it early so the change is legible straight away, then again for
+    // real once the layout has come to rest (see tick())
+    setTimeout(() => { if (!dragging) fit(); }, 400);
+    fitPending = true;
+  }
+
+  function filterHost(host) { setFilter({ hosts: host ? [host] : null, detail: !!host }); }
+
   // ---- legend ----
+  // Counts are always the scan's real totals — locked layers still report how
+  // much is there, they just are not drawn until a subdomain is picked.
   function buildLegend(elm) {
     if (!elm) return;
+    legendEl = elm;
     const present = {};
     nodes.forEach(n => present[n.type] = (present[n.type] || 0) + 1);
-    elm.innerHTML = NODE_TYPES.filter(t => present[t]).map(t =>
-      `<span class="lg" data-t="${t}"><span class="sw" style="background:${typeColor(t)}"></span>
-        ${t} <span class="n">${present[t]}</span></span>`).join('');
+    const types = NODE_TYPES.filter(t => present[t]);
+    const anyLocked = types.some(t => DETAIL_TYPES.has(t)) && !detailUnlocked;
+    elm.innerHTML = types.map(t => {
+      const lock = DETAIL_TYPES.has(t) && !detailUnlocked;
+      const off = !lock && hidden.has(t);
+      const tip = lock ? `${present[t]} ${t} nodes — select a subdomain to activate this layer`
+        : `${present[t]} ${t} nodes — click to ${off ? 'show' : 'hide'}`;
+      return `<span class="lg${lock ? ' locked' : ''}${off ? ' off' : ''}" data-t="${t}" title="${tip}">
+        ${lock ? `<svg class="ic lk" aria-hidden="true"><use href="#i-lock"></use></svg>`
+        : `<span class="sw" style="background:${typeColor(t)}"></span>`}
+        ${t} <span class="n">${present[t]}</span></span>`;
+    }).join('') + (anyLocked
+      ? `<span class="lg-hint" id="lgHint"><svg class="ic" aria-hidden="true"><use href="#i-filter"></use></svg>
+          select a subdomain to reveal endpoints, files &amp; fields</span>` : '');
     elm.querySelectorAll('.lg').forEach(el => el.addEventListener('click', () => {
       const t = el.getAttribute('data-t');
+      if (DETAIL_TYPES.has(t) && !detailUnlocked) return flashHint();
       if (hidden.has(t)) { hidden.delete(t); el.classList.remove('off'); }
       else { hidden.add(t); el.classList.add('off'); }
+      refreshVis();
       wake();
     }));
+    const hint = elm.querySelector('#lgHint');
+    if (hint) hint.addEventListener('click', flashHint);
+  }
+
+  /* A locked layer was clicked — point at the control that unlocks it. */
+  function flashHint() {
+    const hint = legendEl && legendEl.querySelector('#lgHint');
+    if (hint) { hint.classList.remove('flash'); void hint.offsetWidth; hint.classList.add('flash'); }
+    if (opts.onLocked) opts.onLocked();
   }
 
   // ---- events ----
@@ -374,14 +540,18 @@ function createGraph(canvas, data, opts) {
   canvas.addEventListener('mousedown', onDown);
   window.addEventListener('mouseup', onUp);
   canvas.addEventListener('wheel', onWheel, { passive: false });
-  canvas.addEventListener('mouseleave', () => { if (!selected) card && card.classList.remove('show'); hover = null; });
+  canvas.addEventListener('mouseleave', () => { if (!selected) card && card.classList.remove('show'); hover = null; mark(); });
   window.addEventListener('themechange', () => {
+    readTheme();
     nodes.forEach(n => n.color = typeColor(n.type));
     const lg = document.getElementById('legend'); if (lg) buildLegend(lg);
+    mark();                             // repaint the settled graph in the new theme
   });
   const ro = new ResizeObserver(() => resize());
   ro.observe(wrap);
 
+  readTheme();
+  refreshVis();
   resize();
 
   // Chunked warm-up so big graphs (module 6) settle without freezing the tab.
@@ -395,20 +565,26 @@ function createGraph(canvas, data, opts) {
         for (; done < end; done++) tick();
         if (onProgress) onProgress(done / total);
         if (done < total) requestAnimationFrame(chunk);
-        else { fit(); frame(); resolve(); }
+        else { markSeeded(); fit(); frame(); resolve(); }
       })();
     });
   }
+  /* whatever was laid out up front is "in place" — later layers are seeded
+     relative to it */
+  function markSeeded() { for (const n of visList) n.seeded = true; }
+
   if (opts.autoStart !== false) {
     started = true;
     for (let i = 0; i < 110; i++) tick();   // settle synchronously — small graph
+    markSeeded();
     fit();
     frame();
   }
 
   return {
-    fit, reheat, buildLegend, activate, filterHost,
+    fit, reheat, buildLegend, activate, filterHost, setFilter,
     stats: data.stats,
+    detailUnlocked: () => detailUnlocked,
     focusHost(host) {
       const n = nodes.find(x => x.type === 'Subdomain' && x.label === host);
       if (n) { selected = n; locked = true; showCard(n); k = 1.4; tx = W / 2 - n.x * k; ty = H / 2 - n.y * k; wake(); }
@@ -418,3 +594,4 @@ function createGraph(canvas, data, opts) {
 }
 
 window.createGraph = createGraph;
+window.GRAPH_DETAIL_TYPES = DETAIL_TYPES;
