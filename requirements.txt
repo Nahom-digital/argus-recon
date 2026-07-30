@@ -2,11 +2,13 @@
 #   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 #
 # External CLI tools are NOT pip packages — install separately (see README):
-#   bbot (pipx install bbot), whatweb, ffuf (or feroxbuster), and optionally Neo4j.
+#   bbot (pipx install bbot), whatweb, ffuf (or feroxbuster), tor + torsocks for
+#   Tor scans, and optionally Neo4j.
 
 flask>=3.0
 flask-cors>=5.0
 requests>=2.31
+PySocks>=1.7          # SOCKS5 support in requests — required for Tor scans
 beautifulsoup4>=4.12
 lxml>=5.0
 dnspython>=2.6

@@ -37,6 +37,7 @@ from flask import (Flask, jsonify, render_template, send_from_directory,
 
 from modules import config
 from modules import graph_loader
+from modules import tor
 from modules.util import resolve_tool
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -88,6 +89,7 @@ def _summary(path: Path) -> dict:
         return {"scan_id": path.stem, "domain": path.stem, "error": True,
                 "stats": {}, "started_at": None}
     meta = d.get("meta", {})
+    tor_meta = meta.get("tor") or {}
     return {
         "scan_id": path.stem,
         "domain": meta.get("domain", path.stem),
@@ -96,6 +98,11 @@ def _summary(path: Path) -> dict:
         "duration_sec": meta.get("duration_sec"),
         "stats": meta.get("stats", {}),
         "modules": meta.get("modules", {}),
+        # how the scan was taken — a single-target or Tor run should not look
+        # identical to a full direct one in the library
+        "scope": meta.get("scope", "apex"),
+        "tor": {"exit_ip": tor_meta.get("exit_ip"),
+                "verified": bool(tor_meta.get("verified"))} if tor_meta else None,
         "size": path.stat().st_size,
     }
 
@@ -217,6 +224,9 @@ def api_status():
         "graph_db": graph_loader.ping(),
         "engines_ready": engines_ready,
         "ipinfo_token": bool(config.IPINFO_TOKEN),
+        # can a scan actually be routed over Tor from this machine? The launcher
+        # locks the toggle rather than letting a run fail at the first step.
+        "tor": tor.availability(),
         "service": {**svc, "uptime_sec": round(time.time() - STARTED_AT),
                     "url": f"http://{config.WEB_HOST}:{config.WEB_PORT}"},
         # the launcher form shows these as the real defaults rather than inventing numbers
@@ -281,13 +291,23 @@ def api_launch():
            for j in _JOBS.values()):
         return jsonify({"error": f"a scan of {domain} is already running"}), 409
 
+    single = bool(body.get("single"))
+    want_tor = bool(body.get("tor"))
+    if want_tor and not tor.availability()["available"]:
+        return jsonify({"error": "Tor is not available on this machine — install "
+                                 "tor (and the Python SOCKS dependency) first"}), 400
+
     extra: list[str] = ["--no-prompt"]   # background job: never block on stdin
     if body.get("passive"):
         extra.append("--passive")
     if body.get("deep") and config.SECURITYTRAILS_KEY:
         extra.append("--deep")
-    if body.get("exact_scope"):
+    if single:
+        extra.append("--single")         # implies exact scope in the engine
+    elif body.get("exact_scope"):
         extra.append("--exact-scope")
+    if want_tor:
+        extra.append("--tor")
     if body.get("no_bbot"):
         extra.append("--no-bbot")
     if body.get("no_graph"):
@@ -310,7 +330,9 @@ def api_launch():
                      "started": time.time(), "options": {
                          "passive": bool(body.get("passive")),
                          "deep": bool(body.get("deep") and config.SECURITYTRAILS_KEY),
-                         "exact_scope": bool(body.get("exact_scope")),
+                         "exact_scope": bool(body.get("exact_scope")) and not single,
+                         "single": single,
+                         "tor": want_tor,
                          "skipped": skip + (["graph"] if body.get("no_graph") and "graph" not in skip else []),
                      }}
     threading.Thread(target=_run_job, args=(job_id, domain, extra),

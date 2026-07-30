@@ -19,6 +19,7 @@
       <div class="opts">
         <label class="chk" id="deepChk" title="Extra subdomains + full DNS records + historical DNS"><input type="checkbox" id="optDeep"> deep DNS</label>
         <label class="chk" title="Passive enumeration only — nothing is sent to the target"><input type="checkbox" id="optPassive"> passive</label>
+        <label class="chk" id="torChk" title="Route the whole scan through Tor"><input type="checkbox" id="optTor"> via Tor</label>
       </div>
       <button class="btn" type="button" id="optsToggle" aria-expanded="false" aria-controls="scanOpts">
         <svg class="ic"><use href="#i-settings"></use></svg> Options<span class="ns-badge" id="optsCount" hidden></span>
@@ -37,10 +38,12 @@
             <label><input type="radio" name="scope" value="apex" checked>
               <span>Apex + subdomains</span></label>
             <label><input type="radio" name="scope" value="exact">
-              <span>This host only</span></label>
+              <span>Host + subdomains</span></label>
+            <label><input type="radio" name="scope" value="single">
+              <span>Single host</span></label>
           </div>
-          <p class="ns-help" id="scopeHelp">A subdomain target pivots to its apex so the rest of the estate is enumerated too.</p>
-          <label class="chk"><input type="checkbox" id="optNoBbot"> skip passive-enum engine</label>
+          <p class="ns-help" id="scopeHelp"></p>
+          <label class="chk" id="noBbotChk"><input type="checkbox" id="optNoBbot"> skip passive-enum engine</label>
         </fieldset>
 
         <fieldset class="ns-group">

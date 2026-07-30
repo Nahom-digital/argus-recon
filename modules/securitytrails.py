@@ -118,9 +118,15 @@ def _norm_history(rtype: str, data: dict) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
-def run(result: ScanResult, domain: str, *, history: bool = True) -> int:
+def run(result: ScanResult, domain: str, *, history: bool = True,
+        subdomains: bool = True) -> int:
     """Enrich `result` with deep subdomains + current & historical DNS.
-    Returns the number of new subdomains added. No-op without a key."""
+    Returns the number of new subdomains added. No-op without a key.
+
+    `subdomains=False` keeps the DNS records and the history but skips the host
+    list — that is what a single-target scan wants: everything about this one
+    host, nothing that widens the scope.
+    """
     if not available():
         log.info("deep DNS skipped (no key)")
         return 0
@@ -129,7 +135,7 @@ def run(result: ScanResult, domain: str, *, history: bool = True) -> int:
     added = 0
 
     # 1. Subdomains -------------------------------------------------------- #
-    data = _get(session, f"/domain/{domain}/subdomains?children_only=false&include_inactive=true")
+    data = _get(session, f"/domain/{domain}/subdomains?children_only=false&include_inactive=true") if subdomains else None
     if data:
         subs = data.get("subdomains", []) or []
         result.dns["subdomain_count"] = data.get("subdomain_count", len(subs))

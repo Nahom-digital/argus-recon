@@ -78,6 +78,8 @@ BBOT_BIN = os.environ.get("ARGUS_BBOT", "bbot")
 WHATWEB_BIN = os.environ.get("ARGUS_WHATWEB", "whatweb")
 FFUF_BIN = os.environ.get("ARGUS_FFUF", "ffuf")
 FEROX_BIN = os.environ.get("ARGUS_FEROX", "feroxbuster")
+TOR_BIN = os.environ.get("ARGUS_TOR", "tor")
+TORSOCKS_BIN = os.environ.get("ARGUS_TORSOCKS", "torsocks")
 
 # --------------------------------------------------------------------------- #
 # Network behaviour
@@ -94,6 +96,27 @@ MAX_JS_BYTES = int(os.environ.get("ARGUS_MAX_JS_BYTES", "3000000"))     # skip h
 MAX_BODY_STORE = int(os.environ.get("ARGUS_MAX_BODY_STORE", "20000"))   # chars of response body kept in JSON
 
 VERIFY_TLS = os.environ.get("ARGUS_VERIFY_TLS", "0") == "1"             # recon targets often have bad certs
+
+# --------------------------------------------------------------------------- #
+# Tor transport — set at runtime by modules.tor.connect() and read by
+# util.make_session() (HTTP) and subdomain (name resolution). Nothing here is a
+# preference: while TOR_ACTIVE is true every request must go through the proxy,
+# so the flags live in one place instead of being threaded through call sites.
+# --------------------------------------------------------------------------- #
+TOR_SOCKS_HOST = os.environ.get("ARGUS_TOR_HOST", "127.0.0.1")
+TOR_SOCKS_PORT = int(os.environ.get("ARGUS_TOR_PORT", "9050"))
+TOR_BOOTSTRAP_TIMEOUT = int(os.environ.get("ARGUS_TOR_BOOTSTRAP", "180"))
+TOR_ACTIVE = False          # the scan is running over Tor
+HTTP_PROXY: str | None = None   # e.g. "socks5h://127.0.0.1:9050"
+# DNS-over-HTTPS resolvers used instead of UDP DNS while Tor is active (a UDP
+# resolver would bypass the proxy and leak every hostname we look up).
+DOH_ENDPOINTS = [
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/resolve",
+]
+# Plain resolvers used when Tor is off.
+DNS_NAMESERVERS = [s for s in os.environ.get(
+    "ARGUS_DNS", "1.1.1.1,8.8.8.8,9.9.9.9").split(",") if s.strip()]
 
 # ipinfo.io token is optional; without one the free tier still returns core fields.
 IPINFO_TOKEN = os.environ.get("IPINFO_TOKEN", "").strip()

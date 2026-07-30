@@ -5,6 +5,7 @@ Argus Recon — scan engine.
 Runs the full single-domain recon pipeline in order and writes one JSON file per
 scan into ./scans:
 
+    0. Tor transport (optional)           (modules.tor — before anything else)
     1. subdomain discovery + infra        (modules.subdomain, BBOT)
     2. tech-stack fingerprinting          (modules.fingerprint, WhatWeb -a 3)
     3. crawl  -> 4. HTML parse -> 5. JS parse   (modules.crawler)
@@ -13,6 +14,14 @@ scan into ./scans:
     8. field-intent classification        (modules.classifier)
     9. storage                            (scans/{domain}_{timestamp}.json)
    10. graph load                         (modules.graph_loader, Neo4j)
+
+Two switches change the shape of a run rather than a step of it:
+
+  * `--tor`    establishes a Tor circuit first and routes every request, name
+               lookup and external tool through it; if that cannot be done the
+               scan aborts instead of falling back to a direct connection.
+  * `--single` scans exactly the host it was given: no subdomain enumeration and
+               nothing off that host is in scope, anywhere in the pipeline.
 
 This is not a terminal command. Scans are started from the dashboard, which
 runs this module as a worker (web.server sets ARGUS_INTERNAL=1 and streams the
@@ -29,9 +38,10 @@ import time
 
 from modules import config
 from modules.schema import ScanResult
-from modules.util import get_logger, registrable_root, registrable_domain, is_subdomain_of
+from modules.util import (get_logger, registrable_root, registrable_domain,
+                          is_subdomain_of, set_single_host)
 from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
-                     classifier, graph_loader, securitytrails)
+                     classifier, graph_loader, securitytrails, tor)
 
 log = get_logger("main")
 
@@ -76,14 +86,22 @@ def _selected(args) -> set[str]:
 
 def run_pipeline(args) -> ScanResult:
     raw_host = registrable_root(args.domain)
+    # A single-target scan is by definition exactly the host it was given.
+    exact = bool(args.exact_scope or args.single)
     # If the user handed us a subdomain, pivot the scan to its apex so the rest
     # of the subdomains are enumerated too (item 5). --exact-scope keeps the host.
-    domain = raw_host if args.exact_scope else registrable_domain(raw_host)
+    domain = raw_host if exact else registrable_domain(raw_host)
     input_host = raw_host if is_subdomain_of(raw_host, domain) else None
     if input_host:
         log.info(f"target {raw_host} is a subdomain — pivoting scope to apex {domain}")
 
+    # Single-target mode: nothing outside this one host is in scope, for every
+    # module at once (crawler, parsers, bruteforce, graph).
+    set_single_host(bool(args.single))
+
     result = ScanResult(domain)
+    result.meta["scope"] = ("host" if args.single
+                            else "exact" if args.exact_scope else "apex")
     run = _selected(args)
     t0 = time.time()
 
@@ -93,17 +111,23 @@ def run_pipeline(args) -> ScanResult:
 
     print(BANNER.format(ver="1.0.0", target=domain), file=sys.stderr)
     log.info(f"modules: {', '.join(m for m in ALL_MODULES if m in run)}"
-             + ("  · deep DNS" if deep else ""))
+             + ("  · deep DNS" if deep else "")
+             + ("  · single target" if args.single else "")
+             + ("  · over Tor" if tor.active() else ""))
+    if args.single:
+        log.info(f"scope: {domain} only — no subdomain enumeration, nothing off-host "
+                 "is followed")
 
     # 1. Subdomains + infra
     if "subdomain" in run:
         subdomain.run(result, domain, passive=args.passive,
                       timeout=args.bbot_timeout, use_bbot=not args.no_bbot,
-                      deep=deep, input_host=input_host)
+                      deep=deep, input_host=input_host, single=args.single)
     else:
         result.add_subdomain(domain, source="seed")
         subdomain.run(result, domain, passive=True, use_bbot=False,
-                      deep=deep, input_host=input_host)  # resolve + DNS only
+                      deep=deep, input_host=input_host,
+                      single=args.single)  # resolve + DNS only
 
     # 2. Fingerprint
     if "fingerprint" in run:
@@ -152,6 +176,12 @@ def print_summary(result: ScanResult, path) -> None:
     ]
     for label, val in rows:
         print(f"  {label:<36} {val}", file=sys.stderr)
+    if d["meta"].get("scope") == "host":
+        print(f"  {'Scope':<36} single target ({d['meta']['domain']} only)", file=sys.stderr)
+    t = d["meta"].get("tor") or {}
+    if t.get("active") or t.get("exit_ip"):
+        print(f"  {'Transport':<36} Tor exit {t.get('exit_ip')}"
+              + ("" if t.get("verified") else " (proxied, unverified)"), file=sys.stderr)
     if result.meta.get("classification_summary"):
         print("  Field intents: "
               + ", ".join(f"{k}={v}" for k, v in
@@ -176,6 +206,12 @@ def main(argv=None):
                         "(needs an API key; prompts on first use)")
     p.add_argument("--exact-scope", action="store_true",
                    help="treat the given host literally; do not pivot a subdomain to its apex")
+    p.add_argument("--single", action="store_true",
+                   help="single-target scan: this host only — no subdomain "
+                        "enumeration, nothing off-host is in scope")
+    p.add_argument("--tor", action="store_true",
+                   help="route the whole scan through Tor; aborts if a circuit "
+                        "cannot be established (never falls back to a direct scan)")
     p.add_argument("--no-prompt", action="store_true",
                    help=argparse.SUPPRESS)   # accepted for compatibility; never prompts
     p.add_argument("--no-bbot", action="store_true",
@@ -212,16 +248,33 @@ def main(argv=None):
             if name.startswith("argus."):
                 logging.getLogger(name).setLevel(logging.DEBUG)
 
-    result = run_pipeline(args)
+    # 0. Tor, before anything reaches the target. A failure here ends the run:
+    #    the operator asked for Tor, so a direct scan is not an acceptable
+    #    substitute.
+    if args.tor:
+        try:
+            tor.connect()
+        except tor.TorError as exc:
+            log.error(f"Tor: {exc}")
+            print("\n  Scan aborted — Tor was requested and could not be "
+                  "established.\n  Nothing was sent to the target.\n", file=sys.stderr)
+            return 3
 
-    # 9. Storage
-    path = result.save()
+    try:
+        result = run_pipeline(args)
+        if args.tor:
+            result.meta["tor"] = tor.state()
 
-    # 10. Graph
-    if "graph" in _selected(args):
-        graph_loader.load(result.to_dict())
+        # 9. Storage
+        path = result.save()
 
-    print_summary(result, path)
+        # 10. Graph
+        if "graph" in _selected(args):
+            graph_loader.load(result.to_dict())
+
+        print_summary(result, path)
+    finally:
+        tor.shutdown()
     return 0
 
 

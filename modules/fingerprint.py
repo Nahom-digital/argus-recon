@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import config
+from . import config, tor
 from .schema import ScanResult
 from .util import (get_logger, make_session, resolve_tool, run_cmd, host_of,
                    in_scope, is_html)
@@ -104,6 +104,14 @@ def _run_whatweb(urls: list[str], timeout: int) -> list[dict]:
                f"--max-threads={min(config.CRAWL_THREADS, 25)}",
                "--open-timeout=8", "--read-timeout=12",
                f"--log-json={out}"] + urls
+        # WhatWeb only speaks to an HTTP proxy, so over Tor it has to be wrapped.
+        if tor.active():
+            wrapped = tor.wrap_cmd(cmd)
+            if wrapped is None:
+                log.warning("fingerprint engine skipped: Tor is on but torsocks is "
+                            "not installed, and running it unwrapped would bypass Tor")
+                return []
+            cmd = wrapped
         proc = run_cmd(cmd, timeout=timeout, log=log)
         if proc is None:
             return []

@@ -313,11 +313,15 @@ say "checking external recon tools …"
 need_apt=()
 command -v whatweb >/dev/null || need_apt+=(whatweb)
 command -v ffuf    >/dev/null || command -v feroxbuster >/dev/null || need_apt+=(ffuf)
+# tor + torsocks power the optional "via Tor" scan. Not fatal if absent — the
+# toggle just stays locked in the dashboard — but install them so it works.
+command -v tor      >/dev/null || need_apt+=(tor)
+command -v torsocks >/dev/null || need_apt+=(torsocks)
 if [ "${#need_apt[@]}" -gt 0 ]; then
   say "installing recon tools: ${need_apt[*]}  (needs sudo)"
   apt_install "${need_apt[@]}" || warn "install manually later: ${need_apt[*]}"
 else
-  say "whatweb + ffuf/feroxbuster already present ✔"
+  say "whatweb + ffuf/feroxbuster + tor already present ✔"
 fi
 
 # bbot (passive subdomain / infra enum) via pipx — install pipx first if needed

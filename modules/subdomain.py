@@ -14,15 +14,17 @@ import concurrent.futures
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 import dns.resolver
 import dns.reversename
 
-from . import config, securitytrails
+from . import config, securitytrails, tor
 from .schema import ScanResult
-from .util import get_logger, in_scope, make_session, resolve_tool, run_cmd, host_of
+from .util import (get_logger, in_scope, make_session, registrable_domain,
+                   resolve_tool, run_cmd, host_of)
 
 log = get_logger("subdomain")
 
@@ -51,13 +53,63 @@ def _resolver() -> dns.resolver.Resolver:
     r = dns.resolver.Resolver()
     r.timeout = 3.0
     r.lifetime = 4.0
-    r.nameservers = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+    r.nameservers = list(config.DNS_NAMESERVERS)
     return r
+
+
+# --------------------------------------------------------------------------- #
+# DNS over HTTPS — used instead of the UDP resolver while Tor is active.
+#
+# A plain resolver would send every hostname we look up straight out of this
+# machine, past the proxy, which defeats the point of scanning over Tor. DoH goes
+# through the same proxied session as the rest of the scan and supports every
+# record type we need, so Tor mode loses no capability.
+# --------------------------------------------------------------------------- #
+_DOH_TYPES = {"A": 1, "NS": 2, "CNAME": 5, "SOA": 6, "PTR": 12, "MX": 15,
+              "TXT": 16, "AAAA": 28}
+_doh_session = None
+_doh_lock = threading.Lock()
+
+
+def _doh() -> "object":
+    global _doh_session
+    with _doh_lock:
+        if _doh_session is None:
+            _doh_session = make_session()
+            _doh_session.headers.update({"Accept": "application/dns-json"})
+            _doh_session.verify = True   # a DoH answer we cannot authenticate is worthless
+        return _doh_session
+
+
+def _doh_query(name: str, rtype: str) -> list[str]:
+    """Return the raw rdata strings for one name/type, or [] on any failure."""
+    sess = _doh()
+    for endpoint in config.DOH_ENDPOINTS:
+        try:
+            resp = sess.get(endpoint, params={"name": name, "type": rtype},
+                            timeout=max(config.HTTP_TIMEOUT, 20))
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+        except Exception:
+            continue
+        if data.get("Status") not in (0, None):
+            return []
+        want = _DOH_TYPES.get(rtype.upper())
+        out = [str(a.get("data", "")).strip()
+               for a in (data.get("Answer") or [])
+               if want is None or a.get("type") == want]
+        return [v for v in out if v]
+    return []
 
 
 def resolve_host(host: str) -> list[str]:
     """Return A/AAAA addresses for a host (empty list if it does not resolve)."""
     ips: list[str] = []
+    if config.TOR_ACTIVE:
+        for rdtype in ("A", "AAAA"):
+            ips += _doh_query(host, rdtype)
+        return sorted({ip for ip in ips if _looks_like_ip(ip)})
     r = _resolver()
     for rdtype in ("A", "AAAA"):
         try:
@@ -70,7 +122,10 @@ def resolve_host(host: str) -> list[str]:
 
 def _resolve_many(hosts: list[str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.CRAWL_THREADS) as ex:
+    # Over Tor each lookup is an HTTPS round trip through a circuit; a wide fan-out
+    # buys nothing and starves the crawler's own circuits.
+    workers = 6 if config.TOR_ACTIVE else config.CRAWL_THREADS
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         futs = {ex.submit(resolve_host, h): h for h in hosts}
         for fut in concurrent.futures.as_completed(futs):
             out[futs[fut]] = fut.result()
@@ -81,6 +136,12 @@ def _resolve_many(hosts: list[str]) -> dict[str, list[str]]:
 # WHOIS
 # --------------------------------------------------------------------------- #
 def domain_whois(domain: str) -> dict:
+    if config.TOR_ACTIVE:
+        # WHOIS is a raw port-43 conversation made outside our HTTP stack, so it
+        # would go out in the clear. Skipped rather than leaked; deep DNS still
+        # returns registrar data over HTTPS through the proxy.
+        log.warning("WHOIS skipped over Tor (port 43 cannot be proxied here)")
+        return {}
     try:
         import whois  # python-whois
         w = whois.whois(domain)
@@ -221,6 +282,15 @@ def run_bbot(result: ScanResult, domain: str, passive: bool, timeout: int) -> in
     with tempfile.TemporaryDirectory(prefix="argus_bbot_") as tmp:
         outdir = Path(tmp)
         cmd = _bbot_command(domain, outdir, passive)
+        # Over Tor the engine has to be torsocks-wrapped: it opens its own
+        # sockets and resolvers, none of which know about our proxy.
+        if tor.active():
+            wrapped = tor.wrap_cmd(cmd)
+            if wrapped is None:
+                log.warning("passive-enum engine skipped: Tor is on but torsocks is "
+                            "not installed, and running it unwrapped would bypass Tor")
+                return 0
+            cmd = wrapped
         log.info(f"running BBOT ({'passive' if passive else 'subdomain-enum'}) — this can take a few minutes")
         log.info("  " + " ".join(cmd))
         proc = run_cmd(cmd, timeout=timeout, log=log)
@@ -234,9 +304,43 @@ def run_bbot(result: ScanResult, domain: str, passive: bool, timeout: int) -> in
 # --------------------------------------------------------------------------- #
 # Fallback: crt.sh
 # --------------------------------------------------------------------------- #
+def _doh_records(domain: str) -> dict[str, list[dict]]:
+    """The DoH equivalent of `query_dns_records`, parsing the wire-format rdata
+    strings a JSON DoH endpoint returns into the same record shape."""
+    out: dict[str, list[dict]] = {}
+    for rtype in config.DNS_RECORD_TYPES:
+        recs: list[dict] = []
+        for data in _doh_query(domain, rtype):
+            rec: dict = {"value": data, "first_seen": None, "last_seen": None}
+            try:
+                if rtype == "MX":
+                    prio, _, host = data.partition(" ")
+                    rec["value"] = host.strip().rstrip(".")
+                    rec["priority"] = int(prio)
+                elif rtype in ("NS", "CNAME"):
+                    rec["value"] = data.rstrip(".")
+                elif rtype == "TXT":
+                    rec["value"] = data.strip().strip('"')
+                elif rtype == "SOA":
+                    # mname rname serial refresh retry expire minimum
+                    parts = data.split()
+                    rec["value"] = parts[0].rstrip(".")
+                    rec["email"] = parts[1].rstrip(".") if len(parts) > 1 else None
+                    rec["ttl"] = int(parts[6]) if len(parts) > 6 else None
+            except (ValueError, IndexError):
+                rec["value"] = data
+            if rec["value"]:
+                recs.append(rec)
+        if recs:
+            out[rtype.lower()] = recs
+    return out
+
+
 def query_dns_records(domain: str) -> dict[str, list[dict]]:
     """Resolve the apex domain's core DNS records locally (A/AAAA/MX/NS/CNAME/
     TXT/SOA). Always available (no key). Returns {rtype_lower: [ {value, ...} ]}."""
+    if config.TOR_ACTIVE:
+        return _doh_records(domain)
     r = _resolver()
     out: dict[str, list[dict]] = {}
     for rtype in config.DNS_RECORD_TYPES:
@@ -290,7 +394,7 @@ def crtsh_subdomains(domain: str) -> set[str]:
 # --------------------------------------------------------------------------- #
 def run(result: ScanResult, domain: str, *, passive: bool = False,
         timeout: int = 900, use_bbot: bool = True, deep: bool = False,
-        input_host: str | None = None) -> None:
+        input_host: str | None = None, single: bool = False) -> None:
     t0 = time.time()
     domain = result.domain
 
@@ -298,33 +402,45 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
     # it is recognised while we enumerate the rest of the apex's subdomains.
     if input_host:
         ih = input_host.strip().lower().rstrip(".")
-        if ih and ih != domain and in_scope(f"http://{ih}", domain):
+        if ih and ih != domain and in_scope(f"http://{ih}", domain, exact=False):
             result.add_subdomain(ih, source="input")
 
-    n = run_bbot(result, domain, passive, timeout) if use_bbot else 0
+    if single:
+        # Single-target scan: the target is the whole host list. No passive
+        # enumeration, no certificate transparency, no name brute — the point of
+        # this mode is that nothing widens the scope beyond what was asked for.
+        log.info(f"single-target scan — {domain} only, no host enumeration")
+        result.add_subdomain(domain, source="input")
+        if deep and securitytrails.available():
+            log.info("deep DNS: records + history for this host only")
+            securitytrails.run(result, domain, subdomains=False)
+        elif deep:
+            log.warning("deep DNS requested but no key configured — skipping")
+    else:
+        n = run_bbot(result, domain, passive, timeout) if use_bbot else 0
 
-    # Deep DNS (SecurityTrails, code "s") — subdomains + current & historical DNS.
-    deep_added = 0
-    if deep and securitytrails.available():
-        log.info("deep DNS: pulling subdomains + current/historical records")
-        deep_added = securitytrails.run(result, domain)
-    elif deep:
-        log.warning("deep DNS requested but no key configured — skipping")
+        # Deep DNS (SecurityTrails, code "s") — subdomains + current & historical DNS.
+        deep_added = 0
+        if deep and securitytrails.available():
+            log.info("deep DNS: pulling subdomains + current/historical records")
+            deep_added = securitytrails.run(result, domain)
+        elif deep:
+            log.warning("deep DNS requested but no key configured — skipping")
 
-    # Fallback / supplement with crt.sh if BBOT + deep gave little.
-    if (n + deep_added) < 3:
-        log.info("supplementing with certificate transparency")
-        for h in crtsh_subdomains(domain):
-            result.add_subdomain(h, source=SRC_CRTSH)
+        # Fallback / supplement with crt.sh if BBOT + deep gave little.
+        if (n + deep_added) < 3:
+            log.info("supplementing with certificate transparency")
+            for h in crtsh_subdomains(domain):
+                result.add_subdomain(h, source=SRC_CRTSH)
 
-    # Always ensure apex + common names are considered.
-    result.add_subdomain(domain, source="seed")
-    if n == 0 and not use_bbot:
-        log.info(f"DNS-brute of {len(COMMON_SUBS)} common names")
-        candidates = [f"{s}.{domain}" for s in COMMON_SUBS]
-        for host, ips in _resolve_many(candidates).items():
-            if ips:
-                result.add_subdomain(host, source="dns-brute", ips=ips)
+        # Always ensure apex + common names are considered.
+        result.add_subdomain(domain, source="seed")
+        if n == 0 and not use_bbot:
+            log.info(f"DNS-brute of {len(COMMON_SUBS)} common names")
+            candidates = [f"{s}.{domain}" for s in COMMON_SUBS]
+            for host, ips in _resolve_many(candidates).items():
+                if ips:
+                    result.add_subdomain(host, source="dns-brute", ips=ips)
 
     # Resolve everything we have so IP links are complete.
     hosts = [r["host"] for r in result._subdomains.values()]  # type: ignore[attr-defined]
@@ -349,7 +465,9 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
             result.dns["sources"].append("dns") if "dns" not in result.dns["sources"] else None
 
     # Domain-level WHOIS (once). Keep the deep WHOIS if present, else python-whois.
-    result.meta["domain_whois"] = domain_whois(domain)
+    # A subdomain has no registration of its own, so ask about the registrable
+    # domain it sits under.
+    result.meta["domain_whois"] = domain_whois(registrable_domain(domain))
     if not result.dns.get("whois"):
         result.dns["whois"] = result.meta["domain_whois"]
 

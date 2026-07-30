@@ -4,6 +4,7 @@
 'use strict';
 
 let DEEP_AVAILABLE = false;
+let TOR = { available: false };
 const STAGES = [
   ['subdomain', 'subdomains'], ['fingerprint', 'fingerprint'], ['crawl', 'crawl'],
   ['bruteforce', 'bruteforce'], ['ip_enrich', 'IP enrich'], ['classify', 'classify'],
@@ -28,7 +29,9 @@ async function loadStatus() {
   try {
     const s = await getJSON('/api/status');
     DEEP_AVAILABLE = !!s.deep_available;
+    TOR = s.tor || { available: false };
     reflectDeep();
+    reflectTor();
     applyDefaults(s.defaults || {});
 
     // Service state first: the dashboard is the product now, so whether it is
@@ -81,12 +84,42 @@ function reflectDeep() {
   if (!DEEP_AVAILABLE && box) box.checked = false;
 }
 
+/* Tor is a machine capability, not a setting: it needs a tor client (or a live
+   SOCKS proxy) and the Python SOCKS dependency. Lock the toggle when the server
+   says it cannot honour it, and say which piece is missing rather than letting
+   the scan fail at its first step. */
+function torReason() {
+  if (TOR.available) {
+    return TOR.running
+      ? 'Route the whole scan through the Tor proxy already running on ' + (TOR.socks || 'this machine')
+      : 'Route the whole scan through Tor. A private tor is started for the run and stopped after it.';
+  }
+  if (!TOR.socks_lib) return 'Tor needs the SOCKS dependency — run ./install.sh to add it';
+  if (!TOR.binary) return 'Tor is not installed on this machine — install tor, or start a Tor client';
+  return 'Tor is unavailable on this machine';
+}
+
+function reflectTor() {
+  const chk = document.getElementById('torChk');
+  const box = document.getElementById('optTor');
+  if (!chk) return;
+  chk.classList.toggle('locked', !TOR.available);
+  chk.title = torReason();
+  if (!TOR.available && box) box.checked = false;
+}
+
 function scanRow(s) {
   const st = s.stats || {};
   const meta = [];
   if (s.started_at) meta.push(icon('clock') + ' ' + timeAgo(s.started_at));
   if (s.duration_sec != null) meta.push(fmtDur(s.duration_sec));
   meta.push(fmtBytes(s.size));
+  // a single-target or Tor run must not look identical to a full direct one
+  if (s.scope === 'host')
+    meta.push(`<span class="how">${icon('point-filled')} single host</span>`);
+  if (s.tor && s.tor.exit_ip)
+    meta.push(`<span class="how" title="Exit node ${esc(s.tor.exit_ip)}${
+      s.tor.verified ? '' : ' (proxied, unverified)'}">${icon('shield-half-filled')} via Tor</span>`);
   const metric = (n, l, accent) =>
     `<div class="metric ${accent ? 'accent' : ''}"><div class="n">${fmtNum(n)}</div><div class="l">${l}</div></div>`;
   return `<div class="scan-row-wrap">
@@ -218,6 +251,8 @@ function jobOpts(j) {
   const o = j.options || {};
   const label = Object.fromEntries(STAGES);
   const tags = [];
+  if (o.tor) tags.push('via Tor');
+  if (o.single) tags.push('single host');
   if (o.passive) tags.push('passive');
   if (o.deep) tags.push('deep DNS');
   if (o.exact_scope) tags.push('exact host');
@@ -306,6 +341,34 @@ function renderStages() {
       <span>${esc(label)}</span></label>`).join('');
 }
 
+/* Each scope answers "what counts as the target?", so the help line states the
+   consequence of the current choice instead of describing all three at once. */
+const SCOPE_HELP = {
+  apex: 'A subdomain target pivots to its apex, so the rest of the estate is enumerated too.',
+  exact: 'The host is taken literally. Its own subdomains are still enumerated and in scope.',
+  single: 'This host and nothing else. No subdomain enumeration, and anything off-host is recorded but never followed.',
+};
+
+function currentScope() {
+  return (document.querySelector('input[name=scope]:checked') || {}).value || 'apex';
+}
+
+function reflectScope() {
+  const scope = currentScope();
+  const help = document.getElementById('scopeHelp');
+  if (help) help.textContent = SCOPE_HELP[scope] || SCOPE_HELP.apex;
+  // Nothing is enumerated in single-host mode, so the enum-engine switch has
+  // nothing to act on. Disabled and explained, rather than silently ignored.
+  const box = document.getElementById('optNoBbot');
+  const label = document.getElementById('noBbotChk');
+  if (!box || !label) return;
+  const na = scope === 'single';
+  box.disabled = na;
+  if (na) box.checked = false;
+  label.classList.toggle('na', na);
+  label.title = na ? 'No host enumeration runs in single-host mode' : '';
+}
+
 function scanOptions() {
   const num = (id) => {
     const v = (document.getElementById(id).value || '').trim();
@@ -314,10 +377,13 @@ function scanOptions() {
   };
   const skip = [...document.querySelectorAll('[data-stage]')]
     .filter(c => !c.checked).map(c => c.dataset.stage);
+  const scope = currentScope();
   return {
     passive: document.getElementById('optPassive').checked,
     deep: document.getElementById('optDeep').checked,
-    exact_scope: document.querySelector('input[name=scope]:checked').value === 'exact',
+    tor: document.getElementById('optTor').checked,
+    single: scope === 'single',
+    exact_scope: scope === 'exact',
     no_bbot: document.getElementById('optNoBbot').checked,
     max_pages: num('optMaxPages'),
     max_depth: num('optMaxDepth'),
@@ -327,7 +393,7 @@ function scanOptions() {
 
 /* how many advanced options differ from the defaults */
 function countAdvanced(o) {
-  return (o.exact_scope ? 1 : 0) + (o.no_bbot ? 1 : 0) +
+  return (o.exact_scope ? 1 : 0) + (o.single ? 1 : 0) + (o.no_bbot ? 1 : 0) +
     (o.max_pages ? 1 : 0) + (o.max_depth ? 1 : 0) + o.skip.length;
 }
 
@@ -341,6 +407,14 @@ function reflectOptionCount() {
 
 function wireOptions() {
   renderStages();
+  reflectScope();
+  document.querySelectorAll('input[name=scope]').forEach(r =>
+    r.addEventListener('change', reflectScope));
+  // a locked Tor toggle has nothing to open — say what is missing, in place
+  const torChk = document.getElementById('torChk');
+  if (torChk) torChk.addEventListener('click', e => {
+    if (!TOR.available) { e.preventDefault(); formError(null, torReason()); }
+  });
   const btn = document.getElementById('optsToggle');
   const panel = document.getElementById('scanOpts');
   if (!btn || !panel) return;
@@ -367,6 +441,7 @@ function wireNewScan() {
     if (!/^[a-z0-9.\-]+\.[a-z]{2,}$/.test(domain)) return formError(input, 'Enter a domain like example.com');
     const opts = scanOptions();
     if (opts.deep && !DEEP_AVAILABLE) { openKeyModal(); return; }
+    if (opts.tor && !TOR.available) return formError(null, torReason());
     btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…';
     try {
       const r = await fetch('/api/scan', {
@@ -387,7 +462,9 @@ function wireNewScan() {
   });
 }
 
-/* inline, next to the field that caused it — no toast, no modal */
+/* inline, next to the field that caused it — no toast, no modal. `input` is
+   optional: a blocked option (Tor unavailable) is not the domain field's fault,
+   so nothing gets marked invalid in that case. */
 function formError(input, msg) {
   const form = document.getElementById('newscan');
   let el = form.querySelector('.ns-error');
@@ -396,10 +473,12 @@ function formError(input, msg) {
     form.querySelector('.ns-main').insertAdjacentElement('afterend', el);
   }
   el.innerHTML = `${icon('alert-triangle')} ${esc(msg)}`;
-  input.classList.add('invalid');
-  input.focus();
+  if (input) { input.classList.add('invalid'); input.focus(); }
   clearTimeout(formError._t);
-  formError._t = setTimeout(() => { el.remove(); input.classList.remove('invalid'); }, 5000);
+  formError._t = setTimeout(() => {
+    el.remove();
+    if (input) input.classList.remove('invalid');
+  }, 5000);
 }
 
 document.addEventListener('DOMContentLoaded', () => {

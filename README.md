@@ -56,8 +56,27 @@ handler function, and links it to the request node in the graph and the
 **If you point Argus at a subdomain** (e.g. `api.example.com`) it recognises it as a
 subdomain, pivots the scan to the registrable apex (`example.com`), enumerates the
 *other* subdomains too, and keeps the one you named tagged as the `input` source.
-Set **Scope → This host only** in the launcher to disable the pivot and scan just
-the host you gave.
+
+**Scope** has three settings in the launcher:
+
+| Scope | Meaning |
+|-------|---------|
+| Apex + subdomains *(default)* | a subdomain target pivots to its apex; the whole estate is enumerated |
+| Host + subdomains | the host is taken literally (no apex pivot); its own subdomains are still enumerated |
+| **Single host** | this host and nothing else — no enumeration; anything off-host is logged but never followed |
+
+**Tor.** Turn on **via Tor** and the scan runs through a Tor circuit end to end.
+Before anything reaches the target Argus finds a usable SOCKS proxy — reusing a
+Tor client already listening on `127.0.0.1:9050`, or starting a private `tor` with
+its own throwaway data directory — waits for the circuit to bootstrap, and confirms
+the exit really is a Tor node. Only then does the pipeline start. Every request,
+every name lookup (switched to DNS-over-HTTPS so no hostname leaks past the proxy),
+and every external tool (torsocks-wrapped, or handed the SOCKS proxy natively for
+Go tools like ffuf) goes through it. If a circuit cannot be established the scan
+**aborts** rather than falling back to a direct connection — the point of the toggle
+is that your address never reaches the target. WHOIS (raw port 43) is skipped over
+Tor rather than leaked. The toggle is locked when the machine has no `tor` and no
+SOCKS dependency; the launcher says which piece is missing.
 
 ---
 
@@ -74,8 +93,9 @@ cd argus-recon
 That is the whole install. It is fresh-server safe and idempotent:
 
 1. installs the base packages it needs (python venv/pip, pipx, curl, git),
-2. installs the external recon engines (whatweb, ffuf/feroxbuster, bbot via pipx),
-3. builds the Python venv from `requirements.txt`,
+2. installs the external recon engines (whatweb, ffuf/feroxbuster, bbot via pipx,
+   tor + torsocks for Tor scans),
+3. builds the Python venv from `requirements.txt` (incl. PySocks for Tor),
 4. writes and enables the **`argus-recon`** systemd *user* service, with linger on
    so it survives logout and reboot,
 5. waits until the dashboard actually answers, then prints **LIVE** with the URL,
@@ -138,14 +158,19 @@ old flags did is in the launcher on the home page.
 Open **http://127.0.0.1:7666**, type the target, press **Run scan**. The job
 appears with a live log, and the finished scan opens in the graph view.
 
-| Control | Old flag | Meaning |
+| Control | Engine flag | Meaning |
 |---------|----------|---------|
 | deep DNS | `--deep` | extra subdomains + full DNS records + historical DNS (needs a key) |
 | passive | `--passive` | passive enumeration only |
-| Scope: *This host only* | `--exact-scope` | treat the host literally; don't pivot a subdomain to its apex |
+| via Tor | `--tor` | run the whole scan through Tor; aborts if no circuit (never scans direct) |
+| Scope: *Host + subdomains* | `--exact-scope` | treat the host literally; don't pivot a subdomain to its apex |
+| Scope: *Single host* | `--single` | this host only — no enumeration, nothing off-host is followed |
 | skip passive-enum engine | `--no-bbot` | use certificate transparency + DNS fallback instead |
 | Max pages / Max depth | `--max-pages` `--max-depth` | crawler bounds (blank = configured default) |
 | Pipeline stages | `--skip a,b` / `--no-graph` | switch off any of subdomains, fingerprint, crawl, bruteforce, IP enrich, classify, graph |
+
+The flags are how the dashboard drives the engine internally; they are not a
+terminal interface (the engine refuses to run from a terminal).
 
 A running scan can be stopped from its job row — that is what replaces Ctrl-C.
 Each scan still writes `scans/{domain}_{timestamp}.json`.
@@ -239,9 +264,10 @@ argus-recon/
   .env                    local secrets (deep-DNS key) — gitignored
   modules/
     config.py             paths, tool commands, pattern libraries, .env loader, source codes
-    util.py               logging, HTTP session, scope rule, eTLD+1, tool resolution
+    util.py               logging, HTTP session (Tor-aware), scope rule, eTLD+1, tool resolution
     schema.py             ScanResult container + dedup + DNS store + JSON serialisation
-    subdomain.py          (1) BBOT + deep DNS + crt.sh/DNS fallback + DNS records + WHOIS
+    tor.py                (0) Tor transport — proxy discovery, bootstrap, verification
+    subdomain.py          (1) BBOT + deep DNS + crt.sh/DNS fallback + DNS records + WHOIS (DoH over Tor)
     securitytrails.py     (1) deep DNS: subdomains + current & historical records
     fingerprint.py        (2) WhatWeb -a 3
     crawler.py            (3) in-scope recursive crawler

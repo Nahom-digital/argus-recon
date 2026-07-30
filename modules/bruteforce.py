@@ -25,7 +25,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import config
+from . import config, tor
 from .schema import ScanResult
 from .util import (get_logger, make_session, resolve_tool, run_cmd, normalize_url,
                    in_scope, classify_resource, is_interesting_file, path_ext)
@@ -171,14 +171,22 @@ def _run_ffuf(root: str, wordlist: Path, timeout: int, maxtime: int) -> list[dic
     with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as tf:
         out = Path(tf.name)
     try:
+        # ffuf is a Go binary — torsocks (an LD_PRELOAD shim) cannot cover it, so
+        # over Tor it gets the SOCKS proxy natively. A circuit is far slower than
+        # a direct connection, so the fan-out comes down with it or everything
+        # just times out.
+        proxy = tor.proxy_url("socks5")
+        threads = min(config.BRUTE_THREADS, 8) if proxy else config.BRUTE_THREADS
         cmd = [
             ffuf, "-w", f"{wordlist}:FUZZ", "-u", fuzz_url,
             "-mc", config.BRUTE_STATUS_MATCH,
             "-e", ",".join("." + e for e in config.BRUTE_EXTENSIONS),
-            "-t", str(config.BRUTE_THREADS), "-ac", "-noninteractive", "-s",
+            "-t", str(threads), "-ac", "-noninteractive", "-s",
             "-maxtime", str(maxtime), "-timeout", "8",
             "-o", str(out), "-of", "json",
         ]
+        if proxy:
+            cmd += ["-x", proxy]
         proc = run_cmd(cmd, timeout=timeout, log=log)
         if proc is None:
             return []

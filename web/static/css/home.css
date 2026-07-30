@@ -86,9 +86,12 @@
 .statusbar .st-btn svg{width:13px;height:13px;color:var(--accent-ink)}
 .statusbar .st-btn:hover{background:var(--accent-weak-2)}
 
-/* deep-DNS option: locked look until a key is set */
+/* deep-DNS / Tor options: locked look until the prerequisite is in place.
+   `.locked` means "clicking tells you how to unlock it"; `.na` means the option
+   has no meaning under the current scope, so the input is genuinely disabled. */
 .newscan label.chk.locked{opacity:.55}
 .newscan label.chk.locked input{pointer-events:none}
+.newscan label.chk.na{opacity:.45;cursor:not-allowed}
 
 /* scan list */
 .section-label{font-size:var(--fs-xs);font-weight:600;letter-spacing:.04em;text-transform:uppercase;
@@ -117,6 +120,10 @@
   display:flex;align-items:center;gap:8px}
 .scan-row .dom svg{width:15px;height:15px;color:var(--accent)}
 .scan-row .meta{color:var(--muted);font-size:var(--fs-xs);margin-top:4px;display:flex;gap:10px;flex-wrap:wrap}
+/* how the scan was taken (single target, over Tor) sits with the other facts
+   about the run, not as a badge competing with the domain */
+.scan-row .meta .how{display:inline-flex;align-items:center;gap:4px;color:var(--ink-2)}
+.scan-row .meta .how svg{width:13px;height:13px;color:var(--faint)}
 .scan-row .metrics{display:flex;gap:20px;align-items:center}
 .metric{text-align:right;min-width:52px}
 .metric .n{font-family:var(--mono);font-weight:500;font-size:var(--fs-md);color:var(--ink)}

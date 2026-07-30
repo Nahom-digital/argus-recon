@@ -63,7 +63,12 @@ def get_logger(name: str) -> logging.Logger:
 # --------------------------------------------------------------------------- #
 def make_session() -> requests.Session:
     """A requests session with retries, a recon UA, and TLS verification off by
-    default (recon targets frequently present broken/self-signed certificates)."""
+    default (recon targets frequently present broken/self-signed certificates).
+
+    This is also where the Tor transport is applied: with `config.HTTP_PROXY` set
+    every module that asks for a session gets a proxied one, so "scan over Tor"
+    is one decision made once rather than a flag each module has to remember.
+    """
     sess = requests.Session()
     sess.headers.update(
         {
@@ -73,6 +78,9 @@ def make_session() -> requests.Session:
         }
     )
     sess.verify = config.VERIFY_TLS
+    if config.HTTP_PROXY:
+        sess.proxies = {"http": config.HTTP_PROXY, "https": config.HTTP_PROXY}
+        sess.trust_env = False   # no ambient *_proxy env can redirect us elsewhere
     if Retry is not None:
         retry = Retry(
             total=2, connect=2, read=1, backoff_factor=0.4,
@@ -207,8 +215,28 @@ def host_of(url: str) -> str:
     return netloc.split("@")[-1].split(":")[0].lower()
 
 
-def in_scope(url: str, domain: str) -> bool:
-    """True iff `url`'s host is the target domain or one of its subdomains.
+# Single-target mode ("scan exactly what I gave you"). Process-wide because one
+# engine process runs exactly one scan, and because scope has to mean the same
+# thing to every module — the crawler, the parsers, the bruteforcer and the
+# graph all decide what to follow through `in_scope()`.
+_SINGLE_HOST = False
+
+
+def set_single_host(on: bool) -> None:
+    """Restrict `in_scope()` to the exact target host — no subdomains."""
+    global _SINGLE_HOST
+    _SINGLE_HOST = bool(on)
+
+
+def single_host() -> bool:
+    return _SINGLE_HOST
+
+
+def in_scope(url: str, domain: str, *, exact: bool | None = None) -> bool:
+    """True iff `url`'s host is in scope for this scan.
+
+    Normally that means the target domain or any of its subdomains. In
+    single-host mode it means the target host and nothing else.
 
     This is the single enforcement point for the spec's scope rule.
     """
@@ -216,6 +244,8 @@ def in_scope(url: str, domain: str) -> bool:
     if not host:
         return False
     domain = registrable_root(domain)
+    if _SINGLE_HOST if exact is None else exact:
+        return host == domain
     return host == domain or host.endswith("." + domain)
 
 
