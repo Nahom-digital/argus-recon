@@ -15,13 +15,21 @@ const HOST_IPS = new Map();          // host -> Set(ip)
 
 document.addEventListener('DOMContentLoaded', init);
 
+let SCAN_ID = null;
+/* expanded-row detail is fetched per endpoint and cached so re-opening is free */
+const EP_DETAIL = new Map();
+
 async function init() {
   const layout = document.querySelector('.scan-layout');
   const id = layout.dataset.scanId;
+  SCAN_ID = id;
   wireSections();
+  wireGraphSplitter();
   try {
+    // The list view omits response bodies / DOM / headers — those are the bulk
+    // of a large scan and are fetched per endpoint only when a row is expanded.
     const [scan, graph] = await Promise.all([
-      getJSON(withBase(`/api/scan/${encodeURIComponent(id)}`)),
+      getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/view`)),
       getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/graph`)).catch(() => null),
     ]);
     SCAN = scan;
@@ -448,7 +456,7 @@ function rowHtml(e, i) {
   const tags = [];
   if (!e.in_scope) tags.push(`<span class="tag oos-tag">${icon('external-link')} out-of-scope</span>`);
   (e.sources || []).forEach(sc => tags.push(`<span class="src-chip" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`));
-  return `<div class="trow ${e.in_scope ? '' : 'oos'}" data-i="${i}">
+  return `<div class="trow ${e.in_scope ? '' : 'oos'}" data-i="${i}" data-eid="${esc(e.id || '')}">
     <div class="tsummary">
       <span><span class="method ${esc(e.method)}">${esc(e.method)}</span></span>
       <div class="c-url">
@@ -463,13 +471,17 @@ function rowHtml(e, i) {
   </div>`;
 }
 
-function toggleRow(row) {
+async function toggleRow(row) {
   const open = row.classList.toggle('open');
   const det = row.querySelector('.tdetail');
   if (!open) { det.innerHTML = ''; return; }
   const i = +row.dataset.i;
-  const e = filtered()[i];
-  if (!e) return;
+  const light = filtered()[i];
+  if (!light) return;
+  // The list row carries only light fields; the bodies/headers/found-on that the
+  // detail shows are fetched per endpoint and merged over the light record.
+  const e = await loadEndpointDetail(row.dataset.eid, light, det);
+  if (!row.classList.contains('open')) return;   // collapsed again while loading
   det.innerHTML = detailHtml(e);
   det.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
     navigator.clipboard && navigator.clipboard.writeText(b.dataset.copy);
@@ -477,6 +489,24 @@ function toggleRow(row) {
     setTimeout(() => b.innerHTML = icon('copy') + ' copy', 1400);
   }));
   wireDecode(det);
+}
+
+/* Fetch one endpoint's full record (bodies, headers, found-on, JS origin) and
+   merge it over the light row we already have. Cached per endpoint id; falls back
+   to the light record if the detail request fails, so a row still opens offline. */
+async function loadEndpointDetail(eid, light, det) {
+  if (!eid) return light;
+  if (EP_DETAIL.has(eid)) return EP_DETAIL.get(eid);
+  det.innerHTML = `<div class="det-loading">${icon('loader-2')} loading detail…</div>`;
+  try {
+    const full = await getJSON(
+      withBase(`/api/scan/${encodeURIComponent(SCAN_ID)}/endpoint/${encodeURIComponent(eid)}`));
+    const merged = Object.assign({}, light, full);
+    EP_DETAIL.set(eid, merged);
+    return merged;
+  } catch (e) {
+    return light;
+  }
 }
 
 function detailHtml(e) {
@@ -794,6 +824,91 @@ function dvFilesCard(files) {
   return dvCard('Discovered files', 'file-code', files.length,
     `<div class="dv-body"><table class="dv-table"><thead><tr><th>Kind</th><th>Host</th><th>Path</th><th>Status</th><th>Size</th><th>Type</th><th>Src</th></tr></thead><tbody>${rows}</tbody></table></div>`,
     'files');
+}
+
+/* ---- graph / table split -------------------------------------------------- */
+/* The graph used to take a fixed ~half of the viewport, leaving the request
+   table a cramped sliver. It is now user-sized: drag the handle, double-click to
+   reset, or collapse the graph entirely to give the table the full height. The
+   choice is remembered per browser. */
+const GRAPH_H_KEY = 'argus-graph-h';
+const GRAPH_COLLAPSED_KEY = 'argus-graph-collapsed';
+const GRAPH_H_DEFAULT = Math.round(Math.min(window.innerHeight * 0.40, 460));
+
+function graphHBounds() {
+  const main = document.querySelector('.main');
+  const avail = main ? main.clientHeight : window.innerHeight;
+  // keep at least a usable table below and always leave the graph controls reachable
+  return { min: 120, max: Math.max(200, Math.round(avail - 160)) };
+}
+function setGraphH(px, persist) {
+  const { min, max } = graphHBounds();
+  const v = Math.max(min, Math.min(max, Math.round(px)));
+  document.querySelector('.main').style.setProperty('--graph-h', v + 'px');
+  if (persist) { try { localStorage.setItem(GRAPH_H_KEY, String(v)); } catch (e) {} }
+  return v;
+}
+function setCollapsed(on, persist) {
+  document.querySelector('.main').classList.toggle('graph-collapsed', on);
+  document.getElementById('graphRestore').hidden = !on;
+  const btn = document.getElementById('gCollapse');
+  if (btn) btn.setAttribute('title', on ? 'Show graph' : 'Collapse graph — give the table the full height');
+  if (persist) { try { localStorage.setItem(GRAPH_COLLAPSED_KEY, on ? '1' : '0'); } catch (e) {} }
+  if (!on && GRAPH) requestAnimationFrame(() => GRAPH.fit());
+}
+
+function wireGraphSplitter() {
+  const main = document.querySelector('.main');
+  const handle = document.getElementById('graphResize');
+  if (!main || !handle) return;
+
+  let saved = null, collapsed = false;
+  try { saved = parseInt(localStorage.getItem(GRAPH_H_KEY) || '', 10); } catch (e) {}
+  try { collapsed = localStorage.getItem(GRAPH_COLLAPSED_KEY) === '1'; } catch (e) {}
+  setGraphH(Number.isFinite(saved) && saved > 0 ? saved : GRAPH_H_DEFAULT, false);
+  if (collapsed) setCollapsed(true, false);
+
+  let startY = 0, startH = 0, dragging = false;
+  const onMove = (e) => {
+    if (!dragging) return;
+    const y = (e.touches ? e.touches[0].clientY : e.clientY);
+    setGraphH(startH + (y - startY), false);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    const cur = parseInt(getComputedStyle(main).getPropertyValue('--graph-h'), 10);
+    if (Number.isFinite(cur)) { try { localStorage.setItem(GRAPH_H_KEY, String(cur)); } catch (e) {} }
+    if (GRAPH) GRAPH.fit();
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+  };
+  const onDown = (e) => {
+    dragging = true;
+    startY = (e.touches ? e.touches[0].clientY : e.clientY);
+    startH = document.getElementById('graphWrap').getBoundingClientRect().height;
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    e.preventDefault();
+  };
+  handle.addEventListener('pointerdown', onDown);
+  handle.addEventListener('dblclick', () => { setGraphH(GRAPH_H_DEFAULT, true); if (GRAPH) GRAPH.fit(); });
+  // keyboard: the handle is a focusable separator
+  handle.addEventListener('keydown', (e) => {
+    const cur = document.getElementById('graphWrap').getBoundingClientRect().height;
+    if (e.key === 'ArrowUp') { setGraphH(cur - 24, true); e.preventDefault(); if (GRAPH) GRAPH.fit(); }
+    else if (e.key === 'ArrowDown') { setGraphH(cur + 24, true); e.preventDefault(); if (GRAPH) GRAPH.fit(); }
+  });
+
+  const collapseBtn = document.getElementById('gCollapse');
+  if (collapseBtn) collapseBtn.addEventListener('click', () =>
+    setCollapsed(!main.classList.contains('graph-collapsed'), true));
+  const restore = document.getElementById('graphRestore');
+  if (restore) restore.addEventListener('click', () => setCollapsed(false, true));
 }
 
 /* ---- graph ---------------------------------------------------------------- */

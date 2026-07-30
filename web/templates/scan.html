@@ -72,11 +72,21 @@
           <button class="btn icon sm" id="gFit" title="Fit to view"><svg class="ic"><use href="#i-chart-dots-3"></use></svg></button>
           <button class="btn icon sm" id="gReheat" title="Re-run layout"><svg class="ic"><use href="#i-refresh"></use></svg></button>
           <button class="btn icon sm" id="gExpand" title="Expand detail view"><svg class="ic"><use href="#i-arrows-maximize"></use></svg></button>
+          <button class="btn icon sm" id="gCollapse" title="Collapse graph — give the table the full height"><svg class="ic"><use href="#i-chevron-down"></use></svg></button>
         </div>
         <div class="legend" id="legend"></div>
         <div class="node-card" id="nodeCard"></div>
       </div>
     </div>
+
+    <!-- restore strip: only shown while the graph is collapsed -->
+    <button class="graph-restore" id="graphRestore" hidden>
+      <svg class="ic"><use href="#i-topology-star-3"></use></svg> Show graph
+    </button>
+
+    <!-- drag to resize the graph / table split -->
+    <div class="graph-resize" id="graphResize" role="separator" aria-orientation="horizontal"
+         tabindex="0" title="Drag to resize · double-click to reset"></div>
 
     <!-- REQUESTS TABLE -->
     <div class="table-wrap">

@@ -66,6 +66,39 @@ def _inject_sprite():
     from markupsafe import Markup
     return {"sprite": Markup(_SPRITE)}
 
+
+import gzip as _gzip
+
+
+@app.after_request
+def _compress(resp):
+    """gzip sizeable JSON/text responses. Scan documents are highly repetitive and
+    compress ~8x, so a 15 MB list view is ~2 MB on the wire. Works with or without
+    nginx in front (nginx passes an already-encoded body through untouched)."""
+    try:
+        if resp.direct_passthrough or resp.status_code >= 300:
+            return resp
+        if "gzip" not in request.headers.get("Accept-Encoding", ""):
+            return resp
+        if resp.headers.get("Content-Encoding"):
+            return resp
+        ct = resp.content_type or ""
+        if not ("application/json" in ct or ct.startswith("text/")):
+            return resp
+        data = resp.get_data()
+        # below ~1 KB the gzip header costs more than it saves; above ~40 MB the
+        # synchronous compression stall isn't worth it (only the raw-JSON dump)
+        if not (1024 <= len(data) <= 40_000_000):
+            return resp
+        comp = _gzip.compress(data, 5)
+        resp.set_data(comp)
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Content-Length"] = str(len(comp))
+        resp.headers.setdefault("Vary", "Accept-Encoding")
+    except Exception:
+        pass
+    return resp
+
 SCAN_ID_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 JOBS_DIR = config.SCANS_DIR / ".jobs"
 JOBS_DIR.mkdir(exist_ok=True)
@@ -80,28 +113,75 @@ def _scan_files() -> list[Path]:
                   key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+# A full scan document can be tens of MB. Parsing it on every request (the graph
+# builder, a raw-JSON open, and each expanded row all call _load) is what made a
+# big scan feel like the dashboard had gone offline. Cache the most-recently-read
+# document keyed by (scan_id, mtime); a single entry keeps memory bounded while
+# still serving a browsing session's repeated reads from RAM.
+_DOC_CACHE: dict = {}
+
+
 def _load(scan_id: str) -> dict:
     if not SCAN_ID_RE.match(scan_id):
         abort(400, "bad scan id")
     path = config.SCANS_DIR / f"{scan_id}.json"
     if not path.exists() or path.parent != config.SCANS_DIR:
         abort(404, "scan not found")
+    mtime = path.stat().st_mtime
+    hit = _DOC_CACHE.get(scan_id)
+    if hit and hit[0] == mtime:
+        return hit[1]
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        doc = json.load(fh)
+    _DOC_CACHE.clear()          # hold only the most-recently-viewed scan
+    _DOC_CACHE[scan_id] = (mtime, doc)
+    return doc
+
+
+# Per-endpoint fields the request *table* never shows: response/request bodies,
+# the captured DOM, every "found on" URL, and raw headers. They are the bulk of a
+# large scan (tens of MB) and are only needed when one row is expanded — served
+# then by /api/scan/<id>/endpoint/<eid>. Stripping them from the list view is what
+# keeps the scan page loadable when a scan has tens of thousands of endpoints.
+_ENDPOINT_HEAVY = ("resp_body", "req_body", "dom", "found_on",
+                   "req_headers", "resp_headers", "notes", "js_origin")
+
+
+def _light_scan(d: dict) -> dict:
+    """The scan document with heavy per-endpoint fields removed — everything the
+    left panel, the request table, its filters and the graph client need, and
+    nothing that only the expanded-row detail uses."""
+    out = dict(d)
+    out["endpoints"] = [{k: v for k, v in e.items() if k not in _ENDPOINT_HEAVY}
+                        for e in d.get("endpoints", [])]
+    return out
+
+
+# Summaries are read for every scan on the home page. Parsing a multi-MB file
+# just to pull `meta` is wasteful, so cache the summary by (scan_id, mtime).
+_SUMMARY_CACHE: dict = {}
 
 
 def _summary(path: Path) -> dict:
+    stem = path.stem
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0
+    hit = _SUMMARY_CACHE.get(stem)
+    if hit and hit[0] == mtime:
+        return hit[1]
     try:
         with open(path, encoding="utf-8") as fh:
             d = json.load(fh)
     except Exception:
-        return {"scan_id": path.stem, "domain": path.stem, "error": True,
+        return {"scan_id": stem, "domain": stem, "error": True,
                 "stats": {}, "started_at": None}
     meta = d.get("meta", {})
     tor_meta = meta.get("tor") or {}
-    return {
-        "scan_id": path.stem,
-        "domain": meta.get("domain", path.stem),
+    summary = {
+        "scan_id": stem,
+        "domain": meta.get("domain", stem),
         "started_at": meta.get("started_at"),
         "finished_at": meta.get("finished_at"),
         "duration_sec": meta.get("duration_sec"),
@@ -114,6 +194,8 @@ def _summary(path: Path) -> dict:
                 "verified": bool(tor_meta.get("verified"))} if tor_meta else None,
         "size": path.stat().st_size,
     }
+    _SUMMARY_CACHE[stem] = (mtime, summary)
+    return summary
 
 
 # --------------------------------------------------------------------------- #
@@ -141,7 +223,28 @@ def api_scans():
 
 @app.route("/api/scan/<scan_id>")
 def api_scan(scan_id):
+    # The full document (raw-JSON link, downloads, backward compatibility). The
+    # scan UI uses /view instead so it never pulls the heavy per-endpoint fields.
     return jsonify(_load(scan_id))
+
+
+@app.route("/api/scan/<scan_id>/view")
+def api_scan_view(scan_id):
+    """Light document for the scan page: panel data plus table-ready endpoints,
+    without response bodies / DOM / headers. This is what makes a huge scan open."""
+    return jsonify(_light_scan(_load(scan_id)))
+
+
+@app.route("/api/scan/<scan_id>/endpoint/<eid>")
+def api_scan_endpoint(scan_id, eid):
+    """Full record for one endpoint (bodies, headers, found-on, JS origin),
+    fetched only when a row is expanded."""
+    if not re.match(r"^[A-Fa-f0-9]{6,40}$", eid):
+        abort(400, "bad endpoint id")
+    for e in _load(scan_id).get("endpoints", []):
+        if e.get("id") == eid:
+            return jsonify(e)
+    abort(404, "endpoint not found")
 
 
 @app.route("/api/scan/<scan_id>", methods=["DELETE"])
