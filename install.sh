@@ -28,6 +28,11 @@ PORT="${ARGUS_WEB_PORT:-7666}"
 HOST="${ARGUS_WEB_HOST:-127.0.0.1}"
 URL="http://$HOST:$PORT"
 
+# Privileged installs run directly when we're already root (a minimal server may
+# not even ship sudo, and calling sudo as root just adds a needless dependency);
+# otherwise prefix with sudo.
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+
 say()  { printf '\033[1;36m[argus]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[argus]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[argus]\033[0m %s\n' "$*" >&2; }
@@ -265,8 +270,15 @@ if [ "${1:-}" = "--upgrade" ]; then
     fi
 
     say "pulling latest …"
-    git -C "$HERE" pull --ff-only origin "$branch" \
-      || { err "fast-forward pull failed (branch diverged) — resolve manually with git"; exit 1; }
+    if ! git -C "$HERE" pull --ff-only origin "$branch"; then
+      err "cannot fast-forward: this checkout has $ahead local commit(s) not on"
+      err "origin/$branch, so the branch has diverged. Nothing was changed. They are:"
+      git -C "$HERE" --no-pager log --oneline "origin/$branch..HEAD" 2>/dev/null | sed 's/^/          /' >&2 || true
+      err "Then re-run --upgrade after choosing one:"
+      err "  push them    : git -C \"$HERE\" push origin $branch"
+      err "  discard them : git -C \"$HERE\" reset --hard origin/$branch   (throws the commits away)"
+      exit 1
+    fi
     say "now at $(version_of)."
   fi
 
@@ -321,8 +333,11 @@ HAVE_APT=0; command -v apt-get >/dev/null && HAVE_APT=1
 APT_UPDATED=0
 apt_install() {                     # apt_install pkg1 pkg2 …  (idempotent-ish)
   [ "$HAVE_APT" = 1 ] || { warn "apt-get not found — install manually: $*"; return 1; }
-  if [ "$APT_UPDATED" = 0 ]; then sudo apt-get update -qq || true; APT_UPDATED=1; fi
-  sudo apt-get install -y "$@" || { warn "apt install failed: $*"; return 1; }
+  if [ -n "$SUDO" ] && ! command -v sudo >/dev/null 2>&1; then
+    warn "need root to install ($*) but neither root nor sudo is available — install manually"; return 1
+  fi
+  if [ "$APT_UPDATED" = 0 ]; then $SUDO apt-get update -qq || true; APT_UPDATED=1; fi
+  $SUDO apt-get install -y "$@" || { warn "apt install failed: $*"; return 1; }
 }
 
 say "checking base system packages …"
@@ -388,7 +403,7 @@ write_unit
 
 # keep the service alive after logout / across reboot (no active login needed)
 say "enabling linger so the service survives logout and reboot …"
-loginctl enable-linger "$USER" 2>/dev/null \
+loginctl enable-linger "$(id -un)" 2>/dev/null \
   || warn "could not enable linger (service still runs while you're logged in)"
 
 say "starting $SERVICE …"
