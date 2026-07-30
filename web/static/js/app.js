@@ -96,6 +96,10 @@ const SOURCE_META = {
   s: { label: 'deep DNS', icon: 'network' },
   c: { label: 'cert transparency', icon: 'lock' },
   i: { label: 'IP enrichment', icon: 'server-2' },
+  n: { label: 'passive names', icon: 'radar-2' },
+  h: { label: 'http probe', icon: 'server-2' },
+  k: { label: 'deep crawl', icon: 'topology-star-3' },
+  r: { label: 'bulk DNS', icon: 'network' },
   crawler: { label: 'crawler', icon: 'topology-star-3' },
   js: { label: 'JS analysis', icon: 'braces' },
   robots: { label: 'robots.txt', icon: 'list-details' },
@@ -103,6 +107,7 @@ const SOURCE_META = {
   seed: { label: 'seed', icon: 'point-filled' },
   input: { label: 'target input', icon: 'point-filled' },
   dns: { label: 'DNS resolver', icon: 'network' },
+  'dns-brute': { label: 'DNS brute', icon: 'network' },
 };
 function sourceMeta(code) { return SOURCE_META[code] || { label: code, icon: 'point-filled' }; }
 function sourceChip(code) {

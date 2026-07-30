@@ -14,11 +14,25 @@ For every live subdomain root:
 
 Discovered paths become endpoints (source=bruteforce); file-like hits are also
 recorded as discovered files.
+
+Noise control (item 6). Two things were wasting the classifier's time:
+
+  * a status allow-list kept soft-404s, which answer 200. The run now takes
+    `-mc all` and subtracts noise instead — a per-host calibration probe learns
+    the size of the host's own catch-all page, and `-fs` drops every response
+    that size, so only responses that actually differ from "not found" survive,
+  * an unbounded fan-out got the scanner rate-limited (429s, tarpits that read
+    as hits). `-rate` caps requests per second to a value the target tolerates.
+
+The wordlist and the stack-aware generation are unchanged — that is the part
+worth keeping; only the request tuning and the response filtering changed.
 """
 from __future__ import annotations
 
 import json
+import random
 import re
+import string
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -160,9 +174,39 @@ def generate_wordlist(tech_tags: list[str], hints: set[str]) -> tuple[list[str],
 
 
 # --------------------------------------------------------------------------- #
+# Calibration — learn a host's catch-all so real hits stand out from soft-404s
+# --------------------------------------------------------------------------- #
+def _calibrate(session, root: str) -> set[int]:
+    """Request a few paths that cannot exist and collect the response sizes.
+
+    A host that answers 200 with the same body for every unknown path (a SPA
+    shell, a framework's catch-all route) will hand ffuf that body for every
+    word in the list. Learning those sizes up front and filtering them (`-fs`)
+    is what stops thousands of identical "hits" reaching the classifier. ffuf's
+    own `-ac` handles the status-based case; this adds the size dimension it
+    misses when the catch-all is a 200.
+    """
+    sizes: set[int] = set()
+    for _ in range(max(0, config.BRUTE_CALIBRATE_PROBES)):
+        rand = "".join(random.choice(string.ascii_lowercase) for _ in range(16))
+        url = f"{root.rstrip('/')}/{rand}"
+        try:
+            resp = session.get(url, timeout=config.HTTP_TIMEOUT, allow_redirects=False)
+        except Exception:
+            continue
+        # A real 404 is handled by -mc/-fc; we only care about pages that answer
+        # as if they exist (2xx/3xx) yet are the catch-all.
+        if resp.status_code < 400:
+            body = resp.content or b""
+            sizes.add(len(body))
+    return sizes
+
+
+# --------------------------------------------------------------------------- #
 # ffuf
 # --------------------------------------------------------------------------- #
-def _run_ffuf(root: str, wordlist: Path, timeout: int, maxtime: int) -> list[dict]:
+def _run_ffuf(root: str, wordlist: Path, timeout: int, maxtime: int,
+              filter_sizes: set[int] | None = None) -> list[dict]:
     ffuf = resolve_tool(config.FFUF_BIN)
     if not ffuf:
         log.warning("ffuf not found — skipping bruteforce for %s", root)
@@ -177,14 +221,24 @@ def _run_ffuf(root: str, wordlist: Path, timeout: int, maxtime: int) -> list[dic
         # just times out.
         proxy = tor.proxy_url("socks5")
         threads = min(config.BRUTE_THREADS, 8) if proxy else config.BRUTE_THREADS
+        rate = min(config.BRUTE_RATE, 20) if proxy else config.BRUTE_RATE
         cmd = [
             ffuf, "-w", f"{wordlist}:FUZZ", "-u", fuzz_url,
-            "-mc", config.BRUTE_STATUS_MATCH,
             "-e", ",".join("." + e for e in config.BRUTE_EXTENSIONS),
-            "-t", str(threads), "-ac", "-noninteractive", "-s",
+            "-t", str(threads), "-rate", str(rate),
+            "-ac", "-noninteractive", "-s",
             "-maxtime", str(maxtime), "-timeout", "8",
             "-o", str(out), "-of", "json",
         ]
+        # Match everything, then subtract — a size-based catch-all (a 200 soft-404)
+        # survives a status allow-list but is dropped here.
+        if config.BRUTE_MATCH_ALL:
+            cmd += ["-mc", "all", "-fc", config.BRUTE_STATUS_FILTER]
+        else:
+            cmd += ["-mc", config.BRUTE_STATUS_MATCH]
+        fs = _merge_filter_sizes(filter_sizes)
+        if fs:
+            cmd += ["-fs", fs]
         if proxy:
             cmd += ["-x", proxy]
         proc = run_cmd(cmd, timeout=timeout, log=log)
@@ -197,6 +251,15 @@ def _run_ffuf(root: str, wordlist: Path, timeout: int, maxtime: int) -> list[dic
         return data.get("results", []) or []
     finally:
         out.unlink(missing_ok=True)
+
+
+def _merge_filter_sizes(learned: set[int] | None) -> str:
+    """ffuf -fs value: the configured sizes plus what calibration measured."""
+    parts = [s.strip() for s in config.BRUTE_FILTER_SIZES.split(",") if s.strip()]
+    for n in sorted(learned or set()):
+        if str(n) not in parts:
+            parts.append(str(n))
+    return ",".join(parts)
 
 
 def _ingest_results(result: ScanResult, root: str, results: list[dict],
@@ -258,14 +321,19 @@ def run(result: ScanResult, *, timeout: int = 240, maxtime: int = 120,
         log.info(f"[{sub['host']}] robots/sitemap + wordlist gen")
         hints = read_robots(result, session, root)
         words, stacks = generate_wordlist(sub.get("tech", []), hints)
+        # Learn this host's catch-all size before fuzzing so soft-404s are
+        # filtered rather than classified.
+        fs = _calibrate(session, root)
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                          encoding="utf-8") as wf:
             wf.write("\n".join(words))
             wl = Path(wf.name)
         try:
             log.info(f"[{sub['host']}] ffuf {len(words)} words × ext set"
-                     + (f" (stacks: {', '.join(stacks)})" if stacks else ""))
-            results = _run_ffuf(root, wl, timeout=timeout, maxtime=maxtime)
+                     + (f" (stacks: {', '.join(stacks)})" if stacks else "")
+                     + (f" · filtering {len(fs)} catch-all size(s)" if fs else ""))
+            results = _run_ffuf(root, wl, timeout=timeout, maxtime=maxtime,
+                                filter_sizes=fs)
             hits = _ingest_results(result, root, results, session=session)
             total_hits += hits
             log.info(f"[{sub['host']}] {hits} paths found")

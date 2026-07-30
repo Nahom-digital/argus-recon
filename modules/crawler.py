@@ -1,10 +1,20 @@
 """
 Module 3 — In-scope crawler.
 
-Starts from each subdomain root and walks the target domain breadth-first,
-following internal links, form actions and JS-discovered request URLs until no
-new in-domain URLs remain (bounded by page/depth safety caps). It drives the
-HTML parser (module 4) and JS parser (module 5) on every page and script.
+Starts from each live subdomain root (plus whatever the deep-crawl pre-pass
+already discovered) and walks the target domain breadth-first, following internal
+links, form actions and JS-discovered request URLs until no new in-domain URLs
+remain (bounded by page/depth safety caps). It drives the HTML parser (module 4)
+and JS parser (module 5) on every page and script.
+
+Transport: the fetch layer is asyncio (`modules.asynchttp`) — one event loop with
+a semaphore-bounded pool, so hundreds of requests are in flight at once instead
+of one per thread. That matters because every stage around this one is a Go
+binary running at that concurrency already; a thread-per-request crawler was the
+slowest link in the chain and set the pace for the whole pipeline. If the async
+client is unavailable (not installed, or a Tor scan without SOCKS support in it)
+the original thread-pool path still runs, so the crawl degrades in speed and
+never in capability.
 
 Scope rule (enforced here via util.in_scope): anything pointing outside the
 target domain + subdomains is logged exactly once as an out-of-scope endpoint
@@ -20,6 +30,9 @@ from collections import defaultdict
 from urllib.parse import urlparse, parse_qsl
 
 from . import config, html_parser, js_parser
+from .asynchttp import AsyncFetcher, Fetched, offload
+from .asynchttp import available as async_available
+from .asynchttp import run as run_async
 from .schema import ScanResult
 from .util import (get_logger, make_session, normalize_url, in_scope, host_of,
                    classify_resource, is_html, is_javascript, is_interesting_file)
@@ -39,6 +52,10 @@ _ABS_URL_RX = re.compile(r"""https?://[a-z0-9.\-]+(?:/[^\s"'<>()\\]*)?""", re.I)
 _REL_PATH_RX = re.compile(r"""["'(]\s*(/[A-Za-z0-9_\-./]{1,120}(?:\.[A-Za-z0-9]{1,6})?(?:\?[^\s"'<>()]{0,120})?)""")
 # response headers that carry a next URL worth following
 _LOCATION_HEADERS = ("location", "content-location")
+# response headers worth keeping on the endpoint record
+_KEEP_HEADERS = ("server", "content-type", "content-length", "location",
+                 "set-cookie", "x-powered-by", "via", "cf-ray",
+                 "strict-transport-security", "content-security-policy")
 
 
 def _query_fields(url: str) -> list[dict]:
@@ -49,40 +66,51 @@ def _query_fields(url: str) -> list[dict]:
 
 class Crawler:
     def __init__(self, result: ScanResult, *, max_pages: int, max_depth: int,
-                 threads: int):
+                 threads: int, concurrency: int | None = None,
+                 host_concurrency: int | None = None):
         self.result = result
         self.domain = result.domain
         self.max_pages = max_pages
         self.max_depth = max_depth
         self.threads = threads
-        self.session = make_session()
+        self.concurrency = concurrency or config.CRAWL_CONCURRENCY
+        self.host_concurrency = host_concurrency or config.CRAWL_HOST_CONCURRENCY
+        self.session = make_session()          # map files + the synchronous fallback
         self.visited: set[str] = set()
         self.js_done: set[str] = set()
         self.host_pages: dict[str, int] = defaultdict(int)
         self._seen_hosts: set[str] = set()
+        # Recording happens on worker threads whenever a body is large enough to
+        # be parsed off the event loop, so the shared result stays behind a lock.
         self.lock = threading.Lock()
+        self.engine = "async"
+        self.stats: dict = {}
 
     # ------------------------------------------------------------------ #
-    # Networking
+    # Networking — synchronous fallback path
     # ------------------------------------------------------------------ #
-    def _fetch(self, url: str):
-        """GET a URL. Returns (resp, kind, text|None). Bodies are size-capped;
-        binary/asset kinds are recorded without downloading the body."""
+    def _fetch_sync(self, url: str) -> Fetched:
+        """GET a URL with the blocking client, normalised to the same result
+        object the async path produces."""
         try:
             resp = self.session.get(url, timeout=config.HTTP_TIMEOUT,
                                     allow_redirects=True, stream=True)
         except Exception as exc:
             log.debug(f"fetch failed {url}: {exc}")
-            return None, None, None
+            return Fetched(url, error=f"{type(exc).__name__}: {exc}"[:200])
         ct = resp.headers.get("Content-Type", "")
         kind, _sub = classify_resource(resp.url, ct)
-        text = None
+        headers = dict(resp.headers)
+        clen = _int_or_none(resp.headers.get("Content-Length"))
         if kind in _LIGHT_KINDS:
             resp.close()
-            return resp, kind, None
+            return Fetched(url, final_url=resp.url, status=resp.status_code,
+                           headers=headers, kind=kind, content_length=clen)
         cap = config.MAX_JS_BYTES if kind == "js" else _MAX_HTML_BYTES
+        text = None
+        total = 0
         try:
-            chunks, total = [], 0
+            chunks = []
             for chunk in resp.iter_content(chunk_size=65536):
                 if not chunk:
                     break
@@ -90,14 +118,14 @@ class Crawler:
                 total += len(chunk)
                 if total >= cap:
                     break
-            raw = b"".join(chunks)
-            enc = resp.encoding or "utf-8"
-            text = raw.decode(enc, errors="replace")
+            text = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
         except Exception:
             text = None
         finally:
             resp.close()
-        return resp, kind, text
+        return Fetched(url, final_url=resp.url, status=resp.status_code,
+                       headers=headers, text=text, kind=kind,
+                       content_length=clen if clen is not None else total)
 
     # ------------------------------------------------------------------ #
     # JS handling
@@ -289,44 +317,51 @@ class Crawler:
                 break
 
     # ------------------------------------------------------------------ #
-    # Per-URL processing
+    # Per-URL recording — shared by both engines, may run on a worker thread
     # ------------------------------------------------------------------ #
-    def _process(self, url: str) -> set[str]:
-        resp, kind, text = self._fetch(url)
-        if resp is None:
-            with self.lock:
-                self.result.add_endpoint(url, etype="page", source="crawler",
-                                         note="request failed / no response")
-            return set()
+    def _record(self, doc: Fetched, is_js: bool = False) -> tuple[set[str], set[str]]:
+        """Fold one fetched document into the scan.
 
-        final = normalize_url(resp.url) or url
-        status = resp.status_code
-        ct = resp.headers.get("Content-Type", "")
-        resp_headers = {k: v for k, v in resp.headers.items()
-                        if k.lower() in ("server", "content-type", "content-length",
-                                         "location", "set-cookie", "x-powered-by",
-                                         "via", "cf-ray", "strict-transport-security",
-                                         "content-security-policy")}
+        Returns (new_in_scope_urls, js_urls_to_fetch). Pure bookkeeping plus
+        parsing — no network — so it is safe to run off the event loop.
+        """
+        if not doc.ok:
+            with self.lock:
+                self.result.add_endpoint(doc.url, etype="js" if is_js else "page",
+                                         source="crawler",
+                                         note=doc.error or "request failed / no response")
+                if is_js:
+                    self.result.add_js_file(doc.url, source="crawler")
+            return set(), set()
+
+        final = normalize_url(doc.final_url) or doc.url
+        status = doc.status
+        ct = doc.header("Content-Type", "") or ""
+        kind = doc.kind or classify_resource(final, ct)[0]
+        resp_headers = {k: v for k, v in doc.headers.items()
+                        if k.lower() in _KEEP_HEADERS}
 
         # If a redirect carried us out of scope, log the destination and stop.
         if not in_scope(final, self.domain):
             with self.lock:
-                self.result.add_endpoint(url, etype="page", source="crawler",
+                self.result.add_endpoint(doc.url, etype="page", source="crawler",
                                          status=status, content_type=ct,
                                          resp_headers=resp_headers,
                                          note=f"redirects out-of-scope -> {final}")
                 self.result.add_endpoint(final, etype="link", source="crawler",
-                                         found_on=url, in_scope=False,
+                                         found_on=doc.url, in_scope=False,
                                          note="redirect target")
-            return set()
+            return set(), set()
 
         new: set[str] = set()
+        js_urls: set[str] = set()
+        text = doc.text
         etype = "js" if kind == "js" else ("page" if kind == "page" else "resource")
         req_headers = dict(self.session.headers)
 
         with self.lock:
             self._register_host(final)
-            rec = self.result.add_endpoint(
+            self.result.add_endpoint(
                 final, etype=etype, source="crawler", status=status,
                 content_type=ct, resp_headers=resp_headers,
                 req_body=None, headers=req_headers,
@@ -337,44 +372,134 @@ class Crawler:
                 # capture request + response so the Files panel can show them (item 10)
                 self.result.add_file(
                     final, kind=k, subtype=sub, source="crawler",
-                    status=status, size=_content_length(resp),
+                    status=status, size=doc.content_length,
                     content_type=ct, final_url=final,
                     req_headers=req_headers, resp_headers=resp_headers,
                     resp_body=(text or "")[:4000] if kind not in _LIGHT_KINDS else "")
             # follow same-scope Location/Content-Location redirect targets
             for hk in _LOCATION_HEADERS:
-                loc = resp.headers.get(hk)
+                loc = doc.header(hk)
                 if loc:
                     self._route(loc, final, new)
 
         if text and kind == "js":
-            new |= self._handle_js(final, text, found_on=url)
+            new |= self._handle_js(final, text, found_on=doc.url)
         elif text and is_html(ct):
-            enq, js_urls = self._handle_html(final, text)
+            enq, js = self._handle_html(final, text)
             new |= enq
-            for ju in js_urls:
-                if ju not in self.js_done:
-                    self.js_done.add(ju)
-                    new |= self._fetch_js_now(ju, found_on=final)
+            js_urls |= js
         elif text and kind in _TEXT_KINDS:
             # data/config/backup/other textual: mine for endpoints + secrets.
-            new |= self._handle_js(final, text, found_on=url)
+            new |= self._handle_js(final, text, found_on=doc.url)
             with self.lock:
                 self._mine_text(text, final, final, new)
 
-        return {u for u in new if u not in self.visited}
+        return new, js_urls
 
-    def _fetch_js_now(self, url: str, found_on: str) -> set[str]:
-        resp, kind, text = self._fetch(url)
-        if resp is None or not text:
-            with self.lock:
-                self.result.add_js_file(url, source="crawler", found_on=found_on)
-            return set()
-        with self.lock:
-            self.result.add_endpoint(url, etype="js", source="crawler",
-                                     status=resp.status_code,
-                                     content_type=resp.headers.get("Content-Type"))
-        return self._handle_js(url, text, found_on=found_on)
+    # ------------------------------------------------------------------ #
+    # Frontier bookkeeping (shared by both engines)
+    # ------------------------------------------------------------------ #
+    def _select(self, urls: set[str], js_urls: set[str]) -> list[tuple[str, bool]]:
+        """Claim what may be fetched next, respecting the per-host page cap.
+
+        Scripts are exempt from that cap: a page budget exists to stop the crawl
+        drowning in one host's pagination, and refusing to read the bundle that
+        names the API would defeat the point of crawling the host at all.
+        """
+        batch: list[tuple[str, bool]] = []
+        for url in urls:
+            if url in self.visited:
+                continue
+            host = host_of(url)
+            if self.host_pages[host] >= self.max_pages:
+                continue
+            self.visited.add(url)
+            self.host_pages[host] += 1
+            batch.append((url, False))
+        for url in js_urls:
+            if url in self.visited or url in self.js_done:
+                continue
+            self.visited.add(url)
+            self.js_done.add(url)
+            batch.append((url, True))
+        return batch
+
+    # ------------------------------------------------------------------ #
+    # Async engine
+    # ------------------------------------------------------------------ #
+    async def _work(self, item: tuple[str, bool], fetcher: AsyncFetcher):
+        url, is_js = item
+        doc = await fetcher.get(url)
+        # Parsing a large body (beautify + a few dozen regex passes over a
+        # megabyte bundle) takes long enough to stall every request in flight,
+        # so anything sizeable is recorded on a worker thread instead.
+        if doc.text and len(doc.text) > config.PARSE_OFFLOAD_BYTES:
+            return await offload(self._record, doc, is_js)
+        return self._record(doc, is_js)
+
+    async def _crawl_async(self, seeds: list[str]) -> None:
+        frontier = _clean(seeds, self.domain)
+        js_frontier: set[str] = set()
+        depth = 0
+        async with AsyncFetcher(concurrency=self.concurrency,
+                                host_concurrency=self.host_concurrency,
+                                light_kinds=_LIGHT_KINDS) as fetcher:
+            while (frontier or js_frontier) and depth <= self.max_depth:
+                batch = self._select(set(frontier), js_frontier)
+                js_frontier = set()
+                if not batch:
+                    break
+                log.info(f"depth {depth}: fetching {len(batch)} URLs "
+                         f"({len(self.visited)} seen, {self.concurrency} in flight)")
+                next_urls: set[str] = set()
+                next_js: set[str] = set()
+
+                def collect(res):
+                    if not res:
+                        return
+                    urls, js = res
+                    next_urls.update(urls)
+                    next_js.update(js)
+
+                await fetcher.each(batch, lambda it: self._work(it, fetcher),
+                                   on_result=collect)
+                frontier = [u for u in next_urls if u not in self.visited]
+                js_frontier = {u for u in next_js
+                               if u not in self.visited and u not in self.js_done}
+                depth += 1
+            self.stats = dict(fetcher.stats)
+
+    # ------------------------------------------------------------------ #
+    # Synchronous engine (fallback)
+    # ------------------------------------------------------------------ #
+    def _work_sync(self, item: tuple[str, bool]):
+        url, is_js = item
+        return self._record(self._fetch_sync(url), is_js)
+
+    def _crawl_sync(self, seeds: list[str]) -> None:
+        frontier = _clean(seeds, self.domain)
+        js_frontier: set[str] = set()
+        depth = 0
+        while (frontier or js_frontier) and depth <= self.max_depth:
+            batch = self._select(set(frontier), js_frontier)
+            js_frontier = set()
+            if not batch:
+                break
+            log.info(f"depth {depth}: fetching {len(batch)} URLs "
+                     f"({len(self.visited)} seen, {self.threads} threads)")
+            next_urls: set[str] = set()
+            next_js: set[str] = set()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.threads) as ex:
+                for res in ex.map(self._work_sync, batch):
+                    if not res:
+                        continue
+                    urls, js = res
+                    next_urls |= urls
+                    next_js |= js
+            frontier = [u for u in next_urls if u not in self.visited]
+            js_frontier = {u for u in next_js
+                           if u not in self.visited and u not in self.js_done}
+            depth += 1
 
     # ------------------------------------------------------------------ #
     # Map-file seeding (robots.txt / sitemap.xml) — runs before the BFS
@@ -430,46 +555,35 @@ class Crawler:
         return out
 
     # ------------------------------------------------------------------ #
-    # BFS driver
+    # Driver
     # ------------------------------------------------------------------ #
     def crawl(self, seeds: list[str]) -> None:
-        frontier = []
-        for s in seeds:
-            n = normalize_url(s)
-            if n and in_scope(n, self.domain):
-                frontier.append(n)
-        frontier = list(dict.fromkeys(frontier))
+        usable, why = async_available()
+        if usable:
+            self.engine = "async"
+            run_async(self._crawl_async(seeds))
+        else:
+            self.engine = "threads"
+            log.warning(f"{why} — falling back to the thread-pool crawler "
+                        f"({self.threads} threads)")
+            self._crawl_sync(seeds)
 
-        depth = 0
-        while frontier and depth <= self.max_depth:
-            batch = []
-            for url in frontier:
-                if url in self.visited:
-                    continue
-                host = host_of(url)
-                if self.host_pages[host] >= self.max_pages:
-                    continue
-                self.visited.add(url)
-                self.host_pages[host] += 1
-                batch.append(url)
-            if not batch:
-                break
-            log.info(f"depth {depth}: crawling {len(batch)} URLs "
-                     f"({len(self.visited)} seen)")
-            next_frontier: set[str] = set()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.threads) as ex:
-                for new_urls in ex.map(self._process, batch):
-                    next_frontier |= new_urls
-            frontier = [u for u in next_frontier if u not in self.visited]
-            depth += 1
-
-        log.info(f"crawl complete: {len(self.visited)} pages fetched, "
+        log.info(f"crawl complete: {len(self.visited)} URLs fetched, "
                  f"{len(self.js_done)} JS files parsed")
 
 
-def _content_length(resp) -> int | None:
+def _clean(seeds: list[str], domain: str) -> list[str]:
+    out = []
+    for s in seeds:
+        n = normalize_url(s)
+        if n and in_scope(n, domain):
+            out.append(n)
+    return list(dict.fromkeys(out))
+
+
+def _int_or_none(v) -> int | None:
     try:
-        return int(resp.headers.get("Content-Length"))
+        return int(v)
     except (TypeError, ValueError):
         return None
 
@@ -485,8 +599,8 @@ def run(result: ScanResult, *, max_pages: int | None = None,
         threads=threads or config.CRAWL_THREADS,
     )
 
-    # Seeds: the live root of every resolving subdomain, plus any URLs BBOT/JS
-    # already surfaced, plus robots.txt / sitemap.xml / common entry points.
+    # Seeds: the live root of every resolving subdomain, plus any URLs the
+    # pre-passes already surfaced, plus robots.txt / sitemap.xml / entry points.
     seeds: list[str] = []
     live_roots: list[str] = []
     for sub in result._subdomains.values():  # type: ignore[attr-defined]
@@ -515,8 +629,9 @@ def run(result: ScanResult, *, max_pages: int | None = None,
     _resolve_new_subdomains(result)
 
     result.mark_module("crawler", "ok",
-                       note=f"{len(crawler.visited)} pages, {len(crawler.js_done)} JS files, "
-                            f"{len(crawler._seen_hosts)} hosts touched",
+                       note=f"{len(crawler.visited)} URLs, {len(crawler.js_done)} JS files, "
+                            f"{len(crawler._seen_hosts)} hosts touched "
+                            f"({crawler.engine})",
                        duration=time.time() - t0)
 
 

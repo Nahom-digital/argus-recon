@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse, urljoin, urldefrag, urlunparse
 
@@ -365,13 +366,15 @@ def short_hash(*parts: str) -> str:
 # --------------------------------------------------------------------------- #
 _EXTRA_BIN_DIRS = [
     str(Path.home() / ".local" / "bin"),
+    str(Path(os.environ.get("GOBIN") or (Path(os.environ.get("GOPATH") or (Path.home() / "go")) / "bin"))),
     "/usr/local/bin", "/usr/bin", "/bin", "/snap/bin",
 ]
 
 
 def resolve_tool(name: str) -> str | None:
     """Find an external binary on PATH, falling back to common install dirs
-    (BBOT/ffuf frequently land in ~/.local/bin, which venvs drop from PATH)."""
+    (BBOT/ffuf frequently land in ~/.local/bin, Go tools in ~/go/bin, and a venv
+    drops both from PATH)."""
     found = shutil.which(name)
     if found:
         return found
@@ -380,6 +383,175 @@ def resolve_tool(name: str) -> str | None:
         if cand.exists() and os.access(cand, os.X_OK):
             return str(cand)
     return None
+
+
+def _candidate_paths(name: str, aliases: list[str]) -> list[str]:
+    """Every executable that could be `name`, in preference order, de-duplicated."""
+    out: list[str] = []
+    for n in [name, *aliases]:
+        for d in _EXTRA_BIN_DIRS:
+            cand = Path(d) / n
+            if cand.exists() and os.access(cand, os.X_OK):
+                out.append(str(cand))
+        which = shutil.which(n)
+        if which:
+            out.append(which)
+    seen, uniq = set(), []
+    for p in out:
+        rp = os.path.realpath(p)
+        if rp not in seen:
+            seen.add(rp)
+            uniq.append(p)
+    return uniq
+
+
+# Validated lookups are cached: each miss costs a subprocess, and a module may
+# ask for the same tool once per host.
+_TOOL_CACHE: dict[str, str | None] = {}
+
+
+def resolve_recon_tool(name: str, aliases: list[str] | None = None,
+                       marker: str = "projectdiscovery") -> str | None:
+    """Find a Go recon binary, proving it is the right program before using it.
+
+    `httpx` is the reason this exists: Kali's python3-httpx package installs a
+    CLI of the same name into /usr/bin, ahead of ~/go/bin on PATH. Running a
+    subdomain list through *that* httpx does nothing useful and the failure looks
+    like the probe finding no live hosts. So every candidate is asked for its
+    version and only accepted if the answer looks like the real tool (its own
+    name, the vendor's domain, or a bare vX.Y.Z).
+    """
+    if name in _TOOL_CACHE:
+        return _TOOL_CACHE[name]
+    result = None
+    for path in _candidate_paths(name, aliases or []):
+        try:
+            proc = subprocess.run([path, "-version"], capture_output=True, text=True,
+                                  timeout=8, errors="replace")
+        except Exception:
+            continue
+        blob = f"{proc.stdout}\n{proc.stderr}".lower()
+        # A real Go recon tool answers `-version` with an exit-0 banner carrying
+        # the vendor name or a bare version. The name alone is not enough — the
+        # collision this guards against (python3-httpx vs ProjectDiscovery httpx)
+        # is two different programs sharing the name `httpx`, and the impostor
+        # exits non-zero here parsing `-version` as bundled short flags.
+        if proc.returncode not in (0, None):
+            continue
+        if marker in blob or re.search(r"\bv\d+\.\d+\.\d+", blob):
+            result = path
+            break
+    _TOOL_CACHE[name] = result
+    return result
+
+
+def clear_tool_cache() -> None:
+    _TOOL_CACHE.clear()
+    _FLAG_CACHE.clear()
+
+
+_FLAG_CACHE: dict[str, set[str]] = {}
+_FLAG_RX = re.compile(r"(?<![\w-])-([A-Za-z][A-Za-z0-9-]*)")
+
+
+def tool_flags(bin_path: str) -> set[str]:
+    """Every option the binary lists in its own help output.
+
+    These tools rename and retire flags between releases, and an unrecognised
+    flag makes them exit instead of ignoring it — so one bad spelling silently
+    turns a whole stage off. Asking the binary what it supports (once, cached)
+    and only passing what is there costs a single subprocess and makes the
+    integration version-proof.
+    """
+    if bin_path in _FLAG_CACHE:
+        return _FLAG_CACHE[bin_path]
+    flags: set[str] = set()
+    for args in (["-h"], ["--help"]):
+        try:
+            proc = subprocess.run([bin_path, *args], capture_output=True, text=True,
+                                  timeout=15, errors="replace")
+        except Exception:
+            continue
+        text = f"{proc.stdout}\n{proc.stderr}"
+        if text.strip():
+            flags = {m.group(1) for m in _FLAG_RX.finditer(text)}
+            if flags:
+                break
+    _FLAG_CACHE[bin_path] = flags
+    return flags
+
+
+def pick_flag(flags: set[str], *candidates: str) -> str | None:
+    """First candidate spelling the binary actually supports ('-sc', '-status-code'
+    …). Returns None when none of them are, so the caller can drop the option.
+
+    An empty flag set means help could not be read; assume the first spelling
+    rather than stripping every option and running a useless command.
+    """
+    if not flags:
+        return f"-{candidates[0]}" if candidates else None
+    for c in candidates:
+        if c.lstrip("-") in flags:
+            return f"-{c.lstrip('-')}"
+    return None
+
+
+def stream_cmd(cmd: list[str], timeout: int, on_line, log: logging.Logger | None = None,
+               cwd: str | None = None) -> int:
+    """Run a command and hand each stdout line to `on_line` as it arrives.
+
+    The Go tools emit newline-delimited JSON and can run for minutes; reading the
+    stream keeps the job log moving (and lets a stage report partial results)
+    instead of blocking on a single capture that a timeout would throw away.
+    Returns the number of lines consumed. Never raises for the usual failures.
+    """
+    lines = 0
+    proc = None
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, bufsize=1, errors="replace",
+                                env=tool_env(), cwd=cwd)
+    except FileNotFoundError:
+        if log:
+            log.warning(f"binary not found: {cmd[0]}")
+        return 0
+    except Exception as exc:
+        if log:
+            log.warning(f"command failed ({cmd[0]}): {exc}")
+        return 0
+
+    deadline = time.time() + timeout
+    try:
+        for line in proc.stdout:            # type: ignore[union-attr]
+            line = line.strip()
+            if line:
+                try:
+                    on_line(line)
+                    lines += 1
+                except Exception:
+                    pass
+            if time.time() > deadline:
+                if log:
+                    log.warning(f"timeout after {timeout}s: {Path(cmd[0]).name} "
+                                f"(keeping {lines} results)")
+                break
+    finally:
+        _terminate(proc)
+    return lines
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+    except Exception:
+        pass
 
 
 def tool_env() -> dict:

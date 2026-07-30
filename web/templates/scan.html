@@ -63,12 +63,24 @@
     <!-- GRAPH -->
     <div class="graph-wrap" id="graphWrap">
       <canvas id="graph"></canvas>
+      <!-- Cytoscape mounts here; only one engine's container is shown at a time -->
+      <div id="cyGraph" class="cy-host" hidden></div>
       <div class="graph-overlay">
         <div class="g-source">
           <svg class="ic" style="width:14px;height:14px;color:var(--muted)"><use href="#i-topology-star-3"></use></svg>
           <span class="src-badge" id="graphSource">graph</span>
         </div>
         <div class="g-controls">
+          <!-- engine switch: 1 = built-in canvas, 2 = Cytoscape.js (fCoSE / SBGN) -->
+          <div class="seg gseg" id="engineSwitch" role="radiogroup" aria-label="Graph engine">
+            <button class="gseg-btn on" data-engine="canvas" role="radio" aria-checked="true" title="Engine 1 — built-in renderer">1</button>
+            <button class="gseg-btn" data-engine="cy" role="radio" aria-checked="false" title="Engine 2 — Cytoscape.js (fCoSE layout / SBGN stylesheet)">2</button>
+          </div>
+          <!-- Cytoscape stylesheet switch: shown only in engine 2 -->
+          <div class="seg gseg" id="styleSwitch" role="radiogroup" aria-label="Cytoscape stylesheet" hidden>
+            <button class="gseg-btn on" data-style="fcose" role="radio" aria-checked="true" title="fCoSE — gene-gene style">fCoSE</button>
+            <button class="gseg-btn" data-style="sbgn" role="radio" aria-checked="false" title="SBGN stylesheet">SBGN</button>
+          </div>
           <button class="btn icon sm" id="gFit" title="Fit to view"><svg class="ic"><use href="#i-chart-dots-3"></use></svg></button>
           <button class="btn icon sm" id="gReheat" title="Re-run layout"><svg class="ic"><use href="#i-refresh"></use></svg></button>
           <button class="btn icon sm" id="gExpand" title="Expand detail view"><svg class="ic"><use href="#i-arrows-maximize"></use></svg></button>
@@ -135,5 +147,6 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/graph.js') }}"></script>
+<script src="{{ url_for('static', filename='js/cygraph.js') }}"></script>
 <script src="{{ url_for('static', filename='js/scan.js') }}"></script>
 {% endblock %}

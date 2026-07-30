@@ -84,9 +84,23 @@
 .main.graph-collapsed .graph-restore{display:flex}
 #graph{display:block;width:100%;height:100%;cursor:grab}
 #graph.grabbing{cursor:grabbing}
+#graph[hidden]{display:none}
+/* Cytoscape (engine 2) mounts into this; only one engine container shows at a time */
+.cy-host{position:absolute;inset:0;width:100%;height:100%;background:var(--bg)}
+.cy-host[hidden]{display:none}
 .graph-overlay{position:absolute;inset:0;pointer-events:none}
 .graph-overlay > *{pointer-events:auto}
-.g-controls{position:absolute;top:12px;right:12px;display:flex;gap:6px}
+.g-controls{position:absolute;top:12px;right:12px;display:flex;gap:6px;align-items:center}
+/* graph engine / stylesheet switches — compact segmented control */
+.gseg{display:inline-flex;height:28px;border:1px solid var(--border);border-radius:var(--r-pill);
+  overflow:hidden;background:var(--surface)}
+.gseg-btn{display:inline-flex;align-items:center;justify-content:center;min-width:28px;padding:0 10px;
+  border:none;background:transparent;color:var(--muted);font-size:11.5px;font-weight:600;
+  font-family:inherit;cursor:pointer;letter-spacing:.02em}
+.gseg-btn + .gseg-btn{border-left:1px solid var(--border)}
+.gseg-btn:hover{background:var(--hover);color:var(--ink-2)}
+.gseg-btn.on{background:var(--accent);color:var(--accent-ink,#fff)}
+.gseg[hidden]{display:none}
 .g-source{position:absolute;top:14px;left:14px;display:flex;align-items:center;gap:7px;
   font-size:var(--fs-xs);color:var(--muted)}
 .g-source .src-badge{font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:var(--r-pill);

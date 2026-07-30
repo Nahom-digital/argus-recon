@@ -1,14 +1,17 @@
 """
 Module 2 — Tech-stack fingerprinting.
 
-Runs WhatWeb in aggressive mode (`-a 3`) against every subdomain BBOT found. To
-target the right scheme we first do a light probe (HTTPS then HTTP) which also
-fills each subdomain's HTTP metadata (status, server, title, final URL) that the
-crawler reuses as its seed. WhatWeb is invoked in batches, its JSON array parsed
-into readable tech tags plus the raw plugin record.
+WhatWeb in aggressive mode (`-a 3`) over every host that answered HTTP. The live
+scheme + HTTP metadata (status, server, title, final URL) normally comes from the
+mass probe (modules.probe) that runs just before this; this module reuses it and
+only probes the hosts the mass probe did not cover (and does that concurrently
+rather than one host at a time). WhatWeb is invoked in batches, its JSON array
+parsed into readable tech tags plus the raw plugin record, which are merged with
+whatever first-guess tags the probe already recorded.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import tempfile
@@ -141,15 +144,35 @@ def run(result: ScanResult, *, timeout: int = 600, batch: int = 25) -> None:
     t0 = time.time()
     session = make_session()
 
-    # 1. Probe each subdomain to find the live scheme + fill HTTP metadata.
-    targets: dict[str, str] = {}   # host -> url
+    # 1. Establish the live scheme per host. The mass probe (module 2) usually
+    #    already did this and filled each subdomain's HTTP metadata, so reuse it
+    #    and only probe the hosts it did not cover. What is left is probed
+    #    concurrently rather than one host at a time.
+    targets: dict[str, str] = {}   # host -> url to fingerprint
     subs = [s for s in result._subdomains.values()  # type: ignore[attr-defined]
             if s["resolved"] or s["host"] == result.domain]
-    log.info(f"probing {len(subs)} resolving subdomains for live scheme")
+    todo = []
     for sub in subs:
-        url = _probe(sub, session, result.domain)
-        if url:
-            targets[sub["host"]] = url
+        http = sub.get("http") or {}
+        if http.get("status") and not http.get("error"):
+            scheme = http.get("scheme", "https")
+            targets[sub["host"]] = f"{scheme}://{sub['host']}/"
+        elif http.get("error"):
+            continue                       # the probe already found it dead
+        else:
+            todo.append(sub)
+
+    if todo:
+        log.info(f"probing {len(todo)} un-probed hosts for live scheme "
+                 f"({len(targets)} already known live)")
+        workers = min(config.CRAWL_THREADS, max(1, len(todo)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for sub, url in zip(todo, ex.map(
+                    lambda s: _probe(s, session, result.domain), todo)):
+                if url:
+                    targets[sub["host"]] = url
+    else:
+        log.info(f"reusing probe results for {len(targets)} live hosts")
 
     if not targets:
         log.warning("no live HTTP endpoints to fingerprint")
@@ -180,7 +203,14 @@ def run(result: ScanResult, *, timeout: int = 600, batch: int = 25) -> None:
         plugins = rec.get("plugins", {})
         tags = _extract_tags(plugins)
         sub = result.add_subdomain(host)
-        sub["tech"] = tags
+        # Merge over the probe's first-guess tags rather than discarding them —
+        # the two engines catch different things (httpx sees headers/cookies,
+        # WhatWeb runs deeper plugins).
+        merged = list(sub.get("tech") or [])
+        for t in tags:
+            if t not in merged:
+                merged.append(t)
+        sub["tech"] = merged
         sub["whatweb"] = {
             "target": rec.get("target"),
             "http_status": rec.get("http_status"),
@@ -189,7 +219,7 @@ def run(result: ScanResult, *, timeout: int = 600, batch: int = 25) -> None:
         # The fingerprint's IP plugin can reveal an address DNS missed.
         for ip in plugins.get("IP", {}).get("string", []):
             result._link_ip(sub, ip, source=config.SOURCE_CODES["whatweb"])  # type: ignore[attr-defined]
-        if tags:
+        if merged:
             tagged += 1
 
     log.info(f"fingerprinted {tagged}/{len(targets)} hosts")

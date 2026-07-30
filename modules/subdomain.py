@@ -1,12 +1,19 @@
 """
 Module 1 — Subdomain discovery + infrastructure correlation.
 
-Primary engine is BBOT (subdomain-enum + asn), invoked as a CLI and parsed from
-its NDJSON event stream. Everything is best-effort: if BBOT is missing or a run
-yields nothing, we fall back to crt.sh certificate transparency plus a small DNS
-brute of common names. Whatever the source, every discovered host is then
-DNS-resolved locally so IP linkage is reliable, and the apex domain's WHOIS is
-captured once.
+Two passive engines run in sequence, fast one first:
+
+  1. a lightweight passive name enum (source "n") that queries the public
+     sources and returns in seconds. Everything after it — the probe, the
+     crawl, the brute — can start from a real host list almost immediately
+     instead of waiting on the deep sweep,
+  2. BBOT (source "b"), the deep sweep: many more modules, ASN correlation,
+     findings, and minutes rather than seconds. It adds to what pass 1 found.
+
+If neither is available we fall back to crt.sh certificate transparency plus a
+small DNS brute of common names. Whatever the source, every discovered host is
+then resolved — through the bulk resolver (source "r") when it is installed,
+otherwise the local resolver pool — and the apex domain's WHOIS is captured once.
 """
 from __future__ import annotations
 
@@ -23,14 +30,17 @@ import dns.reversename
 
 from . import config, securitytrails, tor
 from .schema import ScanResult
-from .util import (get_logger, in_scope, make_session, registrable_domain,
-                   resolve_tool, run_cmd, host_of)
+from .util import (get_logger, in_scope, make_session, pick_flag, registrable_domain,
+                   resolve_recon_tool, resolve_tool, run_cmd, host_of, stream_cmd,
+                   tool_flags)
 
 log = get_logger("subdomain")
 
 # Source codes (no tool names leak into findings) — see config.SOURCE_CODES.
-SRC_BBOT = config.SOURCE_CODES["bbot"]    # "b"
-SRC_CRTSH = config.SOURCE_CODES["crtsh"]  # "c"
+SRC_BBOT = config.SOURCE_CODES["bbot"]            # "b"
+SRC_CRTSH = config.SOURCE_CODES["crtsh"]          # "c"
+SRC_PASSIVE = config.SOURCE_CODES["subfinder"]    # "n"
+SRC_DNSX = config.SOURCE_CODES["dnsx"]            # "r"
 
 COMMON_SUBS = [
     "www", "mail", "webmail", "smtp", "pop", "imap", "ns1", "ns2", "dns",
@@ -121,6 +131,19 @@ def resolve_host(host: str) -> list[str]:
 
 
 def _resolve_many(hosts: list[str]) -> dict[str, list[str]]:
+    """Resolve a batch of hosts to A/AAAA addresses.
+
+    Prefers the bulk resolver binary (hundreds of concurrent lookups from one
+    process) and falls back to the local thread pool. Over Tor neither applies:
+    UDP DNS would go straight out of this machine past the proxy, so resolution
+    stays on the DoH path in `resolve_host`.
+    """
+    if not hosts:
+        return {}
+    if not config.TOR_ACTIVE:
+        bulk = _dnsx_resolve(hosts)
+        if bulk is not None:
+            return bulk
     out: dict[str, list[str]] = {}
     # Over Tor each lookup is an HTTPS round trip through a circuit; a wide fan-out
     # buys nothing and starves the crawler's own circuits.
@@ -130,6 +153,115 @@ def _resolve_many(hosts: list[str]) -> dict[str, list[str]]:
         for fut in concurrent.futures.as_completed(futs):
             out[futs[fut]] = fut.result()
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Bulk resolver (source "r")
+# --------------------------------------------------------------------------- #
+def _dnsx_bin() -> str | None:
+    return resolve_recon_tool(config.DNSX_BIN, config.TOOL_ALIASES.get("dnsx"))
+
+
+def _dnsx_resolve(hosts: list[str]) -> dict[str, list[str]] | None:
+    """A/AAAA for every host in one pass. Returns None when unavailable, so the
+    caller can fall back rather than treat "no binary" as "nothing resolves"."""
+    bin_path = _dnsx_bin()
+    if not bin_path:
+        return None
+    flags = tool_flags(bin_path)
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                     encoding="utf-8") as fh:
+        fh.write("\n".join(hosts))
+        list_file = Path(fh.name)
+    cmd = [bin_path, "-list", str(list_file), "-json", "-silent"]
+    for names, value in ((("a",), None), (("aaaa",), None), (("no-color", "nc"), None),
+                         (("threads", "t"), config.DNSX_THREADS),
+                         (("resolver", "r"), ",".join(config.DNS_NAMESERVERS)),
+                         (("disable-update-check", "duc"), None)):
+        f = pick_flag(flags, *names)
+        if f:
+            cmd.append(f)
+            if value is not None:
+                cmd.append(str(value))
+
+    out: dict[str, list[str]] = {h: [] for h in hosts}
+
+    def on_line(line: str) -> None:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        host = str(rec.get("host") or "").rstrip(".").lower()
+        if not host:
+            return
+        ips = [str(x) for x in (rec.get("a") or []) + (rec.get("aaaa") or []) if x]
+        if ips:
+            out.setdefault(host, [])
+            out[host] = sorted({*out[host], *ips})
+
+    try:
+        stream_cmd(cmd, timeout=config.DNSX_TIMEOUT, on_line=on_line, log=log)
+    finally:
+        list_file.unlink(missing_ok=True)
+    resolved = sum(1 for v in out.values() if v)
+    log.info(f"bulk resolver: {resolved}/{len(hosts)} hosts resolved")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Fast passive name enum (source "n")
+# --------------------------------------------------------------------------- #
+def _subfinder_bin() -> str | None:
+    return resolve_recon_tool(config.SUBFINDER_BIN, config.TOOL_ALIASES.get("subfinder"))
+
+
+def run_passive_enum(result: ScanResult, domain: str, *, timeout: int | None = None) -> int:
+    """Quick passive sweep for subdomains. Returns how many in-scope hosts it
+    added. Runs before the deep engine so the rest of the pipeline has something
+    to work on within seconds."""
+    bin_path = _subfinder_bin()
+    if not bin_path:
+        return 0
+    flags = tool_flags(bin_path)
+    cmd = [bin_path, "-domain", domain, "-json", "-silent"]
+    for names, value in ((("no-color", "nc"), None),
+                         (("timeout",), 20),
+                         (("disable-update-check", "duc"), None)):
+        f = pick_flag(flags, *names)
+        if f:
+            cmd.append(f)
+            if value is not None:
+                cmd.append(str(value))
+    if config.SUBFINDER_ALL:
+        f = pick_flag(flags, "all")
+        if f:
+            cmd.append(f)
+    if tor.active():
+        # A Go binary ignores torsocks' LD_PRELOAD shim, and this one has no
+        # SOCKS option — running it would query every public source directly from
+        # this address, which is exactly what a Tor scan is avoiding.
+        log.warning("quick passive enum skipped over Tor (no SOCKS support in the engine)")
+        return 0
+
+    found: set[str] = set()
+
+    def on_line(line: str) -> None:
+        host = ""
+        try:
+            rec = json.loads(line)
+            host = str(rec.get("host") or rec.get("input") or "")
+        except json.JSONDecodeError:
+            host = line                     # -silent without -json prints bare names
+        host = host.strip().lower().rstrip(".")
+        if host and in_scope(f"http://{host}", result.domain):
+            found.add(host)
+
+    log.info(f"quick passive enum of {domain}")
+    stream_cmd(cmd, timeout=timeout or config.SUBFINDER_TIMEOUT, on_line=on_line, log=log)
+    for host in found:
+        result.add_subdomain(host, source=SRC_PASSIVE)
+    log.info(f"quick passive enum: {len(found)} hosts")
+    return len(found)
 
 
 # --------------------------------------------------------------------------- #
@@ -417,6 +549,11 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
         elif deep:
             log.warning("deep DNS requested but no key configured — skipping")
     else:
+        # 1. quick pass — seconds, so the deep engine is never the only thing
+        #    standing between the operator and a host list.
+        quick = run_passive_enum(result, domain)
+
+        # 2. deep pass.
         n = run_bbot(result, domain, passive, timeout) if use_bbot else 0
 
         # Deep DNS (SecurityTrails, code "s") — subdomains + current & historical DNS.
@@ -427,15 +564,15 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
         elif deep:
             log.warning("deep DNS requested but no key configured — skipping")
 
-        # Fallback / supplement with crt.sh if BBOT + deep gave little.
-        if (n + deep_added) < 3:
+        # Fallback / supplement with crt.sh if the passive engines gave little.
+        if (quick + n + deep_added) < 3:
             log.info("supplementing with certificate transparency")
             for h in crtsh_subdomains(domain):
                 result.add_subdomain(h, source=SRC_CRTSH)
 
         # Always ensure apex + common names are considered.
         result.add_subdomain(domain, source="seed")
-        if n == 0 and not use_bbot:
+        if (quick + n) == 0:
             log.info(f"DNS-brute of {len(COMMON_SUBS)} common names")
             candidates = [f"{s}.{domain}" for s in COMMON_SUBS]
             for host, ips in _resolve_many(candidates).items():
@@ -444,11 +581,12 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
 
     # Resolve everything we have so IP links are complete.
     hosts = [r["host"] for r in result._subdomains.values()]  # type: ignore[attr-defined]
+    res_src = SRC_DNSX if (not config.TOR_ACTIVE and _dnsx_bin()) else "dns"
     log.info(f"resolving {len(hosts)} hosts to IPs")
     for host, ips in _resolve_many(hosts).items():
         rec = result.add_subdomain(host)
         for ip in ips:
-            result._link_ip(rec, ip)  # type: ignore[attr-defined]
+            result._link_ip(rec, ip, source=res_src)  # type: ignore[attr-defined]
         rec["resolved"] = bool(rec["ips"])
 
     # Drop unresolved noise? Keep them — a non-resolving CNAME can be a takeover

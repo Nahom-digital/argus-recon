@@ -38,6 +38,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from modules import config
 from modules import graph_loader
+from modules import store
 from modules import tor
 from modules.util import resolve_tool
 
@@ -157,6 +158,32 @@ def _light_scan(d: dict) -> dict:
     return out
 
 
+def _light_view(scan_id: str) -> dict:
+    """Light document for the scan page. The endpoint list — the heavy part — is
+    served from the SQLite index when it is fresh, so a huge scan opens without
+    parsing the whole JSON. Panel data (subdomains, infra, dns, files, secrets)
+    is small and still comes from the parsed doc."""
+    path = config.SCANS_DIR / f"{scan_id}.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0
+    cached = store.light_endpoints(scan_id, mtime) if mtime else None
+    doc = _load(scan_id)
+    if cached is not None:
+        out = dict(doc)
+        out["endpoints"] = cached
+        return out
+    # Cache miss (first view after a restart, or store disabled): strip inline and
+    # backfill the index so the next view is served from the store.
+    light = _light_scan(doc)
+    try:
+        store.index_scan(scan_id, doc, path)
+    except Exception:
+        pass
+    return light
+
+
 # Summaries are read for every scan on the home page. Parsing a multi-MB file
 # just to pull `meta` is wasteful, so cache the summary by (scan_id, mtime).
 _SUMMARY_CACHE: dict = {}
@@ -171,30 +198,30 @@ def _summary(path: Path) -> dict:
     hit = _SUMMARY_CACHE.get(stem)
     if hit and hit[0] == mtime:
         return hit[1]
+    # Persistent cache first: the store keeps a summary per scan keyed by mtime,
+    # so listing the library survives a server restart without re-parsing every
+    # multi-MB file. In-memory cache is still the fastest hop for a live session.
+    cached = store.get_summary(stem, mtime) if mtime else None
+    if cached is not None:
+        _SUMMARY_CACHE[stem] = (mtime, cached)
+        return cached
     try:
         with open(path, encoding="utf-8") as fh:
             d = json.load(fh)
     except Exception:
         return {"scan_id": stem, "domain": stem, "error": True,
                 "stats": {}, "started_at": None}
-    meta = d.get("meta", {})
-    tor_meta = meta.get("tor") or {}
-    summary = {
-        "scan_id": stem,
-        "domain": meta.get("domain", stem),
-        "started_at": meta.get("started_at"),
-        "finished_at": meta.get("finished_at"),
-        "duration_sec": meta.get("duration_sec"),
-        "stats": meta.get("stats", {}),
-        "modules": meta.get("modules", {}),
-        # how the scan was taken — a single-target or Tor run should not look
-        # identical to a full direct one in the library
-        "scope": meta.get("scope", "apex"),
-        "tor": {"exit_ip": tor_meta.get("exit_ip"),
-                "verified": bool(tor_meta.get("verified"))} if tor_meta else None,
-        "size": path.stat().st_size,
-    }
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    summary = store.build_summary(d, scan_id=stem, mtime=mtime, size=size)
     _SUMMARY_CACHE[stem] = (mtime, summary)
+    # Backfill the store so the next process/request is served from it.
+    try:
+        store.index_scan(stem, d, path)
+    except Exception:
+        pass
     return summary
 
 
@@ -231,8 +258,11 @@ def api_scan(scan_id):
 @app.route("/api/scan/<scan_id>/view")
 def api_scan_view(scan_id):
     """Light document for the scan page: panel data plus table-ready endpoints,
-    without response bodies / DOM / headers. This is what makes a huge scan open."""
-    return jsonify(_light_scan(_load(scan_id)))
+    without response bodies / DOM / headers. This is what makes a huge scan open.
+    The endpoint list is served from the SQLite index when it is fresh."""
+    if not SCAN_ID_RE.match(scan_id):
+        abort(400, "bad scan id")
+    return jsonify(_light_view(scan_id))
 
 
 @app.route("/api/scan/<scan_id>/endpoint/<eid>")
@@ -259,11 +289,16 @@ def api_scan_delete(scan_id):
         path.unlink()
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
-    # best-effort: also drop the matching Neo4j subgraph if the DB is up
+    # best-effort: also drop the matching subgraph and the SQLite cache rows
     try:
         graph_loader.delete_scan(scan_id)
     except Exception:
         pass
+    try:
+        store.forget(scan_id)
+    except Exception:
+        pass
+    _SUMMARY_CACHE.pop(scan_id, None)
     return jsonify({"deleted": scan_id})
 
 
@@ -331,9 +366,11 @@ def api_status():
         resolve_tool(config.FFUF_BIN) or resolve_tool(config.FEROX_BIN),
     ])
     svc = _service_state()
+    graph = _graph_status()
     return jsonify({
         "deep_available": bool(config.SECURITYTRAILS_KEY),
-        "graph_db": graph_loader.ping(),
+        "graph_db": graph["available"],
+        "graph": graph,
         "engines_ready": engines_ready,
         "ipinfo_token": bool(config.IPINFO_TOKEN),
         # can a scan actually be routed over Tor from this machine? The launcher
@@ -346,6 +383,63 @@ def api_status():
                      "max_depth": config.CRAWL_MAX_DEPTH,
                      "modules": SCAN_MODULES},
     })
+
+
+# Graph-backend state is also polled repeatedly (status + the graph view) and a
+# neo4j ping is a socket round-trip, so cache it like the service state.
+_GRAPH_CACHE: dict = {"at": 0.0, "value": None}
+_GRAPH_TTL = 12.0
+
+
+def _graph_status() -> dict:
+    now = time.time()
+    if _GRAPH_CACHE["value"] is not None and now - _GRAPH_CACHE["at"] < _GRAPH_TTL:
+        return _GRAPH_CACHE["value"]
+    try:
+        st = graph_loader.backend_status()
+    except Exception:
+        st = {"available": False, "backend": "none"}
+    st["queued"] = store.queue_depth()
+    _GRAPH_CACHE.update(at=now, value=st)
+    return st
+
+
+# --------------------------------------------------------------------------- #
+# Graph-load queue drain
+#
+# A scan finishes whether or not a graph backend was up. Those that could not be
+# loaded are queued (modules.store); this worker retries them once a backend is
+# reachable, so the graph catches up on its own instead of the load being lost.
+# --------------------------------------------------------------------------- #
+def _drain_graph_queue():
+    while True:
+        try:
+            pending = store.pending_graph()
+            if pending and graph_loader.active_backend() != "none":
+                for job in pending:
+                    sid = job["scan_id"]
+                    path = config.SCANS_DIR / f"{sid}.json"
+                    if not path.exists():
+                        store.dequeue_graph(sid)      # scan was deleted
+                        continue
+                    try:
+                        with open(path, encoding="utf-8") as fh:
+                            doc = json.load(fh)
+                        if graph_loader.load(doc):
+                            store.dequeue_graph(sid)
+                            _GRAPH_CACHE["value"] = None
+                        else:
+                            store.mark_attempt(sid, "load returned false")
+                    except Exception as exc:
+                        store.mark_attempt(sid, str(exc)[:200])
+        except Exception:
+            pass
+        time.sleep(20)
+
+
+def _start_graph_worker():
+    t = threading.Thread(target=_drain_graph_queue, daemon=True)
+    t.start()
 
 
 @app.route("/api/config/key", methods=["POST"])
@@ -616,6 +710,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _cleanup_pid)
     import atexit
     atexit.register(lambda: _cleanup_pid())
+    _start_graph_worker()
     print(f"\n  Argus Recon dashboard  →  http://{host}:{port}")
     print(f"  Serving scans from     →  {config.SCANS_DIR}")
     print(f"  Deep DNS               →  {'unlocked' if config.SECURITYTRAILS_KEY else 'locked (no key)'}\n")

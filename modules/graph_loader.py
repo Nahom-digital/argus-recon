@@ -1,5 +1,5 @@
 """
-Module 10 — Graph model + Neo4j loader.
+Module 10 — Graph model + graph-database loader.
 
 `graph_from_scan()` turns a scan dict into a connected node/edge graph following
 the spec's shape:
@@ -9,9 +9,21 @@ the spec's shape:
 
 That pure function is the single source of truth for the graph: the web
 dashboard renders it directly (so the view always works), and `load()` pushes
-the very same nodes/edges into Neo4j via batched MERGE statements for anyone who
-wants to explore it in the Neo4j browser. Neo4j is optional — if the database is
-unreachable, `load()` logs and returns False rather than raising.
+the very same nodes/edges into a graph database for anyone who wants to explore
+it there.
+
+Two backends, selected by `config.GRAPH_BACKEND` (auto | neo4j | kuzu | none):
+
+  * neo4j — a server you run; batched MERGE statements, explorable in the Neo4j
+    browser,
+  * kuzu  — an *embedded* graph DB (SQLite's deployment model, Cypher's query
+    language): no server, one file on disk, the sensible default for a
+    single-user local tool.
+
+"auto" prefers a reachable Neo4j, else an importable kuzu, else nothing. Either
+way the loss of a backend is non-fatal: `load()` returns False (and the scan is
+queued for a later retry by modules.store), and the dashboard graph still
+renders from the scan JSON.
 """
 from __future__ import annotations
 
@@ -185,7 +197,117 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Neo4j
+# Backend selection
+# --------------------------------------------------------------------------- #
+def _neo4j_importable() -> bool:
+    try:
+        import neo4j  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _kuzu_importable() -> bool:
+    try:
+        import kuzu  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+_BACKEND_CACHE = {"at": 0.0, "value": None}
+_BACKEND_TTL = 15.0
+
+
+def active_backend() -> str:
+    """Which backend a load/fetch will actually use right now: 'neo4j', 'kuzu',
+    or 'none'. Honours config.GRAPH_BACKEND; 'auto' prefers a reachable Neo4j,
+    then an importable kuzu.
+
+    The result is cached briefly: in 'auto' mode it probes Neo4j connectivity,
+    and that socket round-trip should not run on every graph request/status poll.
+    """
+    now = time.time()
+    if _BACKEND_CACHE["value"] is not None and now - _BACKEND_CACHE["at"] < _BACKEND_TTL:
+        return _BACKEND_CACHE["value"]
+    want = config.GRAPH_BACKEND
+    if want == "none":
+        result = "none"
+    elif want == "neo4j":
+        result = "neo4j" if _neo4j_importable() else "none"
+    elif want == "kuzu":
+        result = "kuzu" if _kuzu_importable() else "none"
+    elif _neo4j_importable() and _neo4j_ping():          # auto
+        result = "neo4j"
+    elif _kuzu_importable():
+        result = "kuzu"
+    else:
+        result = "none"
+    _BACKEND_CACHE.update(at=now, value=result)
+    return result
+
+
+def backend_status() -> dict:
+    """What the dashboard shows for the graph DB: available? which one?"""
+    b = active_backend()
+    return {"available": b != "none", "backend": b,
+            "neo4j": _neo4j_importable() and _neo4j_ping(),
+            "kuzu": _kuzu_importable()}
+
+
+def ping(**conn) -> bool:
+    """Back-compat: is *any* persistent backend available."""
+    return active_backend() != "none"
+
+
+def _prepare(data: dict) -> tuple[dict, str, str]:
+    """graph_from_scan + scan metadata stamped onto every node's props."""
+    graph = graph_from_scan(data, max_nodes=10_000_000)   # no cap for the DB
+    scan_id = data["meta"]["scan_id"]
+    domain = data["meta"]["domain"]
+    for n in graph["nodes"]:
+        n["props"] = {k: v for k, v in n["props"].items() if v is not None}
+        n["props"]["scan_id"] = scan_id
+        n["props"]["domain"] = domain
+        n["props"]["name"] = n["label"]
+    return graph, scan_id, domain
+
+
+def load(data: dict, *, wipe_scan: bool = True, backend: str | None = None, **conn) -> bool:
+    """Push the scan graph into the selected backend. Returns True on success,
+    False if no backend is available or the write errors (never raises)."""
+    b = backend or active_backend()
+    if b == "neo4j":
+        return _neo4j_load(data, wipe_scan=wipe_scan, **conn)
+    if b == "kuzu":
+        return _kuzu_load(data, wipe_scan=wipe_scan)
+    log.info("no graph backend available — graph renders from JSON; "
+             "scan queued for a later load")
+    return False
+
+
+def delete_scan(scan_id: str, **conn) -> bool:
+    """Remove a scan's subgraph from whichever backends have it (best-effort)."""
+    ok = False
+    if _neo4j_importable():
+        ok = _neo4j_delete(scan_id, **conn) or ok
+    if _kuzu_importable():
+        ok = _kuzu_delete(scan_id) or ok
+    return ok
+
+
+def fetch_graph(scan_id: str, backend: str | None = None, **conn) -> dict | None:
+    """Read a scan's graph back out of the active backend. None if unavailable."""
+    b = backend or active_backend()
+    if b == "neo4j":
+        return _neo4j_fetch(scan_id, **conn)
+    if b == "kuzu":
+        return _kuzu_fetch(scan_id)
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Neo4j backend
 # --------------------------------------------------------------------------- #
 def _driver(uri=None, user=None, password=None):
     from neo4j import GraphDatabase
@@ -194,7 +316,7 @@ def _driver(uri=None, user=None, password=None):
                                       password or config.NEO4J_PASSWORD))
 
 
-def ping(uri=None, user=None, password=None) -> bool:
+def _neo4j_ping(uri=None, user=None, password=None) -> bool:
     try:
         drv = _driver(uri, user, password)
         drv.verify_connectivity()
@@ -204,35 +326,16 @@ def ping(uri=None, user=None, password=None) -> bool:
         return False
 
 
-def load(data: dict, *, wipe_scan: bool = True, **conn) -> bool:
-    """Push the scan graph into Neo4j. Returns True on success, False if the DB
-    is unreachable or the driver errors (never raises)."""
+def _neo4j_load(data: dict, *, wipe_scan: bool = True, **conn) -> bool:
     t0 = time.time()
-    try:
-        from neo4j import GraphDatabase  # noqa: F401
-    except Exception:
-        log.warning("neo4j driver not installed — skipping graph load")
-        return False
-
-    graph = graph_from_scan(data, max_nodes=10_000_000)  # no cap for the DB
-    scan_id = data["meta"]["scan_id"]
-    domain = data["meta"]["domain"]
-
+    graph, scan_id, _domain = _prepare(data)
     try:
         drv = _driver(conn.get("uri"), conn.get("user"), conn.get("password"))
         drv.verify_connectivity()
     except Exception as exc:
         log.warning(f"Neo4j unreachable at {config.NEO4J_URI}: {exc}")
-        log.warning("  (graph still renders in the dashboard from JSON; "
-                    "start Neo4j to persist it — see README)")
+        log.warning("  (graph still renders in the dashboard from JSON)")
         return False
-
-    # Attach scan metadata to each node/edge so multiple scans coexist.
-    for n in graph["nodes"]:
-        n["props"] = {k: v for k, v in n["props"].items() if v is not None}
-        n["props"]["scan_id"] = scan_id
-        n["props"]["domain"] = domain
-        n["props"]["name"] = n["label"]
 
     nodes_by_type: dict[str, list] = {}
     for n in graph["nodes"]:
@@ -272,8 +375,7 @@ def load(data: dict, *, wipe_scan: bool = True, **conn) -> bool:
     return True
 
 
-def delete_scan(scan_id: str, **conn) -> bool:
-    """Remove a scan's subgraph from Neo4j (best-effort; no-op if DB is down)."""
+def _neo4j_delete(scan_id: str, **conn) -> bool:
     try:
         drv = _driver(conn.get("uri"), conn.get("user"), conn.get("password"))
         drv.verify_connectivity()
@@ -285,9 +387,7 @@ def delete_scan(scan_id: str, **conn) -> bool:
         return False
 
 
-def fetch_graph(scan_id: str, **conn) -> dict | None:
-    """Read a scan's graph back out of Neo4j (used by the dashboard when the DB
-    is available). Returns None if unavailable."""
+def _neo4j_fetch(scan_id: str, **conn) -> dict | None:
     try:
         drv = _driver(conn.get("uri"), conn.get("user"), conn.get("password"))
         drv.verify_connectivity()
@@ -319,3 +419,129 @@ def fetch_graph(scan_id: str, **conn) -> dict | None:
         return None
     return {"nodes": list(nodes.values()), "edges": edges,
             "stats": {"nodes": len(nodes), "edges": len(edges)}, "source": "neo4j"}
+
+
+# --------------------------------------------------------------------------- #
+# Kuzu backend (embedded, no server)
+#
+# Kuzu wants a declared schema, so the whole property graph is stored in one
+# generic node table and one generic relationship table, with the node type,
+# label and remaining attributes carried as columns / a JSON blob. That keeps the
+# arbitrary Domain/Subdomain/Endpoint/… shape without a table per type, and reads
+# back into exactly the {nodes, edges} structure the dashboard already consumes.
+# --------------------------------------------------------------------------- #
+import json as _json
+import threading as _threading
+
+_KUZU_LOCK = _threading.Lock()      # one embedded DB, serialise writers
+_KUZU_DB = None
+
+
+def _kuzu_conn():
+    """Open (once) the embedded database and ensure the schema exists."""
+    global _KUZU_DB
+    import kuzu
+    if _KUZU_DB is None:
+        config.KUZU_DIR.parent.mkdir(parents=True, exist_ok=True)
+        _KUZU_DB = kuzu.Database(str(config.KUZU_DIR))
+        conn = kuzu.Connection(_KUZU_DB)
+        conn.execute(
+            "CREATE NODE TABLE IF NOT EXISTS ArgusNode("
+            "id STRING, scan_id STRING, ntype STRING, label STRING, props STRING, "
+            "PRIMARY KEY (id))")
+        conn.execute(
+            "CREATE REL TABLE IF NOT EXISTS REL(FROM ArgusNode TO ArgusNode, "
+            "rtype STRING, scan_id STRING)")
+        return conn
+    return kuzu.Connection(_KUZU_DB)
+
+
+_KUZU_BATCH = 2000
+
+
+def _kuzu_load(data: dict, *, wipe_scan: bool = True) -> bool:
+    t0 = time.time()
+    try:
+        graph, scan_id, _domain = _prepare(data)
+        node_rows = [{"id": n["id"], "sid": scan_id, "t": n["type"], "lbl": n["label"],
+                      "p": _json.dumps({k: v for k, v in n["props"].items()
+                                        if k not in ("scan_id", "domain")})}
+                     for n in graph["nodes"]]
+        edge_rows = [{"s": e["source"], "d": e["target"], "rt": e["type"], "sid": scan_id}
+                     for e in graph["edges"]]
+        with _KUZU_LOCK:
+            conn = _kuzu_conn()
+            if wipe_scan:
+                _kuzu_delete_locked(conn, scan_id)
+            # One UNWIND per batch instead of a query per element — 16k edges as
+            # 16k separate MERGE compilations is what made a load take minutes and
+            # hold the lock the reader needs.
+            for chunk in _chunks(node_rows, _KUZU_BATCH):
+                conn.execute(
+                    "UNWIND $rows AS row MERGE (n:ArgusNode {id: row.id}) "
+                    "SET n.scan_id=row.sid, n.ntype=row.t, n.label=row.lbl, n.props=row.p",
+                    {"rows": chunk})
+            for chunk in _chunks(edge_rows, _KUZU_BATCH):
+                conn.execute(
+                    "UNWIND $rows AS row "
+                    "MATCH (a:ArgusNode {id: row.s}), (b:ArgusNode {id: row.d}) "
+                    "MERGE (a)-[r:REL {rtype: row.rt}]->(b) SET r.scan_id=row.sid",
+                    {"rows": chunk})
+    except Exception as exc:
+        log.warning(f"kuzu load failed: {exc}")
+        return False
+    log.info(f"loaded {graph['stats']['nodes']} nodes / {graph['stats']['edges']} "
+             f"edges into kuzu ({time.time() - t0:.1f}s)")
+    return True
+
+
+def _chunks(seq: list, n: int):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def _kuzu_delete_locked(conn, scan_id: str) -> None:
+    conn.execute("MATCH (n:ArgusNode {scan_id:$sid}) DETACH DELETE n",
+                 {"sid": scan_id})
+
+
+def _kuzu_delete(scan_id: str) -> bool:
+    try:
+        with _KUZU_LOCK:
+            _kuzu_delete_locked(_kuzu_conn(), scan_id)
+        return True
+    except Exception:
+        return False
+
+
+def _kuzu_fetch(scan_id: str) -> dict | None:
+    try:
+        with _KUZU_LOCK:
+            conn = _kuzu_conn()
+            nodes: dict[str, dict] = {}
+            res = conn.execute(
+                "MATCH (n:ArgusNode {scan_id:$sid}) "
+                "RETURN n.id, n.ntype, n.label, n.props", {"sid": scan_id})
+            while res.has_next():
+                nid, ntype, label, props = res.get_next()
+                try:
+                    p = _json.loads(props) if props else {}
+                except Exception:
+                    p = {}
+                p.pop("name", None)
+                nodes[nid] = {"id": nid, "type": ntype or "Node",
+                              "label": label or nid, "props": p}
+            edges: list[dict] = []
+            res = conn.execute(
+                "MATCH (a:ArgusNode {scan_id:$sid})-[r:REL]->(b:ArgusNode {scan_id:$sid}) "
+                "RETURN a.id, b.id, r.rtype", {"sid": scan_id})
+            while res.has_next():
+                s, t, rel = res.get_next()
+                edges.append({"source": s, "target": t, "type": rel})
+    except Exception as exc:
+        log.debug(f"kuzu fetch failed: {exc}")
+        return None
+    if not nodes:
+        return None
+    return {"nodes": list(nodes.values()), "edges": edges,
+            "stats": {"nodes": len(nodes), "edges": len(edges)}, "source": "kuzu"}

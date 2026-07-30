@@ -2,8 +2,10 @@
 #   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 #
 # External CLI tools are NOT pip packages — install separately (see README):
-#   bbot (pipx install bbot), whatweb, ffuf (or feroxbuster), tor + torsocks for
-#   Tor scans, and optionally Neo4j.
+#   the Go recon binaries (mass HTTP probe, JS-aware crawler, passive name enum,
+#   bulk resolver), bbot (pipx install bbot), whatweb, ffuf (or feroxbuster),
+#   tor + torsocks for Tor scans. Neo4j is optional (kuzu below is the embedded
+#   default and needs no server).
 
 flask>=3.0
 flask-cors>=5.0
@@ -15,4 +17,14 @@ dnspython>=2.6
 jsbeautifier>=1.15
 python-whois>=0.9
 tldextract>=5.1
+
+# Async crawler transport — httpx.AsyncClient behind a semaphore is what lets the
+# custom crawler match the Go tools' concurrency instead of choking the pipeline
+# one thread per request. The [socks] extra pulls socksio so the async path still
+# works over Tor.
+httpx[socks]>=0.27
+
+# Graph storage. kuzu is an embedded graph DB (no server, like SQLite) and is the
+# default backend; neo4j is still supported when a server is running.
+kuzu>=0.4
 neo4j>=5.0

@@ -25,16 +25,26 @@ action, or JS request pointing outside that scope is logged once as an endpoint
 
 | # | Stage | Tool (source code) | Output |
 |---|-------|------|--------|
-| 1 | Subdomain discovery + infra | **BBOT** (`b`) + **SecurityTrails** deep DNS (`s`) + **crt.sh** (`c`) + DNS resolver (`dns`) | subdomains, resolved IPs, **DNS records** (A/AAAA/MX/NS/CNAME/TXT/SOA), **historical DNS**, WHOIS |
-| 2 | Tech fingerprinting | **WhatWeb** `-a 3` (`W`) | per-subdomain tech tags + raw plugin record |
-| 3 | Crawler (in-scope, recursive) | custom (`crawler`) | every page, form, link, resource; discovered hosts become subdomains |
-| 4 | HTML/DOM parser | custom | forms, buttons/inputs, links, favicon/img, meta, comments |
-| 5 | JS source parser | custom (`js`, JSluice + LinkFinder ideas) | endpoints, fetch/axios/XHR request logic, secrets |
-| 6 | Smart bruteforce | **ffuf** (`f`, or feroxbuster) | robots/sitemap hints + stack-aware wordlist hits, w/ request+response |
-| 7 | IP enrichment | **ipinfo.io** (`i`) | provider, ASN, country, datacenter vs residential |
-| 8 | Field-intent classifier | custom | password / token / otp / api_key / redirect / idor … |
-| 9 | Storage | — | `scans/{domain}_{timestamp}.json` |
-| 10 | Graph | **Neo4j** (optional) | Domain → Subdomain → Endpoint → Request → Field |
+| 1 | Subdomain discovery + infra | **subfinder** quick pass (`n`) → **BBOT** deep (`b`) + **SecurityTrails** deep DNS (`s`) + **crt.sh** (`c`), resolved by **dnsx** (`r`) / DNS resolver (`dns`) | subdomains, resolved IPs, **DNS records** (A/AAAA/MX/NS/CNAME/TXT/SOA), **historical DNS**, WHOIS |
+| 2 | Mass HTTP probe | **httpx** (`h`) | live hosts + scheme, status/title/server, first tech guess, answering IP + CNAME |
+| 3 | Tech fingerprinting | **WhatWeb** `-a 3` (`W`) | per-subdomain tech tags + raw plugin record |
+| 4 | Deep-crawl pre-pass | **katana** (`k`) | JS-aware endpoint/route discovery → seeds the crawler |
+| 5 | Crawler (in-scope, recursive, async) | custom (`crawler`) | every page, form, link, resource; discovered hosts become subdomains |
+| 6 | HTML/DOM parser | custom | forms, buttons/inputs, links, favicon/img, meta, comments |
+| 7 | JS source parser | custom (`js`, JSluice + LinkFinder ideas) | endpoints, fetch/axios/XHR request logic, secrets |
+| 8 | Smart bruteforce | **ffuf** (`f`, or feroxbuster) | robots/sitemap hints + stack-aware wordlist hits, w/ request+response |
+| 9 | IP enrichment | **ipinfo.io** (`i`) | provider, ASN, country, datacenter vs residential |
+| 10 | Field-intent classifier | custom | password / token / otp / api_key / redirect / idor … |
+| 11 | Storage | SQLite (WAL) cache + `scans/{domain}_{timestamp}.json` | one JSON per scan; a derived cache/queue speeds the dashboard |
+| 12 | Graph | **kuzu** (embedded, default) or **Neo4j** | Domain → Subdomain → Endpoint → Request → Field |
+
+**Speed.** The wide, fan-out-heavy passes (name enum, HTTP probing, JS-aware
+crawling, bulk resolution) run on Go binaries at high concurrency, and the custom
+crawler's own HTTP layer is asyncio (`httpx.AsyncClient` behind a semaphore) so it
+keeps pace instead of being the pipeline's floor. Every Go tool is **optional and
+validated** — Argus probes each binary's `-version` (some distros ship an unrelated
+`httpx`) and falls back to a built-in path when one is missing, so the pipeline
+degrades in speed, never in capability.
 
 **Source codes.** Findings and the dashboard never print the real tool names — each
 source is tagged with a short code so a shared scan or screenshot does not disclose
@@ -43,6 +53,8 @@ the toolchain. The mapping (documented here only):
 | Code | Real source | Code | Real source |
 |------|-------------|------|-------------|
 | `b` | BBOT (passive subdomain/ASN enum) | `i` | ipinfo.io (IP enrichment) |
+| `n` | subfinder (quick passive names) | `h` | httpx (mass HTTP probe) |
+| `k` | katana (JS-aware deep crawl) | `r` | dnsx (bulk resolver) |
 | `W` | WhatWeb (`-a 3` fingerprint) | `crawler` | our in-scope crawler |
 | `f` | ffuf / feroxbuster (content brute) | `js` | our JS analyser |
 | `s` | SecurityTrails (deep DNS + history) | `robots` / `sitemap` | those map files |
@@ -94,12 +106,19 @@ That is the whole install. It is fresh-server safe and idempotent:
 
 1. installs the base packages it needs (python venv/pip, pipx, curl, git),
 2. installs the external recon engines (whatweb, ffuf/feroxbuster, bbot via pipx,
-   tor + torsocks for Tor scans),
-3. builds the Python venv from `requirements.txt` (incl. PySocks for Tor),
+   tor + torsocks for Tor scans), and — when a Go toolchain is present — the
+   ProjectDiscovery speed tools (httpx, katana, subfinder, dnsx) into `~/go/bin`,
+3. builds the Python venv from `requirements.txt` (incl. PySocks for Tor, the
+   async HTTP client, and the embedded graph DB),
 4. writes and enables the **`argus-recon`** systemd *user* service, with linger on
    so it survives logout and reboot,
 5. waits until the dashboard actually answers, then prints **LIVE** with the URL,
    pid, uptime and version.
+
+The Go speed tools are optional: without them (or without Go) Argus runs on its
+built-in async probe/crawler/resolver — slower, but nothing is lost. Install them
+later with `go install github.com/projectdiscovery/{httpx,katana,dnsx}/cmd/...@latest`
+and `.../subfinder/v2/cmd/subfinder@latest`, then re-run `./install.sh --force`.
 
 Run it again any time. If the service is already up it says so and stops rather
 than installing a second copy:
@@ -135,15 +154,30 @@ Two optional extras:
 # you can also write it yourself:
 echo 'SECURITYTRAILS_KEY=your_key_here' >> .env
 
-# Neo4j for the persisted graph — the dashboard graph works fine without it
+# Persisted graph: kuzu (embedded, no server) is the default and ships in
+# requirements.txt — nothing to run. To use Neo4j instead, start one and set
+# ARGUS_GRAPH_BACKEND=neo4j:
 docker run -d --name argus-neo4j -p 7474:7474 -p 7687:7687 \
   -e NEO4J_AUTH=neo4j/argusrecon neo4j:5
 ```
 
-Everything degrades gracefully: no BBOT → certificate transparency + DNS brute;
-no deep-DNS key → resolver-only DNS records; no Neo4j → the dashboard builds the
-graph straight from the scan JSON. Secrets (`.env`, the SecurityTrails key) are
-gitignored and never leave the machine.
+**Graph storage.** `ARGUS_GRAPH_BACKEND` selects the backend: `auto` (default —
+a reachable Neo4j, else the embedded **kuzu** DB), `kuzu`, `neo4j`, or `none`.
+kuzu is an embedded graph database (SQLite's deployment model, Cypher's query
+language) that needs no server, so the persisted graph works out of the box. A
+scan finished while the backend was down is queued and loaded when it returns.
+In the dashboard's graph panel a **1 / 2** switch picks the renderer — **1** the
+built-in canvas graph, **2** Cytoscape.js with the fCoSE layout and a switchable
+fCoSE / SBGN stylesheet.
+
+A SQLite (WAL) store sits in front of it as a cache + job queue: the home-page
+summaries and the per-endpoint index are written once and read back as rows, so a
+large scan lists and opens without re-parsing multi-MB JSON on every request.
+
+Everything degrades gracefully: no BBOT → quick passive pass + certificate
+transparency + DNS brute; no deep-DNS key → resolver-only DNS records; no graph
+backend → the dashboard builds the graph straight from the scan JSON. Secrets
+(`.env`, the SecurityTrails key) are gitignored and never leave the machine.
 
 ---
 
@@ -236,13 +270,21 @@ Behaviour is tunable via environment variables (see `modules/config.py`):
 |----------|---------|---------|
 | `SECURITYTRAILS_KEY` | — | deep-DNS key (subdomains + full/historical DNS); stored in `.env` |
 | `IPINFO_TOKEN` | — | ipinfo.io token (free tier works without) |
-| `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` | `bolt://localhost:7687` / `neo4j` / `argusrecon` | graph DB |
-| `ARGUS_CRAWL_MAX_PAGES` / `ARGUS_CRAWL_MAX_DEPTH` / `ARGUS_CRAWL_THREADS` | 600 / 6 / 12 | crawler bounds |
+| `ARGUS_GRAPH_BACKEND` | `auto` | graph store: `auto` / `kuzu` / `neo4j` / `none` |
+| `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` | `bolt://localhost:7687` / `neo4j` / `argusrecon` | Neo4j graph DB |
+| `ARGUS_KUZU_DIR` / `ARGUS_STORE_DB` | `scans/.kuzu` / `scans/.argus.db` | embedded graph DB / SQLite cache-queue |
+| `ARGUS_STORE` | 1 | set `0` to disable the SQLite cache + graph-load queue |
+| `ARGUS_CRAWL_CONCURRENCY` / `ARGUS_CRAWL_HOST_CONCURRENCY` | 80 / 12 | async crawler in-flight requests (total / per host) |
+| `ARGUS_CRAWL_MAX_PAGES` / `ARGUS_CRAWL_MAX_DEPTH` / `ARGUS_CRAWL_THREADS` | 600 / 6 / 12 | crawler bounds (threads = sync-fallback pool) |
+| `ARGUS_PROBE_THREADS` / `ARGUS_PROBE_RATE` | 150 / 300 | mass HTTP probe concurrency / rate cap |
+| `ARGUS_KATANA_DEPTH` / `ARGUS_KATANA_HEADLESS` | 3 / 0 | deep-crawl depth / headless render (`1` = on) |
+| `ARGUS_BRUTE_RATE` / `ARGUS_BRUTE_MATCH_ALL` | 180 / 1 | ffuf requests/sec / `-mc all` + noise filters |
 | `ARGUS_HTTP_TIMEOUT` | 12 | per-request timeout (s) |
 | `ARGUS_VERIFY_TLS` | 0 | set `1` to enforce TLS verification |
 | `ARGUS_WEB_HOST` / `ARGUS_WEB_PORT` | 127.0.0.1 / 7666 | dashboard bind |
 
-Load the scan JSON into Neo4j manually if you skipped it at scan time:
+Load a scan JSON into the graph backend manually if you skipped it at scan time
+(picks the active backend — embedded kuzu unless a Neo4j is reachable):
 
 ```python
 import json
@@ -264,24 +306,28 @@ argus-recon/
   .env                    local secrets (deep-DNS key) — gitignored
   modules/
     config.py             paths, tool commands, pattern libraries, .env loader, source codes
-    util.py               logging, HTTP session (Tor-aware), scope rule, eTLD+1, tool resolution
-    schema.py             ScanResult container + dedup + DNS store + JSON serialisation
+    util.py               logging, HTTP session (Tor-aware), scope rule, eTLD+1, tool resolution (Go-tool validation)
+    schema.py             ScanResult container + dedup + DNS store + JSON serialisation (+ store index)
+    store.py              SQLite (WAL) cache + graph-load queue in front of the graph backend
+    asynchttp.py          async HTTP layer (httpx.AsyncClient + semaphore) used by the crawler
     tor.py                (0) Tor transport — proxy discovery, bootstrap, verification
-    subdomain.py          (1) BBOT + deep DNS + crt.sh/DNS fallback + DNS records + WHOIS (DoH over Tor)
+    subdomain.py          (1) subfinder quick pass + BBOT + deep DNS + crt.sh/DNS fallback + dnsx bulk resolve + WHOIS
     securitytrails.py     (1) deep DNS: subdomains + current & historical records
-    fingerprint.py        (2) WhatWeb -a 3
-    crawler.py            (3) in-scope recursive crawler
-    html_parser.py        (4) DOM extraction
-    js_parser.py          (5) endpoints / request logic / secrets
-    bruteforce.py         (6) robots/sitemap + stack wordlist + ffuf
-    ip_enrich.py          (7) ipinfo.io
-    classifier.py         (8) field-intent classification
-    graph_loader.py       (10) graph model + Neo4j loader
+    probe.py              (2) mass HTTP probe (httpx) — live hosts + scheme + first tech guess
+    fingerprint.py        (3) WhatWeb -a 3 (reuses the probe's live-host list)
+    deepcrawl.py          (4) JS-aware deep-crawl pre-pass (katana) — seeds the crawler
+    crawler.py            (5) in-scope recursive crawler — async transport, sync fallback
+    html_parser.py        (6) DOM extraction
+    js_parser.py          (7) endpoints / request logic / secrets
+    bruteforce.py         (8) robots/sitemap + stack wordlist + ffuf (rate-tuned, -mc all + calibration)
+    ip_enrich.py          (9) ipinfo.io
+    classifier.py         (10) field-intent classification
+    graph_loader.py       (12) graph model + kuzu / Neo4j loaders
   web/
-    server.py             Flask app (:7666)
+    server.py             Flask app (:7666) — store-backed reads, graph-queue drain worker
     templates/            base, index, scan
-    static/               css, js (incl. custom canvas graph), fonts, icons
-  scans/                  {domain}_{timestamp}.json outputs
+    static/               css, js (canvas graph + Cytoscape.js engine), js/vendor (cytoscape, fcose, sbgn), fonts, icons
+  scans/                  {domain}_{timestamp}.json outputs (+ .argus.db cache, .kuzu graph — gitignored)
   wordlists/
 ```
 

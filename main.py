@@ -6,14 +6,17 @@ Runs the full single-domain recon pipeline in order and writes one JSON file per
 scan into ./scans:
 
     0. Tor transport (optional)           (modules.tor — before anything else)
-    1. subdomain discovery + infra        (modules.subdomain, BBOT)
-    2. tech-stack fingerprinting          (modules.fingerprint, WhatWeb -a 3)
-    3. crawl  -> 4. HTML parse -> 5. JS parse   (modules.crawler)
+    1. subdomain discovery + infra        (modules.subdomain: fast passive → BBOT,
+                                           bulk resolver)
+    2. mass HTTP probe                    (modules.probe — live hosts + scheme)
+    3. tech-stack fingerprinting          (modules.fingerprint, WhatWeb -a 3)
+    4. deep crawl pre-pass                (modules.deepcrawl — JS-aware discovery)
+    5. crawl -> HTML parse -> JS parse    (modules.crawler, async transport)
     6. smart bruteforce                   (modules.bruteforce, ffuf)
     7. IP enrichment                      (modules.ip_enrich, ipinfo.io)
     8. field-intent classification        (modules.classifier)
     9. storage                            (scans/{domain}_{timestamp}.json)
-   10. graph load                         (modules.graph_loader, Neo4j)
+   10. graph load                         (modules.graph_loader → Neo4j / kuzu)
 
 Two switches change the shape of a run rather than a step of it:
 
@@ -41,7 +44,8 @@ from modules.schema import ScanResult
 from modules.util import (get_logger, registrable_root, registrable_domain,
                           is_subdomain_of, set_single_host)
 from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
-                     classifier, graph_loader, securitytrails, tor)
+                     classifier, graph_loader, securitytrails, tor, probe,
+                     deepcrawl)
 
 log = get_logger("main")
 
@@ -129,14 +133,28 @@ def run_pipeline(args) -> ScanResult:
                       deep=deep, input_host=input_host,
                       single=args.single)  # resolve + DNS only
 
-    # 2. Fingerprint
+    # 2. Mass HTTP probe — establishes which hosts are live and on which scheme
+    #    for both the fingerprint and the crawl. Runs whenever either of those
+    #    stages will (they both start from the live-host list it produces).
+    if ("fingerprint" in run or "crawl" in run) and not args.no_probe:
+        probe.run(result, timeout=args.tool_timeout)
+
+    # 3. Fingerprint
     if "fingerprint" in run:
         fingerprint.run(result, timeout=args.tool_timeout)
 
-    # 3-5. Crawl (HTML + JS parsing happen inside)
+    # 4-5. Crawl (HTML + JS parsing happen inside). A JS-aware deep-crawl
+    #      pre-pass discovers routes/endpoints the static crawler cannot see and
+    #      seeds it with them; the crawler then does the body/form/secret work.
     if "crawl" in run:
+        seeds: list[str] = []
+        if not args.no_deepcrawl:
+            roots = probe.live_roots(result) or _fallback_roots(result)
+            got = deepcrawl.run(result, roots=roots, timeout=args.tool_timeout)
+            if got:
+                seeds = got
         crawler.run(result, max_pages=args.max_pages, max_depth=args.max_depth,
-                    threads=args.threads)
+                    threads=args.threads, extra_seeds=seeds)
 
     # 6. Bruteforce
     if "bruteforce" in run:
@@ -153,6 +171,19 @@ def run_pipeline(args) -> ScanResult:
 
     result.meta["elapsed_sec"] = round(time.time() - t0, 1)
     return result
+
+
+def _fallback_roots(result: ScanResult) -> list[str]:
+    """Live roots when the mass probe was skipped: use whatever HTTP metadata is
+    already on the subdomain records, else assume https for resolving hosts."""
+    roots: list[str] = []
+    for sub in result._subdomains.values():          # type: ignore[attr-defined]
+        http = sub.get("http") or {}
+        if http.get("status") and not http.get("error"):
+            roots.append(f"{http.get('scheme', 'https')}://{sub['host']}")
+        elif sub.get("resolved"):
+            roots.append(f"https://{sub['host']}")
+    return sorted(set(roots))
 
 
 def print_summary(result: ScanResult, path) -> None:
@@ -215,7 +246,12 @@ def main(argv=None):
     p.add_argument("--no-prompt", action="store_true",
                    help=argparse.SUPPRESS)   # accepted for compatibility; never prompts
     p.add_argument("--no-bbot", action="store_true",
-                   help="skip the passive enum engine; use certificate transparency + DNS brute")
+                   help="skip the deep passive enum engine; use the quick pass + "
+                        "certificate transparency + DNS brute")
+    p.add_argument("--no-probe", action="store_true",
+                   help="skip the mass HTTP probe; each stage probes hosts itself (slower)")
+    p.add_argument("--no-deepcrawl", action="store_true",
+                   help="skip the JS-aware deep-crawl pre-pass; run the built-in crawler alone")
     p.add_argument("--only", help="comma list: run only these modules "
                    f"({','.join(ALL_MODULES)})")
     p.add_argument("--skip", help="comma list: skip these modules")
@@ -268,9 +304,31 @@ def main(argv=None):
         # 9. Storage
         path = result.save()
 
-        # 10. Graph
+        # 10. Graph. Neo4j is a server, so the engine can load it directly. An
+        #     embedded kuzu DB can only be open in one process at a time and the
+        #     dashboard owns it — so for kuzu (and when no backend is up) the scan
+        #     is queued and the dashboard's worker loads it. Either way a failure
+        #     is queued, never lost, and the graph still renders from JSON.
         if "graph" in _selected(args):
-            graph_loader.load(result.to_dict())
+            doc = result.to_dict()
+            backend = graph_loader.active_backend()
+            loaded = False
+            if backend == "neo4j":
+                loaded = graph_loader.load(doc, backend="neo4j")
+                if loaded:
+                    log.info("graph loaded into neo4j")
+            # Queue for the dashboard to load only when a backend actually exists
+            # to load it into (kuzu is owned by the dashboard process; a failed
+            # neo4j load is worth retrying). With graph storage off entirely there
+            # is nothing to queue — the dashboard still renders it from the JSON.
+            if not loaded and backend != "none":
+                try:
+                    from modules import store
+                    store.enqueue_graph(doc["meta"]["scan_id"], doc["meta"]["domain"])
+                    if backend == "kuzu":
+                        log.info("graph queued for the dashboard's embedded DB")
+                except Exception:
+                    pass
 
         print_summary(result, path)
     finally:

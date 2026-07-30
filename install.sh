@@ -373,6 +373,48 @@ else
   say "whatweb + ffuf/feroxbuster + tor already present ✔"
 fi
 
+# ProjectDiscovery Go tools — the fast passes: mass HTTP probe (httpx), JS-aware
+# crawler (katana), quick passive name enum (subfinder), bulk resolver (dnsx).
+# Each is optional: Argus validates the binary (some distros ship an unrelated
+# `httpx`) and falls back to its built-in path when one is missing. Installed via
+# `go install` into ~/go/bin, which Argus searches even when it is off PATH.
+install_go_tools() {
+  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+  declare -A pdtools=(
+    [httpx]="github.com/projectdiscovery/httpx/cmd/httpx@latest"
+    [katana]="github.com/projectdiscovery/katana/cmd/katana@latest"
+    [subfinder]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+    [dnsx]="github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
+  )
+  # Already present (validated PD binary)?  ~/go/bin/<tool> or a *-pd alias.
+  local missing=() t
+  for t in "${!pdtools[@]}"; do
+    if [ -x "$gobin/$t" ] || [ -x "$gobin/$t-pd" ] || command -v "$t-pd" >/dev/null 2>&1; then
+      continue
+    fi
+    missing+=("$t")
+  done
+  [ "${#missing[@]}" -eq 0 ] && { say "recon speed tools already present ✔"; return 0; }
+
+  if ! command -v go >/dev/null 2>&1; then
+    warn "Go toolchain not found — skipping the speed tools (${missing[*]})."
+    warn "  Argus still runs on its built-in probe/crawler/resolver, just slower."
+    warn "  To enable them: install Go (apt install golang-go) and re-run --force,"
+    warn "  or 'go install' each from github.com/projectdiscovery."
+    return 0
+  fi
+  mkdir -p "$gobin"
+  for t in "${missing[@]}"; do
+    say "installing $t (go install) …"
+    GOBIN="$gobin" go install "${pdtools[$t]}" \
+      || warn "  could not install $t — Argus falls back to its built-in path"
+  done
+  # A distro `httpx` (python3-httpx) can shadow ours on PATH. A -pd alias next to
+  # our binary gives Argus an unambiguous name to resolve first.
+  [ -x "$gobin/httpx" ] && ln -sf "$gobin/httpx" "$gobin/httpx-pd" 2>/dev/null || true
+}
+install_go_tools
+
 # bbot (passive subdomain / infra enum) via pipx — install pipx first if needed
 if command -v bbot >/dev/null; then
   say "bbot already present ✔"

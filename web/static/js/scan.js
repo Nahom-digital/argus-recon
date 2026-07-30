@@ -395,39 +395,60 @@ function buildStatusFilter() {
   sel.innerHTML = opts.join('');
 }
 
-/* Domain / subdomain filter — every host seen in this scan (apex first). */
-function buildHostFilter() {
+/* Domain / subdomain filter — every host seen in this scan (apex first).
+
+   The host and IP filters are supportive, not exclusive: you can hold a
+   subdomain AND an IP at once and the list/graph show their intersection. So
+   when an IP is active this dropdown is narrowed to the hosts that resolve to it
+   (`constraintIp`) — picking from it can only ever produce a valid combination.
+   With no IP held it lists every host. */
+function buildHostFilter(constraintIp) {
   const sel = document.getElementById('hostFilter');
   if (!sel) return;
   const domain = (SCAN.meta || {}).domain || '';
-  const hosts = [...new Set((SCAN.subdomains || []).map(s => s.host).filter(Boolean))]
-    .sort((a, b) => (a === domain ? -1 : b === domain ? 1 : a.localeCompare(b)));
-  const opts = ['<option value="">all hosts</option>'];
+  let hosts = [...new Set((SCAN.subdomains || []).map(s => s.host).filter(Boolean))];
+  if (constraintIp) {
+    const allow = new Set(hostsOfIp(constraintIp));
+    hosts = hosts.filter(h => allow.has(h));
+  }
+  hosts.sort((a, b) => (a === domain ? -1 : b === domain ? 1 : a.localeCompare(b)));
+  const label = constraintIp ? `all hosts on ${constraintIp}` : 'all hosts';
+  const opts = [`<option value="">${esc(label)}</option>`];
   hosts.forEach(h => opts.push(
     `<option value="${esc(h)}">${esc(h)}${h === domain ? ' (apex)' : ''}</option>`));
   sel.innerHTML = opts.join('');
+  if (F.host) sel.value = F.host;
 }
 
 /* IP filter — every resolved IP in this scan, busiest first, labelled with how
-   many hosts sit on it and who owns it. Selecting one narrows the request list
-   and the graph to everything served from that address. */
-function buildIpFilter() {
+   many hosts sit on it and who owns it. Supportive with the host filter: when a
+   subdomain is held this dropdown is narrowed to just that host's IPs
+   (`constraintHost`), so selecting one further scopes to a single address served
+   by that host rather than replacing the host selection. With no host held it
+   lists every IP. */
+function buildIpFilter(constraintHost) {
   const sel = document.getElementById('ipFilter');
   if (!sel) return;
-  const recs = ((SCAN.infra && SCAN.infra.ips) || []).slice();
+  let recs = ((SCAN.infra && SCAN.infra.ips) || []).slice();
   // any IP seen on a subdomain but missing an infra record still gets an entry
   const known = new Set(recs.map(r => r.ip));
   IP_HOSTS.forEach((_, ip) => { if (!known.has(ip)) recs.push({ ip }); });
+  if (constraintHost) {
+    const allow = new Set([...(HOST_IPS.get(constraintHost) || [])]);
+    recs = recs.filter(r => allow.has(r.ip));
+  }
   recs.sort((a, b) => hostsOfIp(b.ip).length - hostsOfIp(a.ip).length || a.ip.localeCompare(b.ip));
-  const opts = ['<option value="">all IPs</option>'];
+  const label = constraintHost ? `all IPs of ${constraintHost}` : 'all IPs';
+  const opts = [`<option value="">${esc(label)}</option>`];
   recs.forEach(r => {
     const n = hostsOfIp(r.ip).length;
     const org = (r.org || '').split(/[,(]/)[0].trim();
-    const label = `${r.ip}${n ? ` · ${n} host${n === 1 ? '' : 's'}` : ''}${org ? ` · ${org}` : ''}`;
-    opts.push(`<option value="${esc(r.ip)}">${esc(label)}</option>`);
+    const lab = `${r.ip}${n ? ` · ${n} host${n === 1 ? '' : 's'}` : ''}${org ? ` · ${org}` : ''}`;
+    opts.push(`<option value="${esc(r.ip)}">${esc(lab)}</option>`);
   });
   sel.innerHTML = opts.join('');
-  sel.disabled = recs.length === 0;
+  sel.disabled = recs.length === 0 && !constraintHost;
+  if (F.ip) sel.value = F.ip;
 }
 
 function renderTable() {
@@ -600,22 +621,39 @@ function wireTableControls() {
 
 /* Central host filter — drives the request list AND the graph. Clicking the
    same host again clears it. Selecting one host is also what unlocks the
-   graph's endpoint / file / field layers. */
+   graph's endpoint / file / field layers.
+
+   Supportive with the IP filter: a held IP is kept if the new host resolves to
+   it, and dropped only when the two would contradict each other. */
 function setHostFilter(host) {
   F.host = (F.host === host || !host) ? null : host;
-  if (F.host) F.ip = null;             // host is the narrower of the two
+  if (F.host && F.ip && !(HOST_IPS.get(F.host) || new Set()).has(F.ip)) {
+    F.ip = null;                       // the held IP does not serve this host
+  }
+  rebuildFilterOptions();
   syncFilterUI();
   renderTable();
   syncGraphFilter();
 }
 
-/* IP filter — same contract, scoped to every host resolving to that address. */
+/* IP filter — same contract; scopes to hosts resolving to that address, and
+   combines with a held subdomain rather than replacing it. */
 function setIpFilter(ip) {
   F.ip = (F.ip === ip || !ip) ? null : ip;
-  if (F.ip) F.host = null;
+  if (F.ip && F.host && !(IP_HOSTS.get(F.ip) || new Set()).has(F.host)) {
+    F.host = null;                     // the held host is not on this IP
+  }
+  rebuildFilterOptions();
   syncFilterUI();
   renderTable();
   syncGraphFilter();
+}
+
+/* Re-scope each dropdown to what is still selectable given the other filter, so
+   the two can only ever form a valid combination. */
+function rebuildFilterOptions() {
+  buildHostFilter(F.ip || null);
+  buildIpFilter(F.host || null);
 }
 
 /* keep the dropdowns and the left-panel selection state in step with F */
@@ -630,8 +668,10 @@ function syncFilterUI() {
     c.classList.toggle('active', !!F.ip && c.dataset.ip === F.ip));
 }
 
-/* Graph scope: one host -> that subtree with detail unlocked; one IP -> every
-   host on it, detail still locked (only a single subdomain unlocks it). */
+/* Graph scope: a held subdomain wins as the anchor (its subtree, detail
+   unlocked). An IP alone shows every host on it (detail locked). With both held
+   the host is guaranteed to sit on the IP, so the host subtree is the
+   intersection. */
 function syncGraphFilter() {
   if (!GRAPH) return;
   const hosts = F.host ? [F.host] : F.ip ? hostsOfIp(F.ip) : null;
@@ -911,53 +951,143 @@ function wireGraphSplitter() {
   if (restore) restore.addEventListener('click', () => setCollapsed(false, true));
 }
 
-/* ---- graph ---------------------------------------------------------------- */
+/* ---- graph ----------------------------------------------------------------
+
+   Two interchangeable engines behind one GRAPH handle:
+     'canvas' — the built-in dependency-free renderer (default, engine "1"),
+     'cy'     — Cytoscape.js with the fCoSE layout and a switchable fCoSE/SBGN
+                stylesheet (engine "2"; its vendor bundles load on first use).
+   Both expose the same {fit, reheat, buildLegend, activate, setFilter} surface,
+   so switching is: tear the old one down, show the other container, rebuild, and
+   re-apply the current host/IP filter. */
+let GRAPH_DATA = null;
+let ENGINE = 'canvas';
+let CY_STYLE = 'fcose';
+
 function initGraph(graph) {
+  GRAPH_DATA = graph;
   const n = graph.stats.nodes;
   document.getElementById('graphSource').textContent =
-    (graph.source === 'neo4j' ? 'neo4j' : 'json') + ` · ${n} nodes`;
+    (graph.source === 'neo4j' ? 'neo4j' : graph.source === 'kuzu' ? 'kuzu' : 'json') + ` · ${n} nodes`;
+  wireGraphEngineControls();
   if (!graph.nodes.length) {
     document.getElementById('graphWrap').insertAdjacentHTML('beforeend',
       `<div class="graph-empty"><div class="empty" style="margin:auto">${icon('topology-star-3')}
         <h4>No graph data</h4><p>This scan captured no in-scope structure to graph.</p></div></div>`);
     return;
   }
-  // Only the layers drawn up front decide whether we need the activation gate —
-  // endpoints/files/fields stay locked until a subdomain is picked.
+  startGraph(graph, /*reapplyFilter=*/false);
+}
+
+/* Node-cap gate + build for the current engine. `reapplyFilter` restores the
+   host/IP selection after an engine switch. */
+function startGraph(graph, reapplyFilter) {
   const detail = window.GRAPH_DETAIL_TYPES || new Set();
   const upfront = graph.nodes.reduce((a, x) => a + (detail.has(x.type) ? 0 : 1), 0);
-  if (upfront > GRAPH_LAZY) showActivate(graph, upfront);
-  else buildGraph(graph, true);
+  const done = () => { if (reapplyFilter) syncGraphFilter(); };
+  if (upfront > GRAPH_LAZY) {
+    showActivate(graph, upfront, done);
+  } else {
+    buildGraph(graph, true).then(done);
+  }
 }
 
+const GRAPH_OPTS = {
+  onSelect(node) {
+    // Clicking a subdomain scopes everything to it; an IP scopes to its hosts.
+    if (node.type === 'Subdomain') setHostFilter(node.label);
+    else if (node.type === 'IP') setIpFilter(node.label);
+  },
+  // a locked legend layer was clicked — send the user to the control that unlocks it
+  onLocked() {
+    const sel = document.getElementById('hostFilter');
+    if (sel) { sel.focus(); sel.classList.add('nudge'); setTimeout(() => sel.classList.remove('nudge'), 900); }
+  },
+};
+
+/* Build the active engine. Returns a promise that resolves once it is ready to
+   activate (the canvas engine is synchronous; the Cytoscape engine first loads
+   its vendored bundles). `autoStart` lays a small graph out immediately. */
 function buildGraph(graph, autoStart) {
+  if (ENGINE === 'cy') return buildCyGraph(graph, autoStart);
   const canvas = document.getElementById('graph');
-  GRAPH = createGraph(canvas, graph, {
-    autoStart,
-    onSelect(node) {
-      // Clicking a subdomain scopes everything to it — list, dropdown and the
-      // graph's detail layers.
-      if (node.type === 'Subdomain') {
-        setHostFilter(node.label);
-      } else if (node.type === 'IP') {
-        setIpFilter(node.label);
-      }
-    },
-    // a locked legend layer was clicked — send the user to the control that
-    // unlocks it
-    onLocked() {
-      const sel = document.getElementById('hostFilter');
-      if (sel) { sel.focus(); sel.classList.add('nudge'); setTimeout(() => sel.classList.remove('nudge'), 900); }
-    },
-  });
+  GRAPH = createGraph(canvas, graph, { autoStart, ...GRAPH_OPTS });
   GRAPH.buildLegend(document.getElementById('legend'));
-  document.getElementById('gFit').addEventListener('click', () => GRAPH.fit());
-  document.getElementById('gReheat').addEventListener('click', () => GRAPH.reheat());
-  return GRAPH;
+  return Promise.resolve(GRAPH);
 }
 
-/* Large graph: don't freeze the tab — let the user activate + show progress (item 6) */
-function showActivate(graph, n) {
+function buildCyGraph(graph, autoStart) {
+  const host = document.getElementById('cyGraph');
+  return loadCyEngine(BASE).then(() => {
+    GRAPH = createCyGraph(host, graph, { ...GRAPH_OPTS, style: CY_STYLE });
+    GRAPH.buildLegend(document.getElementById('legend'));
+    if (autoStart) return GRAPH.activate().then(() => GRAPH);
+    return GRAPH;
+  });
+}
+
+/* Fit / reheat are wired once and always act on whichever engine is current. */
+let _graphBtnsWired = false;
+function wireGraphButtonsOnce() {
+  if (_graphBtnsWired) return; _graphBtnsWired = true;
+  document.getElementById('gFit').addEventListener('click', () => GRAPH && GRAPH.fit());
+  document.getElementById('gReheat').addEventListener('click', () => GRAPH && GRAPH.reheat());
+}
+
+/* Engine (1/2) + Cytoscape stylesheet (fCoSE/SBGN) switches. */
+function wireGraphEngineControls() {
+  wireGraphButtonsOnce();
+  const engSwitch = document.getElementById('engineSwitch');
+  const styleSwitch = document.getElementById('styleSwitch');
+  if (engSwitch) engSwitch.querySelectorAll('.gseg-btn').forEach(btn =>
+    btn.addEventListener('click', () => switchEngine(btn.dataset.engine)));
+  if (styleSwitch) styleSwitch.querySelectorAll('.gseg-btn').forEach(btn =>
+    btn.addEventListener('click', () => setCyStyle(btn.dataset.style)));
+}
+
+function switchEngine(engine) {
+  if (engine === ENGINE || !GRAPH_DATA) return;
+  ENGINE = engine;
+  // reflect the choice on the segmented control
+  document.querySelectorAll('#engineSwitch .gseg-btn').forEach(b => {
+    const on = b.dataset.engine === engine;
+    b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  const styleSwitch = document.getElementById('styleSwitch');
+  if (styleSwitch) styleSwitch.hidden = engine !== 'cy';
+
+  // tear the old engine down and reset the shared overlay bits
+  if (GRAPH && GRAPH.destroy) { try { GRAPH.destroy(); } catch (e) {} }
+  GRAPH = null;
+  const nc = document.getElementById('nodeCard'); if (nc) nc.classList.remove('show');
+  document.querySelectorAll('.graph-activate').forEach(el => el.remove());
+  // swap the visible container
+  document.getElementById('graph').hidden = engine !== 'canvas';
+  document.getElementById('cyGraph').hidden = engine !== 'cy';
+
+  document.getElementById('graphSource').textContent =
+    (ENGINE === 'cy' ? 'cytoscape · ' + CY_STYLE : (GRAPH_DATA.source || 'json'))
+    + ` · ${GRAPH_DATA.stats.nodes} nodes`;
+  startGraph(GRAPH_DATA, /*reapplyFilter=*/true);
+}
+
+function setCyStyle(style) {
+  CY_STYLE = style === 'sbgn' ? 'sbgn' : 'fcose';
+  document.querySelectorAll('#styleSwitch .gseg-btn').forEach(b => {
+    const on = b.dataset.style === CY_STYLE;
+    b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  if (ENGINE === 'cy' && GRAPH && GRAPH.setStyle) {
+    GRAPH.setStyle(CY_STYLE);
+    document.getElementById('graphSource').textContent =
+      `cytoscape · ${CY_STYLE} · ${GRAPH_DATA.stats.nodes} nodes`;
+  }
+}
+
+/* Large graph: don't freeze the tab — let the user activate + show progress.
+   `onDone` fires once layout has settled (used to re-apply a filter after an
+   engine switch). */
+function showActivate(graph, n, onDone) {
   const wrap = document.getElementById('graphWrap');
   const ov = h('div', { class: 'graph-activate' });
   ov.innerHTML = `<div class="ga-inner">${icon('topology-star-3')}
@@ -971,10 +1101,14 @@ function showActivate(graph, n) {
     const btn = ov.querySelector('#gaBtn'), prog = ov.querySelector('.ga-prog');
     btn.disabled = true; btn.style.display = 'none'; prog.hidden = false;
     const bar = ov.querySelector('.ga-bar span'), pct = ov.querySelector('.ga-pct');
-    buildGraph(graph, false);
-    // let the DOM paint the progress UI before the (chunked) warm-up begins
-    requestAnimationFrame(() => GRAPH.activate(p => {
+    const progress = p => {
       const v = Math.round(p * 100); bar.style.transform = `scaleX(${p})`; pct.textContent = `laying out… ${v}%`;
-    }).then(() => { ov.classList.add('done'); setTimeout(() => ov.remove(), 260); }));
+    };
+    buildGraph(graph, false).then(() =>
+      // let the DOM paint the progress UI before the (chunked) warm-up begins
+      requestAnimationFrame(() => GRAPH.activate(progress).then(() => {
+        ov.classList.add('done'); setTimeout(() => ov.remove(), 260);
+        if (onDone) onDone();
+      })));
   });
 }

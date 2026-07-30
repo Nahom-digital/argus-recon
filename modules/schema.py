@@ -332,6 +332,15 @@ class ScanResult:
         scans_dir = scans_dir or config.SCANS_DIR
         scans_dir.mkdir(parents=True, exist_ok=True)
         out = scans_dir / f"{self.meta['scan_id']}.json"
+        doc = self.to_dict()
         with open(out, "w", encoding="utf-8") as fh:
-            json.dump(self.to_dict(), fh, indent=2, ensure_ascii=False)
+            json.dump(doc, fh, indent=2, ensure_ascii=False)
+        # Populate the SQLite cache (summary + per-endpoint light index) so the
+        # dashboard never has to parse this whole file just to list it or expand
+        # a row. Best-effort — the JSON on disk stays the source of truth.
+        try:
+            from . import store
+            store.index_scan(self.meta["scan_id"], doc, out)
+        except Exception:
+            pass
         return out
