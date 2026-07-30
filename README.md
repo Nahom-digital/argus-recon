@@ -56,34 +56,66 @@ handler function, and links it to the request node in the graph and the
 **If you point Argus at a subdomain** (e.g. `api.example.com`) it recognises it as a
 subdomain, pivots the scan to the registrable apex (`example.com`), enumerates the
 *other* subdomains too, and keeps the one you named tagged as the `input` source.
-Use `--exact-scope` to disable the pivot and scan only the host you gave.
+Set **Scope → This host only** in the launcher to disable the pivot and scan just
+the host you gave.
 
 ---
 
 ## Install
 
-Requires Linux, Python 3.10+, and a few external CLI tools.
+Requires Linux with systemd, Python 3.10+, and a few external CLI tools.
+One command installs everything and registers the dashboard as a service:
 
 ```bash
 cd argus-recon
+./install.sh
+```
 
-# 1. Python deps — the ./argus and ./serve launchers create the venv and install
-#    requirements automatically on first run. To do it by hand:
-python3 -m venv .venv
-./.venv/bin/pip install -r requirements.txt
+That is the whole install. It is fresh-server safe and idempotent:
 
-# 2. External tools (these are the real recon engines behind the source codes)
-pipx install bbot                 # b — subdomain / infra enum
-sudo apt install whatweb ffuf     # W / f — fingerprint + content brute (feroxbuster also works)
+1. installs the base packages it needs (python venv/pip, pipx, curl, git),
+2. installs the external recon engines (whatweb, ffuf/feroxbuster, bbot via pipx),
+3. builds the Python venv from `requirements.txt`,
+4. writes and enables the **`argus-recon`** systemd *user* service, with linger on
+   so it survives logout and reboot,
+5. waits until the dashboard actually answers, then prints **LIVE** with the URL,
+   pid, uptime and version.
 
-# 3. Deep DNS (optional but recommended): a SecurityTrails API key.
-#    Provides a much larger subdomain set + full and historical DNS records.
+Run it again any time. If the service is already up it says so and stops rather
+than installing a second copy:
+
+```
+[argus] LIVE  ·  http://127.0.0.1:7666
+        service   argus-recon (pid 339379)
+        up since  2026-07-29 22:42
+        version   967ad05
+```
+
+| Command | What it does |
+|---------|--------------|
+| `./install.sh` | install everything, register the service, start it |
+| `./install.sh --upgrade` | fetch + fast-forward from GitHub, refresh deps, restart the service |
+| `./install.sh --status` | is it live? (exit 0 when serving) |
+| `./install.sh --restart` | bounce the service |
+| `./install.sh --force` | reinstall dependencies and the unit over the top |
+| `./install.sh --uninstall` | stop and remove the service (scans and `.venv` are kept) |
+
+`--upgrade` stashes local edits before pulling, refreshes the venv, rewrites the
+unit, restarts, and waits for the dashboard to answer again before reporting.
+
+Manage the unit directly with `systemctl --user status|restart|stop argus-recon`,
+follow logs with `journalctl --user -u argus-recon -f`. (Installs from before the
+rename retire their old `argusscanner` unit automatically.)
+
+Two optional extras:
+
+```bash
+# Deep DNS: a SecurityTrails API key — a much larger subdomain set plus full and
+# historical DNS. The dashboard asks for it on first run and stores it in .env;
+# you can also write it yourself:
 echo 'SECURITYTRAILS_KEY=your_key_here' >> .env
-#    Or leave it out — the dashboard prompts once on first launch, and the CLI
-#    prompts the first time you pass --deep. No key => "Deep" stays disabled and
-#    Argus falls back to the resolver + the other passive sources.
 
-# 4. (optional) Neo4j for the persisted graph — the dashboard graph works without it
+# Neo4j for the persisted graph — the dashboard graph works fine without it
 docker run -d --name argus-neo4j -p 7474:7474 -p 7687:7687 \
   -e NEO4J_AUTH=neo4j/argusrecon neo4j:5
 ```
@@ -97,66 +129,46 @@ gitignored and never leave the machine.
 
 ## Usage
 
-### Run a scan
+**Scans run in the dashboard.** There is no scanning command: the engine refuses
+to run from a terminal, and `./argus` only controls the service. Everything the
+old flags did is in the launcher on the home page.
+
+### Start a scan
+
+Open **http://127.0.0.1:7666**, type the target, press **Run scan**. The job
+appears with a live log, and the finished scan opens in the graph view.
+
+| Control | Old flag | Meaning |
+|---------|----------|---------|
+| deep DNS | `--deep` | extra subdomains + full DNS records + historical DNS (needs a key) |
+| passive | `--passive` | passive enumeration only |
+| Scope: *This host only* | `--exact-scope` | treat the host literally; don't pivot a subdomain to its apex |
+| skip passive-enum engine | `--no-bbot` | use certificate transparency + DNS fallback instead |
+| Max pages / Max depth | `--max-pages` `--max-depth` | crawler bounds (blank = configured default) |
+| Pipeline stages | `--skip a,b` / `--no-graph` | switch off any of subdomains, fingerprint, crawl, bruteforce, IP enrich, classify, graph |
+
+A running scan can be stopped from its job row — that is what replaces Ctrl-C.
+Each scan still writes `scans/{domain}_{timestamp}.json`.
+
+### Control the service
 
 ```bash
-./argus example.com                       # full pipeline
-./argus example.com --deep                # + deep DNS: extra subdomains, full + historical DNS
-./argus api.example.com --deep            # pivots to example.com, enumerates siblings
-./argus example.com --passive             # passive enumeration only (quieter)
-./argus example.com --no-bbot             # skip passive engine, use cert transparency + DNS fallback
-./argus example.com --skip bruteforce,graph
-./argus example.com --only subdomain,fingerprint
-./argus example.com --max-pages 150 --max-depth 4 --threads 16
+./argus              # is it live?
+./argus open         # open the dashboard
+./argus start|stop|restart
+./argus logs         # follow the service log
+./argus upgrade      # pull the latest + restart
 ```
 
-Common flags (`./argus example.com --help` for all):
+### The dashboard
 
-| Flag | Meaning |
-|------|---------|
-| `--deep` | deep DNS: extra subdomains + full DNS records + historical DNS (needs a key; prompts once) |
-| `--exact-scope` | treat the host literally; don't pivot a subdomain to its apex |
-| `--passive` | passive enumeration only |
-| `--no-bbot` | skip the passive enum engine entirely |
-| `--no-prompt` | never prompt for a key (deep DNS only runs if a key is already set) |
-| `--only a,b` / `--skip a,b` | run/skip modules (`subdomain,fingerprint,crawl,bruteforce,ip_enrich,classify,graph`) |
-| `--max-pages` `--max-depth` `--threads` | crawler bounds |
-| `--brute-hosts N` `--brute-maxtime S` | limit bruteforce scope/time |
-| `--no-graph` | don't attempt the Neo4j load |
-
-Each scan writes `scans/{domain}_{timestamp}.json` and prints a summary.
-
-### View the dashboard
-
-```bash
-./serve            # http://127.0.0.1:7666
-```
-
-The server **registers itself as a single instance** (PID file).
-
-### Run it as an always-on service
-
-```bash
-./install.sh              # installs all deps + registers the 'argusscanner'
-                          # systemd user service (survives logout / reboot)
-./install.sh --upgrade    # pull the latest from GitHub, refresh deps, restart
-./install.sh --restart    # bounce the service
-./install.sh --uninstall  # remove the service
-```
-
-`install.sh` is fresh-server safe: it installs the base packages (python venv/pip,
-pipx, curl), the external recon tools, the Python venv, then starts the dashboard
-on http://127.0.0.1:7666 under systemd. Manage it directly with
-`systemctl --user status|restart|stop argusscanner` and follow logs with
-`journalctl --user -u argusscanner -f`.
- If it's already
-running it prints the URL and exits instead of starting a second copy; if the port
-is held by another process it asks whether to free it or use another port.
-
-- **Home** — every scan in `./scans` with headline metrics; start a new scan inline
-  (with a **deep DNS** toggle), and **delete** a scan by hovering its row. The status
-  strip shows capability state only (deep unlocked, graph DB, engines) — no tool names.
-  First launch prompts once for the deep-DNS key.
+- **Home** — the scan launcher (target, the two common toggles, and an **Options**
+  panel holding scope, crawl bounds and the pipeline stages, with a badge when
+  anything is off-default), running and recent jobs with a live log and a **stop**
+  button, and every scan in `./scans` with headline metrics (**delete** by hovering
+  a row). The status strip leads with **Live** — service state, uptime and version —
+  followed by capability state only (deep unlocked, graph DB, engines); no tool
+  names. First launch asks once for the deep-DNS key.
 - **Scan view**
   - *left*: subdomains (status + tech + IP + **source**), infrastructure (each IP →
     which subdomains + source), **DNS** (A/AAAA/MX/NS/CNAME/TXT/SOA + history + WHOIS),
@@ -219,8 +231,10 @@ graph_loader.load(json.load(open("scans/example.com_20260101_120000.json")))
 
 ```
 argus-recon/
-  main.py                 orchestrator / CLI
-  argus, serve            launcher scripts (auto-create venv + install deps)
+  install.sh              installer + service manager (argus-recon systemd user unit)
+  main.py                 scan engine — run by the dashboard, refuses a terminal
+  argus                   service control (status / start / stop / logs / upgrade)
+  serve                   what the service execs to run the dashboard
   bootstrap.sh            shared venv/dependency bootstrap
   .env                    local secrets (deep-DNS key) — gitignored
   modules/

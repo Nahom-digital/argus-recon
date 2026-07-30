@@ -4,6 +4,24 @@
 'use strict';
 
 let DEEP_AVAILABLE = false;
+const STAGES = [
+  ['subdomain', 'subdomains'], ['fingerprint', 'fingerprint'], ['crawl', 'crawl'],
+  ['bruteforce', 'bruteforce'], ['ip_enrich', 'IP enrich'], ['classify', 'classify'],
+  ['graph', 'graph'],
+];
+
+/* uptime for the Live chip: minutes up to an hour, then hours, then days */
+function fmtUptime(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm';
+  if (sec < 86400) {
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    return h + 'h' + (m ? ' ' + m + 'm' : '');
+  }
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+  return d + 'd' + (h ? ' ' + h + 'h' : '');
+}
 
 async function loadStatus() {
   const bar = document.getElementById('statusbar');
@@ -11,10 +29,24 @@ async function loadStatus() {
     const s = await getJSON('/api/status');
     DEEP_AVAILABLE = !!s.deep_available;
     reflectDeep();
+    applyDefaults(s.defaults || {});
+
+    // Service state first: the dashboard is the product now, so whether it is
+    // actually registered and serving is the headline, not a footnote.
+    const svc = s.service || {};
+    const detail = [
+      svc.uptime_sec != null ? 'up ' + fmtUptime(svc.uptime_sec) : '',
+      svc.version || '',
+    ].filter(Boolean).join(' · ');
+    const live = svc.managed
+      ? `<span class="st live"><span class="dot on"></span><b>Live</b> ${esc(detail)}</span>`
+      : `<span class="st live unmanaged" title="Running, but not registered as a service — run ./install.sh so it survives logout and reboot"><span class="dot warn"></span><b>Running</b> not a service${detail ? ' · ' + esc(detail) : ''}</span>`;
+
     // No recon-tool names on the home page — only capability state (see README).
     const chip = (dot, label, val) =>
       `<span class="st"><span class="dot ${dot ? 'on' : 'off'}"></span><b>${esc(label)}</b> ${esc(val)}</span>`;
     const chips = [
+      live,
       chip(s.deep_available, 'deep DNS', s.deep_available ? 'unlocked' : 'locked'),
       chip(s.graph_db, 'graph db', s.graph_db ? 'connected' : 'offline · renders from JSON'),
       chip(s.engines_ready, 'engines', s.engines_ready ? 'ready' : 'incomplete'),
@@ -24,7 +56,18 @@ async function loadStatus() {
     bar.innerHTML = chips.join('');
     const kb = document.getElementById('setKeyBtn');
     if (kb) kb.addEventListener('click', () => openKeyModal());
-  } catch (e) { bar.innerHTML = ''; }
+    maybePromptForKey();
+  } catch (e) {
+    bar.innerHTML = `<span class="st live unmanaged"><span class="dot off"></span><b>Offline</b> the dashboard service is not answering</span>`;
+  }
+}
+
+/* show the server's real crawl defaults as placeholders (never invented numbers) */
+function applyDefaults(d) {
+  const p = document.getElementById('optMaxPages');
+  const q = document.getElementById('optMaxDepth');
+  if (p && d.max_pages) p.placeholder = String(d.max_pages);
+  if (q && d.max_depth) q.placeholder = String(d.max_depth);
 }
 
 function reflectDeep() {
@@ -71,7 +114,8 @@ async function loadScans() {
     if (!scans.length) {
       wrap.innerHTML = `<div class="panel"><div class="empty">
         ${icon('radar-2')}<h4>No scans yet</h4>
-        <p>Run your first scan above. Results are saved to <code>./scans</code> and appear here.</p>
+        <p>Enter a domain in the field above and press Run scan. It runs here in the
+           dashboard, streams a live log, and lands in this library when it finishes.</p>
       </div></div>`;
       return;
     }
@@ -127,10 +171,18 @@ function wireKeyModal() {
   if (deepChk) deepChk.addEventListener('click', e => {
     if (!DEEP_AVAILABLE) { e.preventDefault(); openKeyModal(); }
   });
-  // first run: no key set and not dismissed -> prompt once
+}
+
+/* First run: no key set and not dismissed -> prompt once. Driven by the status
+   response, not a timer, so a slow status call can't pop the modal over a
+   dashboard that already has a key. */
+let keyPromptShown = false;
+function maybePromptForKey() {
+  if (keyPromptShown || DEEP_AVAILABLE) return;
+  keyPromptShown = true;
   let dismissed = false;
   try { dismissed = localStorage.getItem('argus-key-dismissed') === '1'; } catch (e) {}
-  setTimeout(() => { if (!DEEP_AVAILABLE && !dismissed) openKeyModal(); }, 700);
+  if (!dismissed) openKeyModal();
 }
 
 async function saveKey() {
@@ -158,24 +210,46 @@ async function saveKey() {
 let jobTimer = null;
 const openLogs = new Set();
 
+const JOB_ACTIVE = ['queued', 'running', 'stopping'];
+
+/* what the run was launched with — this is the only place it is visible now
+   that there is no command line to read it off */
+function jobOpts(j) {
+  const o = j.options || {};
+  const label = Object.fromEntries(STAGES);
+  const tags = [];
+  if (o.passive) tags.push('passive');
+  if (o.deep) tags.push('deep DNS');
+  if (o.exact_scope) tags.push('exact host');
+  (o.skipped || []).forEach(s => tags.push('no ' + (label[s] || s)));
+  return tags.length
+    ? `<span class="jopts">${tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : '';
+}
+
 async function loadJobs() {
   const wrap = document.getElementById('jobsWrap');
   let jobs = [];
   try { jobs = await getJSON('/api/jobs'); } catch (e) { return; }
-  const active = jobs.filter(j => ['queued', 'running'].includes(j.status));
-  const recent = jobs.filter(j => ['done', 'failed'].includes(j.status)).slice(0, 3);
+  const active = jobs.filter(j => JOB_ACTIVE.includes(j.status));
+  const recent = jobs.filter(j => !JOB_ACTIVE.includes(j.status)).slice(0, 3);
   const show = [...active, ...recent];
   if (!show.length) { wrap.innerHTML = ''; return; }
 
   wrap.innerHTML = '<div class="section-label">Running &amp; recent jobs</div><div class="jobs">' +
     show.map(j => {
-      const running = j.status === 'running' || j.status === 'queued';
+      const running = JOB_ACTIVE.includes(j.status);
       const ind = running ? '<span class="spin"></span>'
         : j.status === 'done' ? icon('circle-check-filled')
+        : j.status === 'stopped' ? icon('x')
         : icon('alert-triangle');
-      return `<div class="job" data-job="${j.id}">
+      const stop = j.status === 'running' || j.status === 'queued'
+        ? `<button class="btn sm ghost jstop" data-stop="${j.id}">${icon('x')} stop</button>` : '';
+      return `<div class="job ${running ? 'on' : ''}" data-job="${j.id}">
         <span class="jdom">${esc(j.domain)}</span>
-        <span class="jstat">${ind} ${esc(j.status)}${j.status === 'done' ? ' · <a href="#" data-reload="1">view</a>' : ''}
+        ${jobOpts(j)}
+        <span class="jstat"><span class="jstate ${esc(j.status)}">${ind} ${esc(j.status)}</span>${
+        j.status === 'done' ? ' <a href="#" data-reload="1">view result</a>' : ''}
+          ${stop}
           <button class="btn sm ghost" data-toggle-log="${j.id}">${icon('terminal-2')} log</button></span>
         <div class="job-log ${openLogs.has(j.id) ? 'open' : ''}" id="log-${j.id}"></div>
       </div>`;
@@ -189,6 +263,8 @@ async function loadJobs() {
     if (openLogs.has(id)) { openLogs.delete(id); box.classList.remove('open'); }
     else { openLogs.add(id); box.classList.add('open'); refreshLog(id); }
   }));
+  wrap.querySelectorAll('[data-stop]').forEach(b =>
+    b.addEventListener('click', () => stopJob(b.dataset.stop, b)));
   wrap.querySelectorAll('[data-reload]').forEach(a => a.addEventListener('click', e => {
     e.preventDefault(); loadScans();
   }));
@@ -196,6 +272,17 @@ async function loadJobs() {
   if (active.length) {
     if (!jobTimer) jobTimer = setInterval(pollJobs, 2500);
   } else if (jobTimer) { clearInterval(jobTimer); jobTimer = null; loadScans(); }
+}
+
+/* Cancel a run. With no terminal there is nothing else to interrupt, so this
+   is the only way out of a scan that is taking too long. */
+async function stopJob(id, btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span> stopping';
+  try {
+    await fetch(`/api/jobs/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+  } catch (e) { /* the poll below reports the real state */ }
+  loadJobs();
 }
 
 async function refreshLog(id) {
@@ -207,6 +294,68 @@ async function refreshLog(id) {
 }
 function pollJobs() { loadJobs(); }
 
+/* ---- advanced options ----------------------------------------------------- */
+/* The engine no longer runs from a terminal, so every pipeline flag has to be
+   reachable here. The common three stay in the bar; the rest live one click
+   away, with a badge so a non-default setup is never invisible. */
+function renderStages() {
+  const wrap = document.getElementById('stageChips');
+  if (!wrap) return;
+  wrap.innerHTML = STAGES.map(([id, label]) =>
+    `<label class="stage"><input type="checkbox" data-stage="${id}" checked>
+      <span>${esc(label)}</span></label>`).join('');
+}
+
+function scanOptions() {
+  const num = (id) => {
+    const v = (document.getElementById(id).value || '').trim();
+    const n = parseInt(v, 10);
+    return v && Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const skip = [...document.querySelectorAll('[data-stage]')]
+    .filter(c => !c.checked).map(c => c.dataset.stage);
+  return {
+    passive: document.getElementById('optPassive').checked,
+    deep: document.getElementById('optDeep').checked,
+    exact_scope: document.querySelector('input[name=scope]:checked').value === 'exact',
+    no_bbot: document.getElementById('optNoBbot').checked,
+    max_pages: num('optMaxPages'),
+    max_depth: num('optMaxDepth'),
+    skip,
+  };
+}
+
+/* how many advanced options differ from the defaults */
+function countAdvanced(o) {
+  return (o.exact_scope ? 1 : 0) + (o.no_bbot ? 1 : 0) +
+    (o.max_pages ? 1 : 0) + (o.max_depth ? 1 : 0) + o.skip.length;
+}
+
+function reflectOptionCount() {
+  const badge = document.getElementById('optsCount');
+  if (!badge) return;
+  const n = countAdvanced(scanOptions());
+  badge.hidden = n === 0;
+  badge.textContent = n;
+}
+
+function wireOptions() {
+  renderStages();
+  const btn = document.getElementById('optsToggle');
+  const panel = document.getElementById('scanOpts');
+  if (!btn || !panel) return;
+  btn.addEventListener('click', () => {
+    const open = !panel.classList.contains('open');
+    panel.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', String(open));
+    // keep clipped controls out of the tab order while collapsed
+    if (open) panel.removeAttribute('inert'); else panel.setAttribute('inert', '');
+    if (open) setTimeout(() => panel.querySelector('input')?.focus(), 160);
+  });
+  document.getElementById('newscan').addEventListener('change', reflectOptionCount);
+  document.getElementById('newscan').addEventListener('input', reflectOptionCount);
+}
+
 /* ---- launch --------------------------------------------------------------- */
 function wireNewScan() {
   const form = document.getElementById('newscan');
@@ -215,36 +364,51 @@ function wireNewScan() {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const domain = input.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    if (!/^[a-z0-9.\-]+\.[a-z]{2,}$/.test(domain)) {
-      input.focus(); input.style.borderColor = 'var(--danger)';
-      setTimeout(() => input.style.borderColor = '', 1200);
-      return;
-    }
-    const wantDeep = document.getElementById('optDeep').checked;
-    if (wantDeep && !DEEP_AVAILABLE) { openKeyModal(); return; }
+    if (!/^[a-z0-9.\-]+\.[a-z]{2,}$/.test(domain)) return formError(input, 'Enter a domain like example.com');
+    const opts = scanOptions();
+    if (opts.deep && !DEEP_AVAILABLE) { openKeyModal(); return; }
     btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…';
     try {
-      await fetch('/api/scan', {
+      const r = await fetch('/api/scan', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          domain,
-          passive: document.getElementById('optPassive').checked,
-          deep: wantDeep,
-          no_graph: document.getElementById('optNoGraph').checked,
-        }),
+        body: JSON.stringify({ domain, ...opts }),
       });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        return formError(input, d.error || `could not start the scan (${r.status})`);
+      }
       input.value = '';
       await loadJobs();
+    } catch (err) {
+      formError(input, 'the dashboard service did not respond');
     } finally {
       btn.disabled = false; btn.innerHTML = `${icon('radar-2')} Run scan`;
     }
   });
 }
 
+/* inline, next to the field that caused it — no toast, no modal */
+function formError(input, msg) {
+  const form = document.getElementById('newscan');
+  let el = form.querySelector('.ns-error');
+  if (!el) {
+    el = h('p', { class: 'ns-error', role: 'alert' });
+    form.querySelector('.ns-main').insertAdjacentElement('afterend', el);
+  }
+  el.innerHTML = `${icon('alert-triangle')} ${esc(msg)}`;
+  input.classList.add('invalid');
+  input.focus();
+  clearTimeout(formError._t);
+  formError._t = setTimeout(() => { el.remove(); input.classList.remove('invalid'); }, 5000);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   loadStatus();
   loadScans();
   loadJobs();
+  wireOptions();
   wireNewScan();
   wireKeyModal();
+  // keep the Live chip's uptime honest while the tab stays open
+  setInterval(loadStatus, 60000);
 });

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Argus Recon — orchestrator.
+Argus Recon — scan engine.
 
 Runs the full single-domain recon pipeline in order and writes one JSON file per
 scan into ./scans:
@@ -14,16 +14,16 @@ scan into ./scans:
     9. storage                            (scans/{domain}_{timestamp}.json)
    10. graph load                         (modules.graph_loader, Neo4j)
 
-Usage:
-    python main.py example.com
-    python main.py example.com --passive --max-pages 150
-    python main.py example.com --only subdomain,fingerprint
-    python main.py example.com --skip bruteforce,graph
+This is not a terminal command. Scans are started from the dashboard, which
+runs this module as a worker (web.server sets ARGUS_INTERNAL=1 and streams the
+output into the job log you can watch in the UI). Running it by hand prints a
+pointer to the dashboard and exits.
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 
@@ -35,32 +35,28 @@ from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
 
 log = get_logger("main")
 
-
-def ensure_deep_key(interactive: bool = True) -> bool:
-    """Return True if a deep-DNS key is available. On first use with no key and
-    a TTY, prompt once and persist to .env (blank = skip, deep stays disabled)."""
-    if securitytrails.available():
-        return True
-    if not interactive or not sys.stdin.isatty():
-        return False
-    print("\n  Deep DNS needs an API key (subdomains + full DNS + history).",
-          file=sys.stderr)
-    print("  Paste your key and press Enter, or just press Enter to skip:",
-          file=sys.stderr)
-    try:
-        key = input("  key> ").strip()
-    except (EOFError, KeyboardInterrupt):
-        key = ""
-    if key:
-        config.save_env_key("SECURITYTRAILS_KEY", key)
-        config.SECURITYTRAILS_KEY = key
-        print("  saved to .env — deep DNS enabled.\n", file=sys.stderr)
-        return True
-    print("  skipped — deep DNS disabled for this run.\n", file=sys.stderr)
-    return False
-
 ALL_MODULES = ["subdomain", "fingerprint", "crawl", "bruteforce",
                "ip_enrich", "classify", "graph"]
+
+
+def _refuse_terminal_use() -> int:
+    """The engine is driven by the dashboard. Point a human at it and stop."""
+    url = f"http://{config.WEB_HOST}:{config.WEB_PORT}"
+    print(f"""
+  Argus Recon does not scan from the terminal.
+
+  It runs as a service and every scan is started from the dashboard:
+
+      {url}
+
+  Enter the target there and press Run scan — you get the same pipeline,
+  a live log, and the result opens in the graph view when it finishes.
+
+      ./argus            is the service live?
+      ./argus open       open the dashboard
+      ./install.sh       install / register the service
+""", file=sys.stderr)
+    return 2
 
 BANNER = r"""
    _   _ __ _ _   _ ___    Argus Recon v{ver}
@@ -91,7 +87,9 @@ def run_pipeline(args) -> ScanResult:
     run = _selected(args)
     t0 = time.time()
 
-    deep = bool(args.deep) and (ensure_deep_key() if not args.no_prompt else securitytrails.available())
+    # The deep-DNS key is managed in the dashboard (Settings / first run), so
+    # here it is simply present or it is not.
+    deep = bool(args.deep) and securitytrails.available()
 
     print(BANNER.format(ver="1.0.0", target=domain), file=sys.stderr)
     log.info(f"modules: {', '.join(m for m in ALL_MODULES if m in run)}"
@@ -161,14 +159,15 @@ def print_summary(result: ScanResult, path) -> None:
               file=sys.stderr)
     print("-" * 58, file=sys.stderr)
     print(f"  Saved: {path}", file=sys.stderr)
-    print(f"  View:  cd web && python server.py   ->  "
-          f"http://{config.WEB_HOST}:{config.WEB_PORT}", file=sys.stderr)
+    print(f"  View:  http://{config.WEB_HOST}:{config.WEB_PORT}/scan/"
+          f"{d['meta']['scan_id']}", file=sys.stderr)
     print("=" * 58 + "\n", file=sys.stderr)
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(
-        prog="argus", description="Argus Recon — single-domain deep recon")
+        prog="argus-engine",
+        description="Argus Recon scan engine (started by the dashboard)")
     p.add_argument("domain", help="target domain, e.g. example.com")
     p.add_argument("--passive", action="store_true",
                    help="passive enumeration only (faster, non-touching)")
@@ -178,7 +177,7 @@ def main(argv=None):
     p.add_argument("--exact-scope", action="store_true",
                    help="treat the given host literally; do not pivot a subdomain to its apex")
     p.add_argument("--no-prompt", action="store_true",
-                   help="never prompt interactively (deep DNS only runs if a key is already set)")
+                   help=argparse.SUPPRESS)   # accepted for compatibility; never prompts
     p.add_argument("--no-bbot", action="store_true",
                    help="skip the passive enum engine; use certificate transparency + DNS brute")
     p.add_argument("--only", help="comma list: run only these modules "
@@ -227,6 +226,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Only the dashboard's job runner drives the engine (it sets ARGUS_INTERNAL).
+    if os.environ.get("ARGUS_INTERNAL") != "1":
+        sys.exit(_refuse_terminal_use())
     try:
         sys.exit(main())
     except KeyboardInterrupt:

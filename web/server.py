@@ -161,6 +161,47 @@ def api_graph(scan_id):
     return jsonify(g)
 
 
+SERVICE_UNIT = "argus-recon"
+STARTED_AT = time.time()
+
+
+def _git_rev() -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=3)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+# /api/status is polled by the home page, so the shell-outs behind it are cached.
+# A slow status response used to let the first-run key prompt race ahead of it.
+_SVC_CACHE: dict = {"at": 0.0, "value": None}
+_SVC_TTL = 15.0
+
+
+def _service_state() -> dict:
+    """Is this process supervised by the argus-recon user unit? Answering from
+    inside the server is what lets the dashboard say 'Live' honestly."""
+    now = time.time()
+    if _SVC_CACHE["value"] is not None and now - _SVC_CACHE["at"] < _SVC_TTL:
+        return _SVC_CACHE["value"]
+    managed, enabled = False, False
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-active", f"{SERVICE_UNIT}.service"],
+                           capture_output=True, text=True, timeout=3)
+        managed = r.stdout.strip() == "active"
+        r = subprocess.run(["systemctl", "--user", "is-enabled", f"{SERVICE_UNIT}.service"],
+                           capture_output=True, text=True, timeout=3)
+        enabled = r.stdout.strip() in ("enabled", "enabled-runtime", "static")
+    except Exception:
+        pass
+    state = {"unit": SERVICE_UNIT, "managed": managed, "enabled": enabled,
+             "version": _git_rev()}
+    _SVC_CACHE.update(at=now, value=state)
+    return state
+
+
 @app.route("/api/status")
 def api_status():
     # No tool names are exposed here — the dashboard only needs to know whether
@@ -170,11 +211,18 @@ def api_status():
         resolve_tool(config.BBOT_BIN), resolve_tool(config.WHATWEB_BIN),
         resolve_tool(config.FFUF_BIN) or resolve_tool(config.FEROX_BIN),
     ])
+    svc = _service_state()
     return jsonify({
         "deep_available": bool(config.SECURITYTRAILS_KEY),
         "graph_db": graph_loader.ping(),
         "engines_ready": engines_ready,
         "ipinfo_token": bool(config.IPINFO_TOKEN),
+        "service": {**svc, "uptime_sec": round(time.time() - STARTED_AT),
+                    "url": f"http://{config.WEB_HOST}:{config.WEB_PORT}"},
+        # the launcher form shows these as the real defaults rather than inventing numbers
+        "defaults": {"max_pages": config.CRAWL_MAX_PAGES,
+                     "max_depth": config.CRAWL_MAX_DEPTH,
+                     "modules": SCAN_MODULES},
     })
 
 
@@ -196,24 +244,43 @@ def _run_job(job_id: str, domain: str, extra: list[str]):
     py = sys.executable
     cmd = [py, str(ROOT / "main.py"), domain, *extra]
     _JOBS[job_id].update(status="running", cmd=" ".join(cmd))
+    # The engine refuses to run from a terminal; this flag marks it as ours.
+    # Its own process group lets "stop" take the whole tool subtree with it.
+    env = {**os.environ, "ARGUS_INTERNAL": "1", "PYTHONUNBUFFERED": "1"}
     with open(log_path, "w", encoding="utf-8") as log:
         try:
             proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
-                                    cwd=str(ROOT))
+                                    cwd=str(ROOT), env=env, start_new_session=True)
             _JOBS[job_id]["pid"] = proc.pid
             rc = proc.wait()
-            _JOBS[job_id].update(status="done" if rc == 0 else "failed",
-                                 returncode=rc, finished=time.time())
+            if _JOBS[job_id].get("status") == "stopping":
+                _JOBS[job_id].update(status="stopped", returncode=rc,
+                                     finished=time.time())
+            else:
+                _JOBS[job_id].update(status="done" if rc == 0 else "failed",
+                                     returncode=rc, finished=time.time())
         except Exception as exc:
-            _JOBS[job_id].update(status="failed", error=str(exc))
+            _JOBS[job_id].update(status="failed", error=str(exc),
+                                 finished=time.time())
+
+
+# Pipeline stages the dashboard can switch off (mirrors main.ALL_MODULES).
+SCAN_MODULES = ["subdomain", "fingerprint", "crawl", "bruteforce",
+                "ip_enrich", "classify", "graph"]
 
 
 @app.route("/api/scan", methods=["POST"])
 def api_launch():
+    """Start a scan. This is the only way to start one — the engine refuses to
+    run from a terminal — so every pipeline option is reachable from here."""
     body = request.get_json(silent=True) or {}
     domain = (body.get("domain") or "").strip().lower()
     if not re.match(r"^[a-z0-9.\-]+\.[a-z]{2,}$", domain):
         return jsonify({"error": "invalid domain"}), 400
+    if any(j["domain"] == domain and j["status"] in ("queued", "running")
+           for j in _JOBS.values()):
+        return jsonify({"error": f"a scan of {domain} is already running"}), 409
+
     extra: list[str] = ["--no-prompt"]   # background job: never block on stdin
     if body.get("passive"):
         extra.append("--passive")
@@ -227,13 +294,62 @@ def api_launch():
         extra.append("--no-graph")
     for key, flag in (("max_pages", "--max-pages"), ("max_depth", "--max-depth")):
         if body.get(key):
-            extra += [flag, str(int(body[key]))]
+            try:
+                val = int(body[key])
+            except (TypeError, ValueError):
+                return jsonify({"error": f"{key} must be a number"}), 400
+            if not 1 <= val <= 100_000:
+                return jsonify({"error": f"{key} out of range"}), 400
+            extra += [flag, str(val)]
+    skip = [m for m in (body.get("skip") or []) if m in SCAN_MODULES]
+    if skip:
+        extra += ["--skip", ",".join(skip)]
+
     job_id = uuid.uuid4().hex[:12]
     _JOBS[job_id] = {"id": job_id, "domain": domain, "status": "queued",
-                     "started": time.time()}
+                     "started": time.time(), "options": {
+                         "passive": bool(body.get("passive")),
+                         "deep": bool(body.get("deep") and config.SECURITYTRAILS_KEY),
+                         "exact_scope": bool(body.get("exact_scope")),
+                         "skipped": skip + (["graph"] if body.get("no_graph") and "graph" not in skip else []),
+                     }}
     threading.Thread(target=_run_job, args=(job_id, domain, extra),
                      daemon=True).start()
     return jsonify({"job_id": job_id, "domain": domain})
+
+
+@app.route("/api/jobs/<job_id>/stop", methods=["POST"])
+def api_job_stop(job_id):
+    """Cancel a running scan. Without a terminal there is nothing else to Ctrl-C,
+    so the UI needs this. Signals the whole process group (the engine plus any
+    external tool it is currently running)."""
+    if not SCAN_ID_RE.match(job_id):
+        abort(400)
+    job = _JOBS.get(job_id)
+    if not job:
+        abort(404, "unknown job")
+    if job["status"] not in ("queued", "running"):
+        return jsonify({"job": job, "note": "not running"})
+    pid = job.get("pid")
+    if not pid:
+        job.update(status="stopped", finished=time.time())
+        return jsonify({"job": job})
+    job["status"] = "stopping"
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        job.update(status="stopped", finished=time.time())
+        return jsonify({"job": job})
+
+    def _hard_kill():
+        time.sleep(6)
+        if _JOBS.get(job_id, {}).get("status") == "stopping":
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except Exception:
+                pass
+    threading.Thread(target=_hard_kill, daemon=True).start()
+    return jsonify({"job": job})
 
 
 @app.route("/api/jobs")

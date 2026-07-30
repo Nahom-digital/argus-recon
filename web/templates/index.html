@@ -7,21 +7,61 @@
   <div class="home-head">
     <div class="lede">
       <h1>Recon scans</h1>
-      <p>Single-domain deep reconnaissance. Each scan maps subdomains, infrastructure,
-         tech stack, every endpoint and request, discovered files, and classified sensitive fields.</p>
+      <p>Single-domain deep reconnaissance, running as a local service. Start a scan here and
+         it maps subdomains, infrastructure, tech stack, every endpoint and request,
+         discovered files, and classified sensitive fields.</p>
     </div>
   </div>
 
   <form class="newscan" id="newscan" autocomplete="off">
-    <input class="input" id="domainInput" placeholder="target-domain.com" spellcheck="false" aria-label="Target domain">
-    <div class="opts">
-      <label class="chk" id="deepChk" title="Extra subdomains + full DNS records + historical DNS"><input type="checkbox" id="optDeep"> deep DNS</label>
-      <label class="chk"><input type="checkbox" id="optPassive"> passive</label>
-      <label class="chk"><input type="checkbox" id="optNoGraph"> skip graph</label>
+    <div class="ns-main">
+      <input class="input" id="domainInput" placeholder="target-domain.com" spellcheck="false" aria-label="Target domain">
+      <div class="opts">
+        <label class="chk" id="deepChk" title="Extra subdomains + full DNS records + historical DNS"><input type="checkbox" id="optDeep"> deep DNS</label>
+        <label class="chk" title="Passive enumeration only — nothing is sent to the target"><input type="checkbox" id="optPassive"> passive</label>
+      </div>
+      <button class="btn" type="button" id="optsToggle" aria-expanded="false" aria-controls="scanOpts">
+        <svg class="ic"><use href="#i-settings"></use></svg> Options<span class="ns-badge" id="optsCount" hidden></span>
+      </button>
+      <button class="btn primary" type="submit" id="scanBtn">
+        <svg class="ic"><use href="#i-radar-2"></use></svg> Run scan
+      </button>
     </div>
-    <button class="btn primary" type="submit" id="scanBtn">
-      <svg class="ic"><use href="#i-radar-2"></use></svg> Run scan
-    </button>
+
+    <div class="ns-adv" id="scanOpts" inert>
+      <div class="ns-adv-clip">
+      <div class="ns-adv-in">
+        <fieldset class="ns-group">
+          <legend>Scope</legend>
+          <div class="seg" role="radiogroup" aria-label="Scope">
+            <label><input type="radio" name="scope" value="apex" checked>
+              <span>Apex + subdomains</span></label>
+            <label><input type="radio" name="scope" value="exact">
+              <span>This host only</span></label>
+          </div>
+          <p class="ns-help" id="scopeHelp">A subdomain target pivots to its apex so the rest of the estate is enumerated too.</p>
+          <label class="chk"><input type="checkbox" id="optNoBbot"> skip passive-enum engine</label>
+        </fieldset>
+
+        <fieldset class="ns-group">
+          <legend>Crawl limits</legend>
+          <div class="ns-nums">
+            <label class="field"><span>Max pages per host</span>
+              <input class="input" id="optMaxPages" type="number" min="1" max="100000" inputmode="numeric"></label>
+            <label class="field"><span>Max depth</span>
+              <input class="input" id="optMaxDepth" type="number" min="1" max="50" inputmode="numeric"></label>
+          </div>
+          <p class="ns-help">Empty uses the configured default.</p>
+        </fieldset>
+
+        <fieldset class="ns-group ns-stages">
+          <legend>Pipeline stages</legend>
+          <div class="stage-chips" id="stageChips"></div>
+          <p class="ns-help">Every stage runs by default. Switch one off to skip it.</p>
+        </fieldset>
+      </div>
+      </div>
+    </div>
   </form>
 
   <div class="statusbar" id="statusbar"></div>

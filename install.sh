@@ -1,46 +1,206 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Argus Recon — one-shot installer
+# Argus Recon — installer and service manager
 #
-#   * installs all dependencies (Python venv + external recon tools)
-#   * registers the dashboard as a systemd *user* service called
-#     "argusscanner" so it keeps running on http://127.0.0.1:7666 even after
-#     you close the terminal (and after logout / reboot, via linger)
+# Registers Argus Recon as a systemd *user* service named "argus-recon". Once
+# installed, the dashboard is the product: it stays up across logout and
+# reboot, and every scan is started from the web UI. Nothing scans from the
+# terminal any more.
 #
-# Usage:   ./install.sh              install everything + start the service
-#          ./install.sh --upgrade    pull the latest from GitHub + restart
-#          ./install.sh --restart    bounce the running service
-#          ./install.sh --uninstall  remove the service
-# Manage:  systemctl --user {status|restart|stop|start} argusscanner
-# Logs:    journalctl --user -u argusscanner -f
+#   ./install.sh              install everything, register the service, start it
+#   ./install.sh --upgrade    pull the latest from GitHub + restart the service
+#   ./install.sh --status     is it live?
+#   ./install.sh --restart    bounce the service
+#   ./install.sh --force      reinstall dependencies + unit, then restart
+#   ./install.sh --uninstall  stop and remove the service
+#
+# Manage directly:  systemctl --user {status|restart|stop|start} argus-recon
+# Logs:             journalctl --user -u argus-recon -f
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE="argusscanner"
+SERVICE="argus-recon"
+LEGACY_SERVICES=(argusscanner)          # earlier releases used this unit name
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT="$UNIT_DIR/$SERVICE.service"
 PORT="${ARGUS_WEB_PORT:-7666}"
 HOST="${ARGUS_WEB_HOST:-127.0.0.1}"
+URL="http://$HOST:$PORT"
 
 say()  { printf '\033[1;36m[argus]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[argus]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[argus]\033[0m %s\n' "$*" >&2; }
+ok()   { printf '\033[1;32m[argus]\033[0m %s\n' "$*"; }
 
 # --------------------------------------------------------------------------- #
-# --uninstall
+# Liveness: systemd says "active", the port answers, and the answer is ours.
 # --------------------------------------------------------------------------- #
-if [ "${1:-}" = "--uninstall" ]; then
-  say "stopping and removing the $SERVICE service …"
-  systemctl --user disable --now "$SERVICE.service" 2>/dev/null || true
-  rm -f "$UNIT"
-  systemctl --user daemon-reload 2>/dev/null || true
-  say "done. (venv and scans left untouched; delete .venv manually if you want)"
+unit_active() { systemctl --user is-active --quiet "$SERVICE.service" 2>/dev/null; }
+unit_exists() { [ -f "$UNIT" ]; }
+
+http_live() {
+  command -v curl >/dev/null || return 1
+  curl -fsS --max-time 3 "$URL/api/status" >/dev/null 2>&1
+}
+
+# Wait up to $1 seconds for the dashboard to answer (first boot installs deps).
+wait_live() {
+  local tries="${1:-25}"
+  while [ "$tries" -gt 0 ]; do
+    http_live && return 0
+    sleep 1
+    tries=$((tries - 1))
+  done
+  return 1
+}
+
+svc_pid()    { systemctl --user show -p MainPID --value "$SERVICE.service" 2>/dev/null; }
+svc_since()  {
+  local ts; ts="$(systemctl --user show -p ActiveEnterTimestamp --value "$SERVICE.service" 2>/dev/null)"
+  [ -n "$ts" ] && date -d "$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || true
+}
+version_of() { git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo 'unknown'; }
+
+# The banner every path prints when Argus is up.
+report_live() {
+  local pid since
+  pid="$(svc_pid)"; since="$(svc_since)"
+  echo
+  ok "LIVE  ·  $URL"
+  echo "        service   $SERVICE (pid ${pid:-?})"
+  [ -n "$since" ] && echo "        up since  $since"
+  echo "        version   $(version_of)"
+  echo "        scans     started from the dashboard, not the terminal"
+  echo
+  echo "   open    : xdg-open $URL"
+  echo "   logs    : journalctl --user -u $SERVICE -f"
+  echo "   upgrade : ./install.sh --upgrade"
+  echo
+}
+
+report_down() {
+  echo
+  warn "NOT LIVE  ·  $URL is not answering"
+  if unit_exists; then
+    echo "        the unit is installed but the dashboard is not up."
+    echo "        start it : systemctl --user start $SERVICE"
+    echo "        why      : journalctl --user -u $SERVICE -e"
+  else
+    echo "        the service is not installed yet — run ./install.sh"
+  fi
+  echo
+}
+
+# --------------------------------------------------------------------------- #
+# Retire units from earlier releases so two copies never fight over the port.
+# --------------------------------------------------------------------------- #
+migrate_legacy() {
+  local legacy found=0
+  for legacy in "${LEGACY_SERVICES[@]}"; do
+    if [ -f "$UNIT_DIR/$legacy.service" ] || systemctl --user is-active --quiet "$legacy.service" 2>/dev/null; then
+      found=1
+      say "retiring the old '$legacy' service (renamed to '$SERVICE') …"
+      systemctl --user disable --now "$legacy.service" >/dev/null 2>&1 || true
+      rm -f "$UNIT_DIR/$legacy.service"
+    fi
+  done
+  [ "$found" = 1 ] && systemctl --user daemon-reload >/dev/null 2>&1 || true
+  return 0
+}
+
+write_unit() {
+  say "writing systemd user unit → $UNIT"
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT" <<EOF
+[Unit]
+Description=Argus Recon dashboard ($URL)
+Documentation=https://github.com/Nahom-digital/argus-recon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$HERE
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ARGUS_WEB_HOST=$HOST
+Environment=ARGUS_WEB_PORT=$PORT
+ExecStart="$HERE/serve"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+}
+
+install_python_env() {
+  say "setting up the Python virtualenv + requirements …"
+  # shellcheck source=/dev/null
+  source "$HERE/bootstrap.sh"
+  _argus_bootstrap "$HERE" || { err "python bootstrap failed"; exit 1; }
+  say "python environment ready ✔  ($ARGUS_PY)"
+}
+
+usage() {
+  cat <<EOF
+Argus Recon — installer and service manager
+
+  ./install.sh              install everything, register the service, start it
+  ./install.sh --upgrade    pull the latest from GitHub + restart the service
+  ./install.sh --status     is it live?
+  ./install.sh --restart    bounce the service
+  ./install.sh --force      reinstall dependencies + unit, then restart
+  ./install.sh --uninstall  stop and remove the service
+
+Service : systemctl --user {status|restart|stop|start} $SERVICE
+Logs    : journalctl --user -u $SERVICE -f
+Scans   : started from the dashboard at $URL (not from the terminal)
+EOF
   exit 0
-fi
+}
 
 # --------------------------------------------------------------------------- #
-# --upgrade : check GitHub for a newer version, pull it, refresh deps, restart
+# --help / --status / --uninstall / --restart : quick paths
+# --------------------------------------------------------------------------- #
+case "${1:-}" in
+  --help|-h) usage ;;
+
+  --status)
+    if unit_active && http_live; then report_live; exit 0; fi
+    if unit_active && ! http_live; then
+      warn "the $SERVICE service is running but $URL is not answering yet."
+      echo "        it may still be installing dependencies — check:"
+      echo "        journalctl --user -u $SERVICE -f"
+      exit 1
+    fi
+    report_down; exit 1
+    ;;
+
+  --uninstall)
+    say "stopping and removing the $SERVICE service …"
+    systemctl --user disable --now "$SERVICE.service" >/dev/null 2>&1 || true
+    rm -f "$UNIT"
+    migrate_legacy
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    ok "removed. Scans in ./scans and the .venv were left untouched."
+    exit 0
+    ;;
+
+  --restart)
+    unit_exists || { err "the service is not installed — run ./install.sh first"; exit 1; }
+    say "restarting $SERVICE …"
+    systemctl --user restart "$SERVICE.service"
+    if wait_live 25; then report_live; else
+      err "restarted, but $URL is not answering. journalctl --user -u $SERVICE -e"; exit 1
+    fi
+    exit 0
+    ;;
+esac
+
+# --------------------------------------------------------------------------- #
+# --upgrade : pull from GitHub, refresh deps, restart the service
 # --------------------------------------------------------------------------- #
 if [ "${1:-}" = "--upgrade" ]; then
   command -v git >/dev/null || { err "git is not installed"; exit 1; }
@@ -53,38 +213,45 @@ if [ "${1:-}" = "--upgrade" ]; then
   remote_rev="$(git -C "$HERE" rev-parse "origin/$branch" 2>/dev/null || true)"
   [ -n "$remote_rev" ] || { err "no upstream 'origin/$branch' to compare against"; exit 1; }
 
-  if [ "$local_rev" = "$remote_rev" ]; then
-    say "already up to date ($branch @ ${local_rev:0:7}) — nothing to upgrade."
-    exit 0
-  fi
-  behind="$(git -C "$HERE" rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo '?')"
-  say "update available: $behind new commit(s) on origin/$branch."
+  # Only commits we are *behind* are an update. A checkout that is ahead (local
+  # commits not pushed yet) is up to date as far as upgrading goes.
+  behind="$(git -C "$HERE" rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo 0)"
+  ahead="$(git -C "$HERE" rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)"
 
-  # never clobber local edits — stash them first
-  if ! git -C "$HERE" diff --quiet || ! git -C "$HERE" diff --cached --quiet; then
-    warn "local uncommitted changes detected — stashing them before pulling."
-    git -C "$HERE" stash push -u -m "argus --upgrade autostash" >/dev/null 2>&1 || true
-  fi
+  if [ "$behind" = "0" ]; then
+    say "already up to date ($branch @ ${local_rev:0:7})."
+    [ "$ahead" != "0" ] && say "($ahead local commit(s) not pushed to origin/$branch.)"
+  else
+    say "update available: $behind new commit(s) on origin/$branch."
 
-  say "pulling latest …"
-  git -C "$HERE" pull --ff-only origin "$branch" \
-    || { err "fast-forward pull failed (branch diverged) — resolve manually with git"; exit 1; }
+    # never clobber local edits — stash them first
+    if ! git -C "$HERE" diff --quiet || ! git -C "$HERE" diff --cached --quiet; then
+      warn "local uncommitted changes detected — stashing them before pulling."
+      git -C "$HERE" stash push -u -m "argus --upgrade autostash" >/dev/null 2>&1 || true
+    fi
+
+    say "pulling latest …"
+    git -C "$HERE" pull --ff-only origin "$branch" \
+      || { err "fast-forward pull failed (branch diverged) — resolve manually with git"; exit 1; }
+    say "now at $(version_of)."
+  fi
 
   say "refreshing dependencies …"
   # shellcheck source=/dev/null
   source "$HERE/bootstrap.sh"; _argus_bootstrap "$HERE" || warn "dependency refresh reported problems"
 
-  systemctl --user daemon-reload 2>/dev/null || true
-  if systemctl --user is-enabled --quiet "$SERVICE.service" 2>/dev/null; then
-    say "restarting $SERVICE with the new version …"
-    systemctl --user restart "$SERVICE.service"
-    if systemctl --user is-active --quiet "$SERVICE.service"; then
-      say "✔ upgraded to ${remote_rev:0:7} and restarted → http://$HOST:$PORT"
-    else
-      err "service failed to restart — journalctl --user -u $SERVICE -e"; exit 1
-    fi
+  # An upgrade always lands on a running service: install the unit if the
+  # checkout predates it, refresh it if the paths changed, then restart.
+  migrate_legacy
+  write_unit
+  systemctl --user enable "$SERVICE.service" >/dev/null 2>&1 || true
+  say "restarting $SERVICE on the new version …"
+  systemctl --user restart "$SERVICE.service"
+  if wait_live 40; then
+    ok "upgraded and restarted."
+    report_live
   else
-    say "✔ upgraded to ${remote_rev:0:7}. Service not installed yet — run ./install.sh to set it up."
+    err "the service did not come back up — journalctl --user -u $SERVICE -e"; exit 1
   fi
   exit 0
 fi
@@ -96,39 +263,24 @@ fi
 command -v systemctl >/dev/null || { err "systemd not available on this machine"; exit 1; }
 
 # --------------------------------------------------------------------------- #
-# 0b. already running?  detect an active instance and re-run idempotently.
-#     Pass --force to reinstall from scratch; --restart to just bounce it.
+# 0b. already live? say so and stop. --force reinstalls over the top.
 # --------------------------------------------------------------------------- #
-if systemctl --user is-active --quiet "$SERVICE.service"; then
-  RUNNING_PID="$(systemctl --user show -p MainPID --value "$SERVICE.service" 2>/dev/null || echo '?')"
-  say "$SERVICE is already active (pid $RUNNING_PID) → http://$HOST:$PORT"
-  case "${1:-}" in
-    --force)
-      say "--force: tearing down and reinstalling …"
-      systemctl --user disable --now "$SERVICE.service" 2>/dev/null || true
-      ;;
-    --restart)
-      say "--restart: bouncing the service and exiting."
-      systemctl --user restart "$SERVICE.service"
-      systemctl --user is-active --quiet "$SERVICE.service" \
-        && say "✔ $SERVICE restarted → http://$HOST:$PORT" \
-        || { err "restart failed — see: journalctl --user -u $SERVICE -e"; exit 1; }
-      exit 0
-      ;;
-    *)
-      say "nothing to do. It's already running and set to start on boot."
-      echo "   re-run options:  ./install.sh --restart   (bounce it)"
-      echo "                    ./install.sh --force     (reinstall deps + unit)"
-      echo "                    ./install.sh --uninstall (remove the service)"
-      exit 0
-      ;;
-  esac
+if [ "${1:-}" != "--force" ] && unit_active && http_live; then
+  say "$SERVICE is already installed and answering."
+  report_live
+  echo "   nothing to do. To reinstall anyway: ./install.sh --force"
+  echo
+  exit 0
 fi
+if [ "${1:-}" = "--force" ]; then
+  say "--force: tearing down and reinstalling …"
+  systemctl --user disable --now "$SERVICE.service" >/dev/null 2>&1 || true
+fi
+
+migrate_legacy
 
 # --------------------------------------------------------------------------- #
 # 1. base system packages  (fresh-server safe)
-#    Everything Argus needs to even bootstrap: python venv/pip, pipx, curl.
-#    apt is used when present; otherwise we warn and rely on what's installed.
 # --------------------------------------------------------------------------- #
 export PATH="$HOME/.local/bin:$PATH"
 HAVE_APT=0; command -v apt-get >/dev/null && HAVE_APT=1
@@ -141,15 +293,16 @@ apt_install() {                     # apt_install pkg1 pkg2 …  (idempotent-ish
 
 say "checking base system packages …"
 base_apt=()
-command -v python3 >/dev/null            || base_apt+=(python3)
-python3 -c 'import venv'  2>/dev/null     || base_apt+=(python3-venv)
-python3 -m pip --version 2>/dev/null >/dev/null || base_apt+=(python3-pip)
-command -v curl >/dev/null                || base_apt+=(curl)
+command -v python3 >/dev/null                   || base_apt+=(python3)
+python3 -c 'import venv'  2>/dev/null            || base_apt+=(python3-venv)
+python3 -m pip --version 2>/dev/null >/dev/null  || base_apt+=(python3-pip)
+command -v curl >/dev/null                       || base_apt+=(curl)
+command -v git  >/dev/null                       || base_apt+=(git)
 if [ "${#base_apt[@]}" -gt 0 ]; then
   say "installing base packages: ${base_apt[*]}  (needs sudo)"
   apt_install "${base_apt[@]}" || warn "some base packages missing — bootstrap may fail"
 else
-  say "python3 + venv + pip + curl already present ✔"
+  say "python3 + venv + pip + curl + git already present ✔"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -186,62 +339,32 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
-# 3. Python venv + requirements  (serve/bootstrap.sh does this idempotently)
+# 3. Python venv + requirements
 # --------------------------------------------------------------------------- #
-say "setting up Python virtualenv + requirements …"
-# shellcheck source=/dev/null
-source "$HERE/bootstrap.sh"
-_argus_bootstrap "$HERE" || { err "python bootstrap failed"; exit 1; }
-say "python environment ready ✔  ($ARGUS_PY)"
+install_python_env
 
 # --------------------------------------------------------------------------- #
-# 4. systemd user service: argusscanner
+# 4. register the service
 # --------------------------------------------------------------------------- #
-say "writing systemd user unit → $UNIT"
-mkdir -p "$UNIT_DIR"
-cat > "$UNIT" <<EOF
-[Unit]
-Description=Argus Recon dashboard ($HOST:$PORT)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=$HERE
-Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=ARGUS_WEB_HOST=$HOST
-Environment=ARGUS_WEB_PORT=$PORT
-ExecStart="$HERE/serve"
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-EOF
+write_unit
 
 # keep the service alive after logout / across reboot (no active login needed)
-say "enabling linger so the service survives logout/reboot …"
+say "enabling linger so the service survives logout and reboot …"
 loginctl enable-linger "$USER" 2>/dev/null \
   || warn "could not enable linger (service still runs while you're logged in)"
 
-say "starting the $SERVICE service …"
-systemctl --user daemon-reload
+say "starting $SERVICE …"
 systemctl --user enable --now "$SERVICE.service"
 
 # --------------------------------------------------------------------------- #
-# 4. verify
+# 5. verify it is actually serving, not just "active"
 # --------------------------------------------------------------------------- #
-sleep 2
-if systemctl --user is-active --quiet "$SERVICE.service"; then
-  say "✔ $SERVICE is running → http://$HOST:$PORT"
-  echo
-  echo "   status : systemctl --user status $SERVICE"
-  echo "   logs   : journalctl --user -u $SERVICE -f"
-  echo "   restart: systemctl --user restart $SERVICE"
-  echo "   stop   : systemctl --user stop $SERVICE"
-  echo "   remove : ./install.sh --uninstall"
+if wait_live 40; then
+  ok "install complete."
+  report_live
 else
-  err "$SERVICE failed to start. First launch installs deps and can take a minute."
-  err "Inspect with: journalctl --user -u $SERVICE -e"
+  err "$SERVICE started but $URL never answered."
+  err "First launch installs dependencies and can take a minute — check:"
+  err "  journalctl --user -u $SERVICE -f"
   exit 1
 fi
