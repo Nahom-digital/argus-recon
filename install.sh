@@ -34,6 +34,40 @@ err()  { printf '\033[1;31m[argus]\033[0m %s\n' "$*" >&2; }
 ok()   { printf '\033[1;32m[argus]\033[0m %s\n' "$*"; }
 
 # --------------------------------------------------------------------------- #
+# `systemctl --user` finds the per-user manager through XDG_RUNTIME_DIR. Shells
+# that aren't a real login session (ssh root@host 'cmd', su, cron, docker exec)
+# never set it, and then every --user call dies with "Failed to connect to user
+# scope bus". Rebuild the pointers ourselves, and start the manager if needed.
+# --------------------------------------------------------------------------- #
+user_bus_ok() { systemctl --user show -p Version --value >/dev/null 2>&1; }
+
+ensure_user_bus() {
+  user_bus_ok && return 0
+  local uid; uid="$(id -u)"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+  [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ] \
+    && export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  user_bus_ok && return 0
+
+  # No manager running yet: linger creates it and keeps it after logout.
+  loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+  { sudo -n systemctl start "user@$uid.service" >/dev/null 2>&1 \
+    || systemctl start "user@$uid.service" >/dev/null 2>&1; } || true
+  local tries=10
+  while [ "$tries" -gt 0 ]; do
+    user_bus_ok && return 0
+    sleep 1; tries=$((tries - 1))
+  done
+  return 1
+}
+
+if command -v systemctl >/dev/null 2>&1 && ! ensure_user_bus; then
+  warn "cannot reach the systemd user manager for $(id -un) — every"
+  warn "'systemctl --user' below will fail. On a login-less shell try:"
+  warn "  loginctl enable-linger $(id -un) && export XDG_RUNTIME_DIR=/run/user/$(id -u)"
+fi
+
+# --------------------------------------------------------------------------- #
 # Liveness: systemd says "active", the port answers, and the answer is ours.
 # --------------------------------------------------------------------------- #
 unit_active() { systemctl --user is-active --quiet "$SERVICE.service" 2>/dev/null; }
