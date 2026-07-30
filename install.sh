@@ -161,7 +161,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$HERE
-Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/go/bin:/usr/local/bin:/usr/bin:/bin
 Environment=ARGUS_WEB_HOST=$HOST
 Environment=ARGUS_WEB_PORT=$PORT
 ExecStart="$HERE/serve"
@@ -172,6 +172,151 @@ RestartSec=3
 WantedBy=default.target
 EOF
   systemctl --user daemon-reload
+}
+
+# --------------------------------------------------------------------------- #
+# Dependency installers.
+#
+# Defined once, called from BOTH a fresh install and --upgrade, so either path
+# always converges on the full toolset — an --upgrade used to only refresh the
+# Python venv and never noticed a missing whatweb/ffuf/bbot or the Go speed
+# tools (httpx/katana/subfinder/dnsx). Every function here is idempotent:
+# whatever is already present and validated is left alone.
+# --------------------------------------------------------------------------- #
+export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
+HAVE_APT=0; command -v apt-get >/dev/null && HAVE_APT=1
+APT_UPDATED=0
+apt_install() {                     # apt_install pkg1 pkg2 …  (idempotent-ish)
+  [ "$HAVE_APT" = 1 ] || { warn "apt-get not found — install manually: $*"; return 1; }
+  if [ -n "$SUDO" ] && ! command -v sudo >/dev/null 2>&1; then
+    warn "need root to install ($*) but neither root nor sudo is available — install manually"; return 1
+  fi
+  if [ "$APT_UPDATED" = 0 ]; then $SUDO apt-get update -qq || true; APT_UPDATED=1; fi
+  $SUDO apt-get install -y "$@" || { warn "apt install failed: $*"; return 1; }
+}
+
+install_base_packages() {
+  say "checking base system packages …"
+  local base_apt=()
+  command -v python3 >/dev/null                   || base_apt+=(python3)
+  python3 -c 'import venv'  2>/dev/null            || base_apt+=(python3-venv)
+  python3 -m pip --version 2>/dev/null >/dev/null  || base_apt+=(python3-pip)
+  command -v curl >/dev/null                       || base_apt+=(curl)
+  command -v git  >/dev/null                       || base_apt+=(git)
+  if [ "${#base_apt[@]}" -gt 0 ]; then
+    say "installing base packages: ${base_apt[*]}  (needs sudo)"
+    apt_install "${base_apt[@]}" || warn "some base packages missing — bootstrap may fail"
+  else
+    say "python3 + venv + pip + curl + git already present ✔"
+  fi
+}
+
+install_apt_recon_tools() {
+  say "checking external recon tools …"
+  local need_apt=()
+  command -v whatweb >/dev/null || need_apt+=(whatweb)
+  command -v ffuf    >/dev/null || command -v feroxbuster >/dev/null || need_apt+=(ffuf)
+  # tor + torsocks power the optional "via Tor" scan. Not fatal if absent — the
+  # toggle just stays locked in the dashboard — but install them so it works.
+  command -v tor      >/dev/null || need_apt+=(tor)
+  command -v torsocks >/dev/null || need_apt+=(torsocks)
+  if [ "${#need_apt[@]}" -gt 0 ]; then
+    say "installing recon tools: ${need_apt[*]}  (needs sudo)"
+    apt_install "${need_apt[@]}" || warn "install manually later: ${need_apt[*]}"
+  else
+    say "whatweb + ffuf/feroxbuster + tor already present ✔"
+  fi
+}
+
+# A Go toolchain is the one prerequisite the PD speed tools actually need. Try
+# apt first (golang-go), snap as a fallback, and degrade to a warning rather
+# than failing the install — everything downstream already tolerates these
+# tools being absent.
+install_go_toolchain() {
+  command -v go >/dev/null 2>&1 && return 0
+  say "Go toolchain not found — installing (needed for the recon speed tools) …"
+  if apt_install golang-go; then
+    hash -r 2>/dev/null || true
+  fi
+  if ! command -v go >/dev/null 2>&1 && command -v snap >/dev/null 2>&1; then
+    say "apt did not provide Go — trying snap …"
+    { [ -n "$SUDO" ] && $SUDO snap install go --classic; } >/dev/null 2>&1 \
+      || snap install go --classic >/dev/null 2>&1 || true
+  fi
+  if command -v go >/dev/null 2>&1; then
+    say "Go toolchain ready ✔  ($(go version 2>/dev/null))"
+    return 0
+  fi
+  warn "could not install a Go toolchain — httpx/katana/subfinder/dnsx will stay"
+  warn "  on Argus's built-in Python fallback. Install Go manually and re-run"
+  warn "  ./install.sh --force (or --upgrade) to pick them up later."
+  return 1
+}
+
+# ProjectDiscovery Go tools — the fast passes: mass HTTP probe (httpx), JS-aware
+# crawler (katana), quick passive name enum (subfinder), bulk resolver (dnsx).
+# Each is optional: Argus validates the binary (some distros ship an unrelated
+# `httpx`) and falls back to its built-in path when one is missing. Installed via
+# `go install` into ~/go/bin, which Argus searches even when it is off PATH.
+install_go_tools() {
+  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+  declare -A pdtools=(
+    [httpx]="github.com/projectdiscovery/httpx/cmd/httpx@latest"
+    [katana]="github.com/projectdiscovery/katana/cmd/katana@latest"
+    [subfinder]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+    [dnsx]="github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
+  )
+  # Already present (validated PD binary)?  ~/go/bin/<tool> or a *-pd alias.
+  local missing=() t
+  for t in "${!pdtools[@]}"; do
+    if [ -x "$gobin/$t" ] || [ -x "$gobin/$t-pd" ] || command -v "$t-pd" >/dev/null 2>&1; then
+      continue
+    fi
+    missing+=("$t")
+  done
+  [ "${#missing[@]}" -eq 0 ] && { say "recon speed tools already present ✔"; return 0; }
+
+  install_go_toolchain || return 0    # non-fatal: falls back to the Python path
+
+  mkdir -p "$gobin"
+  say "installing recon speed tools: ${missing[*]}  (go install → $gobin)"
+  for t in "${missing[@]}"; do
+    say "  $t …"
+    GOBIN="$gobin" go install "${pdtools[$t]}" \
+      || warn "  could not install $t — Argus falls back to its built-in path"
+  done
+  # A distro `httpx` (python3-httpx) can shadow ours on PATH. A -pd alias next to
+  # our binary gives Argus an unambiguous name to resolve first.
+  [ -x "$gobin/httpx" ] && ln -sf "$gobin/httpx" "$gobin/httpx-pd" 2>/dev/null || true
+  case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
+}
+
+# bbot (passive subdomain / infra enum) via pipx — install pipx first if needed.
+install_bbot() {
+  if command -v bbot >/dev/null; then
+    say "bbot already present ✔"
+    return 0
+  fi
+  if ! command -v pipx >/dev/null; then
+    say "pipx not found — installing it (needed for bbot) …"
+    apt_install pipx || "$(command -v python3)" -m pip install --user pipx 2>/dev/null || true
+    command -v pipx >/dev/null && pipx ensurepath >/dev/null 2>&1 || true
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+  if command -v pipx >/dev/null; then
+    say "installing bbot via pipx …"
+    pipx install bbot || warn "pipx install bbot failed — Argus falls back to crt.sh + DNS"
+  else
+    warn "could not install pipx — bbot skipped; Argus falls back to crt.sh + DNS"
+  fi
+}
+
+# The one call both a fresh install and --upgrade make: every external tool
+# Argus can use, installing whatever is missing and leaving the rest alone.
+install_external_tools() {
+  install_apt_recon_tools
+  install_go_tools
+  install_bbot
 }
 
 install_python_env() {
@@ -283,6 +428,12 @@ if [ "${1:-}" = "--upgrade" ]; then
   fi
 
   say "refreshing dependencies …"
+  # Same checks a fresh install runs — an --upgrade used to only refresh the
+  # Python venv, so a newer commit that started using a tool you didn't have
+  # yet (or a speed tool you never installed) went unnoticed until a scan hit
+  # the gap. Every check here is idempotent; nothing already present is touched.
+  install_base_packages
+  install_external_tools
   # shellcheck source=/dev/null
   source "$HERE/bootstrap.sh"; _argus_bootstrap "$HERE" || warn "dependency refresh reported problems"
 
@@ -328,110 +479,12 @@ migrate_legacy
 # --------------------------------------------------------------------------- #
 # 1. base system packages  (fresh-server safe)
 # --------------------------------------------------------------------------- #
-export PATH="$HOME/.local/bin:$PATH"
-HAVE_APT=0; command -v apt-get >/dev/null && HAVE_APT=1
-APT_UPDATED=0
-apt_install() {                     # apt_install pkg1 pkg2 …  (idempotent-ish)
-  [ "$HAVE_APT" = 1 ] || { warn "apt-get not found — install manually: $*"; return 1; }
-  if [ -n "$SUDO" ] && ! command -v sudo >/dev/null 2>&1; then
-    warn "need root to install ($*) but neither root nor sudo is available — install manually"; return 1
-  fi
-  if [ "$APT_UPDATED" = 0 ]; then $SUDO apt-get update -qq || true; APT_UPDATED=1; fi
-  $SUDO apt-get install -y "$@" || { warn "apt install failed: $*"; return 1; }
-}
-
-say "checking base system packages …"
-base_apt=()
-command -v python3 >/dev/null                   || base_apt+=(python3)
-python3 -c 'import venv'  2>/dev/null            || base_apt+=(python3-venv)
-python3 -m pip --version 2>/dev/null >/dev/null  || base_apt+=(python3-pip)
-command -v curl >/dev/null                       || base_apt+=(curl)
-command -v git  >/dev/null                       || base_apt+=(git)
-if [ "${#base_apt[@]}" -gt 0 ]; then
-  say "installing base packages: ${base_apt[*]}  (needs sudo)"
-  apt_install "${base_apt[@]}" || warn "some base packages missing — bootstrap may fail"
-else
-  say "python3 + venv + pip + curl + git already present ✔"
-fi
+install_base_packages
 
 # --------------------------------------------------------------------------- #
-# 2. external recon tools  (only install what's missing)
+# 2. external recon tools + recon speed tools + bbot  (only install what's missing)
 # --------------------------------------------------------------------------- #
-say "checking external recon tools …"
-
-need_apt=()
-command -v whatweb >/dev/null || need_apt+=(whatweb)
-command -v ffuf    >/dev/null || command -v feroxbuster >/dev/null || need_apt+=(ffuf)
-# tor + torsocks power the optional "via Tor" scan. Not fatal if absent — the
-# toggle just stays locked in the dashboard — but install them so it works.
-command -v tor      >/dev/null || need_apt+=(tor)
-command -v torsocks >/dev/null || need_apt+=(torsocks)
-if [ "${#need_apt[@]}" -gt 0 ]; then
-  say "installing recon tools: ${need_apt[*]}  (needs sudo)"
-  apt_install "${need_apt[@]}" || warn "install manually later: ${need_apt[*]}"
-else
-  say "whatweb + ffuf/feroxbuster + tor already present ✔"
-fi
-
-# ProjectDiscovery Go tools — the fast passes: mass HTTP probe (httpx), JS-aware
-# crawler (katana), quick passive name enum (subfinder), bulk resolver (dnsx).
-# Each is optional: Argus validates the binary (some distros ship an unrelated
-# `httpx`) and falls back to its built-in path when one is missing. Installed via
-# `go install` into ~/go/bin, which Argus searches even when it is off PATH.
-install_go_tools() {
-  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
-  declare -A pdtools=(
-    [httpx]="github.com/projectdiscovery/httpx/cmd/httpx@latest"
-    [katana]="github.com/projectdiscovery/katana/cmd/katana@latest"
-    [subfinder]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
-    [dnsx]="github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
-  )
-  # Already present (validated PD binary)?  ~/go/bin/<tool> or a *-pd alias.
-  local missing=() t
-  for t in "${!pdtools[@]}"; do
-    if [ -x "$gobin/$t" ] || [ -x "$gobin/$t-pd" ] || command -v "$t-pd" >/dev/null 2>&1; then
-      continue
-    fi
-    missing+=("$t")
-  done
-  [ "${#missing[@]}" -eq 0 ] && { say "recon speed tools already present ✔"; return 0; }
-
-  if ! command -v go >/dev/null 2>&1; then
-    warn "Go toolchain not found — skipping the speed tools (${missing[*]})."
-    warn "  Argus still runs on its built-in probe/crawler/resolver, just slower."
-    warn "  To enable them: install Go (apt install golang-go) and re-run --force,"
-    warn "  or 'go install' each from github.com/projectdiscovery."
-    return 0
-  fi
-  mkdir -p "$gobin"
-  for t in "${missing[@]}"; do
-    say "installing $t (go install) …"
-    GOBIN="$gobin" go install "${pdtools[$t]}" \
-      || warn "  could not install $t — Argus falls back to its built-in path"
-  done
-  # A distro `httpx` (python3-httpx) can shadow ours on PATH. A -pd alias next to
-  # our binary gives Argus an unambiguous name to resolve first.
-  [ -x "$gobin/httpx" ] && ln -sf "$gobin/httpx" "$gobin/httpx-pd" 2>/dev/null || true
-}
-install_go_tools
-
-# bbot (passive subdomain / infra enum) via pipx — install pipx first if needed
-if command -v bbot >/dev/null; then
-  say "bbot already present ✔"
-else
-  if ! command -v pipx >/dev/null; then
-    say "pipx not found — installing it (needed for bbot) …"
-    apt_install pipx || "$(command -v python3)" -m pip install --user pipx 2>/dev/null || true
-    command -v pipx >/dev/null && pipx ensurepath >/dev/null 2>&1 || true
-    export PATH="$HOME/.local/bin:$PATH"
-  fi
-  if command -v pipx >/dev/null; then
-    say "installing bbot via pipx …"
-    pipx install bbot || warn "pipx install bbot failed — Argus falls back to crt.sh + DNS"
-  else
-    warn "could not install pipx — bbot skipped; Argus falls back to crt.sh + DNS"
-  fi
-fi
+install_external_tools
 
 # --------------------------------------------------------------------------- #
 # 3. Python venv + requirements

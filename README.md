@@ -105,9 +105,10 @@ cd argus-recon
 That is the whole install. It is fresh-server safe and idempotent:
 
 1. installs the base packages it needs (python venv/pip, pipx, curl, git),
-2. installs the external recon engines (whatweb, ffuf/feroxbuster, bbot via pipx,
-   tor + torsocks for Tor scans), and — when a Go toolchain is present — the
-   ProjectDiscovery speed tools (httpx, katana, subfinder, dnsx) into `~/go/bin`,
+2. installs the external recon engines: whatweb, ffuf/feroxbuster, bbot via pipx,
+   tor + torsocks for Tor scans, **and the Go toolchain itself** (apt, falling
+   back to snap) if it isn't already there, so it can build the ProjectDiscovery
+   speed tools (httpx, katana, subfinder, dnsx) into `~/go/bin`,
 3. builds the Python venv from `requirements.txt` (incl. PySocks for Tor, the
    async HTTP client, and the embedded graph DB),
 4. writes and enables the **`argus-recon`** systemd *user* service, with linger on
@@ -115,10 +116,14 @@ That is the whole install. It is fresh-server safe and idempotent:
 5. waits until the dashboard actually answers, then prints **LIVE** with the URL,
    pid, uptime and version.
 
-The Go speed tools are optional: without them (or without Go) Argus runs on its
-built-in async probe/crawler/resolver — slower, but nothing is lost. Install them
-later with `go install github.com/projectdiscovery/{httpx,katana,dnsx}/cmd/...@latest`
-and `.../subfinder/v2/cmd/subfinder@latest`, then re-run `./install.sh --force`.
+Every one of those checks is idempotent and re-run by **both** a plain
+`./install.sh` and `./install.sh --upgrade` — an upgrade doesn't just refresh the
+Python venv, it re-checks every external tool and installs whatever is still
+missing, so a checkout that predates a tool (or a box where `go install` failed
+the first time) catches up automatically. The Go speed tools stay optional: if Go
+truly cannot be installed on the machine (no apt, no snap, no root), Argus runs
+on its built-in async probe/crawler/resolver instead — slower, but nothing is
+lost — and a warning explains what to do manually.
 
 Run it again any time. If the service is already up it says so and stops rather
 than installing a second copy:
