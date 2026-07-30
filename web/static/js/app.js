@@ -8,6 +8,14 @@ function icon(name, cls) {
   return `<svg class="ic ${cls || ''}" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 }
 
+/* withBase(path) -> path rewritten for wherever the app is mounted. A proxy can
+   serve the dashboard under a prefix (nginx: /scanner/ -> 127.0.0.1:7666), which
+   Flask learns from X-Forwarded-Prefix and hands back as request.script_root on
+   <body data-base>. Root-absolute '/api/…' would leave the app and 404, so every
+   fetch and every generated link goes through here. Empty base = served at root. */
+const BASE = (document.body.dataset.base || '').replace(/\/+$/, '');
+const withBase = (path) => BASE + path;
+
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 

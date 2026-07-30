@@ -397,6 +397,18 @@ systemctl --user enable --now "$SERVICE.service"
 # --------------------------------------------------------------------------- #
 # 5. verify it is actually serving, not just "active"
 # --------------------------------------------------------------------------- #
+# A stray `./serve` from before the service existed still owns the port, and the
+# server's single-instance guard makes our unit exit 0 on top of it. The port
+# answers, so wait_live passes — but nothing is supervised. Catch that here
+# rather than printing LIVE for a process systemd cannot restart.
+if ! unit_active; then
+  err "the unit exited immediately — something else already owns $URL."
+  err "Find it and stop it, then re-run this installer:"
+  err "  ss -tlnp | grep ${PORT}          # or: cat $HERE/.web.pid"
+  err "  journalctl --user -u $SERVICE -e"
+  exit 1
+fi
+
 if wait_live 40; then
   ok "install complete."
   report_live

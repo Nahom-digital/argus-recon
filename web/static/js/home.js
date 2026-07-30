@@ -27,7 +27,7 @@ function fmtUptime(sec) {
 async function loadStatus() {
   const bar = document.getElementById('statusbar');
   try {
-    const s = await getJSON('/api/status');
+    const s = await getJSON(withBase('/api/status'));
     DEEP_AVAILABLE = !!s.deep_available;
     TOR = s.tor || { available: false };
     reflectDeep();
@@ -123,7 +123,7 @@ function scanRow(s) {
   const metric = (n, l, accent) =>
     `<div class="metric ${accent ? 'accent' : ''}"><div class="n">${fmtNum(n)}</div><div class="l">${l}</div></div>`;
   return `<div class="scan-row-wrap">
-    <a class="scan-row" href="/scan/${encodeURIComponent(s.scan_id)}">
+    <a class="scan-row" href="${withBase('/scan/' + encodeURIComponent(s.scan_id))}">
       <div class="id">
         <div class="dom">${icon('world')}<span class="truncate">${esc(s.domain)}</span></div>
         <div class="meta">${meta.map(m => `<span>${m}</span>`).join('')}</div>
@@ -143,7 +143,7 @@ function scanRow(s) {
 async function loadScans() {
   const wrap = document.getElementById('scanList');
   try {
-    const scans = await getJSON('/api/scans');
+    const scans = await getJSON(withBase('/api/scans'));
     if (!scans.length) {
       wrap.innerHTML = `<div class="panel"><div class="empty">
         ${icon('radar-2')}<h4>No scans yet</h4>
@@ -166,7 +166,7 @@ async function deleteScan(id, btn) {
   if (wrap.classList.contains('confirm')) {
     btn.innerHTML = '<span class="spin"></span>';
     try {
-      const r = await fetch(`/api/scan/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const r = await fetch(withBase(`/api/scan/${encodeURIComponent(id)}`), { method: 'DELETE' });
       if (!r.ok) throw new Error(await r.text());
       wrap.classList.add('removing');
       setTimeout(loadScans, 200);
@@ -224,7 +224,7 @@ async function saveKey() {
   const btn = document.getElementById('keySave');
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span> saving';
   try {
-    const r = await fetch('/api/config/key', {
+    const r = await fetch(withBase('/api/config/key'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key }),
     });
@@ -264,7 +264,7 @@ function jobOpts(j) {
 async function loadJobs() {
   const wrap = document.getElementById('jobsWrap');
   let jobs = [];
-  try { jobs = await getJSON('/api/jobs'); } catch (e) { return; }
+  try { jobs = await getJSON(withBase('/api/jobs')); } catch (e) { return; }
   const active = jobs.filter(j => JOB_ACTIVE.includes(j.status));
   const recent = jobs.filter(j => !JOB_ACTIVE.includes(j.status)).slice(0, 3);
   const show = [...active, ...recent];
@@ -315,14 +315,14 @@ async function stopJob(id, btn) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span> stopping';
   try {
-    await fetch(`/api/jobs/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+    await fetch(withBase(`/api/jobs/${encodeURIComponent(id)}/stop`), { method: 'POST' });
   } catch (e) { /* the poll below reports the real state */ }
   loadJobs();
 }
 
 async function refreshLog(id) {
   try {
-    const d = await getJSON(`/api/jobs/${id}/log`);
+    const d = await getJSON(withBase(`/api/jobs/${id}/log`));
     const box = document.getElementById('log-' + id);
     if (box) { box.textContent = d.log || '(waiting for output…)'; box.scrollTop = box.scrollHeight; }
   } catch (e) {}
@@ -444,7 +444,7 @@ function wireNewScan() {
     if (opts.tor && !TOR.available) return formError(null, torReason());
     btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…';
     try {
-      const r = await fetch('/api/scan', {
+      const r = await fetch(withBase('/api/scan'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ domain, ...opts }),
       });

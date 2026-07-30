@@ -13,7 +13,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
   {% block head %}{% endblock %}
 </head>
-<body>
+<body data-base="{{ request.script_root }}">
   {{ sprite }}
   <header class="topbar">
     <a class="brand" href="{{ url_for('index') }}">

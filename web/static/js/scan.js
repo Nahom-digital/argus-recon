@@ -21,8 +21,8 @@ async function init() {
   wireSections();
   try {
     const [scan, graph] = await Promise.all([
-      getJSON(`/api/scan/${encodeURIComponent(id)}`),
-      getJSON(`/api/scan/${encodeURIComponent(id)}/graph`).catch(() => null),
+      getJSON(withBase(`/api/scan/${encodeURIComponent(id)}`)),
+      getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/graph`)).catch(() => null),
     ]);
     SCAN = scan;
     buildIpIndex(scan);

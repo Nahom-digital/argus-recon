@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from flask import (Flask, jsonify, render_template, send_from_directory,
                    request, abort)
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from modules import config
 from modules import graph_loader
@@ -42,6 +43,14 @@ from modules.util import resolve_tool
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config["JSON_SORT_KEYS"] = False
+
+# A reverse proxy may mount the dashboard under a path prefix and strip it before
+# forwarding (nginx: `location /scanner/ { proxy_pass http://127.0.0.1:7666/; }`,
+# handing the prefix back as X-Forwarded-Prefix). ProxyFix promotes that header to
+# SCRIPT_NAME so url_for() and request.script_root rebuild external URLs with the
+# prefix instead of emitting root-absolute paths that escape the mount point.
+# One hop is trusted: the port is bound to loopback, so only the proxy reaches it.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Inline the icon sprite once so <use href="#i-name"> resolves in templates and
 # in JS-generated markup alike (no external fetch, no cross-file quirks).
