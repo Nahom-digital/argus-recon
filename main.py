@@ -45,10 +45,16 @@ from modules.util import (get_logger, registrable_root, registrable_domain,
                           is_subdomain_of, set_single_host)
 from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
                      classifier, graph_loader, securitytrails, tor, probe,
-                     deepcrawl)
+                     deepcrawl, portscan)
 
 log = get_logger("main")
 
+SRC_PORTSCAN = config.SOURCE_CODES["portscan"]
+
+# The stages a scan runs by default and can switch off from the dashboard. The
+# port scan is deliberately NOT here: it is opt-in (a toggle, like Tor and deep
+# DNS), because it touches the target's infrastructure directly rather than its
+# web surface — see --portscan.
 ALL_MODULES = ["subdomain", "fingerprint", "crawl", "bruteforce",
                "ip_enrich", "classify", "graph"]
 
@@ -116,6 +122,7 @@ def run_pipeline(args) -> ScanResult:
     print(BANNER.format(ver="1.0.0", target=domain), file=sys.stderr)
     log.info(f"modules: {', '.join(m for m in ALL_MODULES if m in run)}"
              + ("  · deep DNS" if deep else "")
+             + ("  · port scan" if args.portscan else "")
              + ("  · single target" if args.single else "")
              + ("  · over Tor" if tor.active() else ""))
     if args.single:
@@ -139,6 +146,16 @@ def run_pipeline(args) -> ScanResult:
     if ("fingerprint" in run or "crawl" in run) and not args.no_probe:
         probe.run(result, timeout=args.tool_timeout)
 
+    # 2a. Port / service scan (opt-in). Placed after the IPs are known but before
+    #     the crawl so a web service found on a non-standard port (an admin panel
+    #     on :8443, a staging app on :8080) becomes a crawl seed and gets the same
+    #     body/form/secret treatment as the rest of the surface.
+    port_seeds: list[str] = []
+    if args.portscan:
+        got = portscan.run(result, timeout=args.portscan_timeout)
+        if isinstance(got, list):
+            port_seeds = got
+
     # 3. Fingerprint
     if "fingerprint" in run:
         fingerprint.run(result, timeout=args.tool_timeout)
@@ -147,14 +164,19 @@ def run_pipeline(args) -> ScanResult:
     #      pre-pass discovers routes/endpoints the static crawler cannot see and
     #      seeds it with them; the crawler then does the body/form/secret work.
     if "crawl" in run:
-        seeds: list[str] = []
+        seeds: list[str] = list(port_seeds)
         if not args.no_deepcrawl:
             roots = probe.live_roots(result) or _fallback_roots(result)
             got = deepcrawl.run(result, roots=roots, timeout=args.tool_timeout)
             if got:
-                seeds = got
+                seeds += got
         crawler.run(result, max_pages=args.max_pages, max_depth=args.max_depth,
                     threads=args.threads, extra_seeds=seeds)
+    elif args.portscan and port_seeds:
+        # crawl disabled but a scan still turned up web ports — record them as
+        # confirmed endpoints so they are not silently dropped.
+        for seed in port_seeds:
+            result.add_endpoint(seed, etype="page", source=SRC_PORTSCAN, in_scope=True)
 
     # 6. Bruteforce
     if "bruteforce" in run:
@@ -195,6 +217,11 @@ def print_summary(result: ScanResult, path) -> None:
     rows = [
         ("Subdomains", s["subdomains"]),
         ("Unique IPs", s["ips"]),
+    ]
+    if s.get("scanned_ips"):
+        rows.append(("Open ports", f"{s.get('open_ports', 0)} across "
+                                   f"{s['scanned_ips']} scanned IPs"))
+    rows += [
         ("DNS records", s.get("dns_records", 0)),
         ("Historical DNS records", s.get("dns_history", 0)),
         ("Endpoints (in-scope)", s["in_scope_endpoints"]),
@@ -243,6 +270,11 @@ def main(argv=None):
     p.add_argument("--tor", action="store_true",
                    help="route the whole scan through Tor; aborts if a circuit "
                         "cannot be established (never falls back to a direct scan)")
+    p.add_argument("--portscan", action="store_true",
+                   help="scan every discovered IP for open ports and services "
+                        "(off by default: touches infrastructure directly, slow, loud)")
+    p.add_argument("--portscan-timeout", type=int, default=config.PORTSCAN_TIMEOUT,
+                   help="max seconds per address in the port scan")
     p.add_argument("--no-prompt", action="store_true",
                    help=argparse.SUPPRESS)   # accepted for compatibility; never prompts
     p.add_argument("--no-bbot", action="store_true",

@@ -5,6 +5,7 @@
 
 let DEEP_AVAILABLE = false;
 let TOR = { available: false };
+let PORTSCAN_AVAILABLE = false;
 const STAGES = [
   ['subdomain', 'subdomains'], ['fingerprint', 'fingerprint'], ['crawl', 'crawl'],
   ['bruteforce', 'bruteforce'], ['ip_enrich', 'IP enrich'], ['classify', 'classify'],
@@ -30,8 +31,10 @@ async function loadStatus() {
     const s = await getJSON(withBase('/api/status'));
     DEEP_AVAILABLE = !!s.deep_available;
     TOR = s.tor || { available: false };
+    PORTSCAN_AVAILABLE = !!s.portscan_available;
     reflectDeep();
     reflectTor();
+    reflectPortscan();
     applyDefaults(s.defaults || {});
 
     // Service state first: the dashboard is the product now, so whether it is
@@ -106,6 +109,26 @@ function reflectTor() {
   chk.classList.toggle('locked', !TOR.available);
   chk.title = torReason();
   if (!TOR.available && box) box.checked = false;
+}
+
+/* Port scan, like Tor, is a machine capability: it needs the scan engine
+   installed. Lock the toggle when the server reports it missing, and never let a
+   passive run (which sends nothing to the target) also ask for an active scan. */
+function reflectPortscan() {
+  const chk = document.getElementById('portscanChk');
+  const box = document.getElementById('optPortscan');
+  const passive = document.getElementById('optPassive');
+  if (!chk) return;
+  const passiveOn = passive && passive.checked;
+  const locked = !PORTSCAN_AVAILABLE || passiveOn;
+  chk.classList.toggle('locked', locked);
+  chk.title = !PORTSCAN_AVAILABLE
+    ? 'Port-scan engine is not installed — run ./install.sh to add it'
+    : passiveOn
+      ? 'Port scan is an active probe — turn off “passive” to use it'
+      : 'Scan every discovered IP for open ports & services (slow, and it touches the target directly)';
+  if (locked && box) box.checked = false;
+  if (box) box.disabled = locked;
 }
 
 function scanRow(s) {
@@ -252,6 +275,7 @@ function jobOpts(j) {
   const label = Object.fromEntries(STAGES);
   const tags = [];
   if (o.tor) tags.push('via Tor');
+  if (o.portscan) tags.push('port scan');
   if (o.single) tags.push('single host');
   if (o.passive) tags.push('passive');
   if (o.deep) tags.push('deep DNS');
@@ -382,6 +406,7 @@ function scanOptions() {
     passive: document.getElementById('optPassive').checked,
     deep: document.getElementById('optDeep').checked,
     tor: document.getElementById('optTor').checked,
+    portscan: document.getElementById('optPortscan').checked,
     single: scope === 'single',
     exact_scope: scope === 'exact',
     no_bbot: document.getElementById('optNoBbot').checked,
@@ -415,6 +440,14 @@ function wireOptions() {
   if (torChk) torChk.addEventListener('click', e => {
     if (!TOR.available) { e.preventDefault(); formError(null, torReason()); }
   });
+  // port scan: locked while unavailable or while passive is on; keep the two in sync
+  const portscanChk = document.getElementById('portscanChk');
+  if (portscanChk) portscanChk.addEventListener('click', e => {
+    const box = document.getElementById('optPortscan');
+    if (box && box.disabled) { e.preventDefault(); formError(null, portscanChk.title); }
+  });
+  const passiveBox = document.getElementById('optPassive');
+  if (passiveBox) passiveBox.addEventListener('change', reflectPortscan);
   const btn = document.getElementById('optsToggle');
   const panel = document.getElementById('scanOpts');
   if (!btn || !panel) return;

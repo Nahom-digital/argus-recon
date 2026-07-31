@@ -6,6 +6,6 @@ scans/*.json
 scans/.jobs/
 # runtime cache / job-queue store and the embedded graph DB (derived from scans)
 scans/.argus.db*
-scans/.kuzu/
+scans/.kuzu*
 !scans/.gitkeep
 .env

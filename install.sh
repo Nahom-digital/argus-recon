@@ -24,7 +24,41 @@ SERVICE="argus-recon"
 LEGACY_SERVICES=(argusscanner)          # earlier releases used this unit name
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT="$UNIT_DIR/$SERVICE.service"
-PORT="${ARGUS_WEB_PORT:-7666}"
+ENV_FILE="$HERE/.env"
+
+# --------------------------------------------------------------------------- #
+# The dashboard port is remembered across runs. Precedence: an explicit
+# ARGUS_WEB_PORT in the environment wins; otherwise the value last saved to .env
+# (by `--p PORT`); otherwise the built-in default. So once someone runs
+# `./install.sh --p 8080`, every later ./install.sh / ./argus / serve agrees on
+# 8080 without needing the variable re-exported each time.
+# --------------------------------------------------------------------------- #
+env_file_value() {                      # env_file_value KEY -> prints saved value
+  [ -f "$ENV_FILE" ] || return 0
+  # last matching line, with surrounding quotes / whitespace stripped
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1 | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//'
+}
+
+# --p / --port PORT is pulled out of the argument list before anything else so it
+# can front any action (`--p 9000`, `--p 9000 --force`, `--p 9000 --restart`).
+NEW_PORT=""
+_args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --p|--port)
+      NEW_PORT="${2:-}"
+      [ -n "$NEW_PORT" ] || { printf 'argus: --p needs a port number, e.g. ./install.sh --p 8080\n' >&2; exit 1; }
+      shift 2 ;;
+    --p=*|--port=*) NEW_PORT="${1#*=}"; shift ;;
+    *) _args+=("$1"); shift ;;
+  esac
+done
+if [ "${#_args[@]}" -gt 0 ]; then set -- "${_args[@]}"; else set --; fi
+
+DOCTOR_REPAIR=0                         # --check sets this to 1 (repair the store)
+
+PORT="${ARGUS_WEB_PORT:-$(env_file_value ARGUS_WEB_PORT)}"
+PORT="${PORT:-7666}"
 HOST="${ARGUS_WEB_HOST:-127.0.0.1}"
 URL="http://$HOST:$PORT"
 
@@ -37,6 +71,42 @@ say()  { printf '\033[1;36m[argus]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[argus]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[argus]\033[0m %s\n' "$*" >&2; }
 ok()   { printf '\033[1;32m[argus]\033[0m %s\n' "$*"; }
+
+# Upsert a single KEY=value line in .env, preserving the rest (mirrors
+# config.save_env_key so the file the dashboard reads stays the source of truth).
+env_file_set() {
+  local key="$1" val="$2" tmp
+  touch "$ENV_FILE"
+  tmp="$(mktemp)"
+  local found=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) printf '%s=%s\n' "$key" "$val" >> "$tmp"; found=1 ;;
+      *)        printf '%s\n' "$line" >> "$tmp" ;;
+    esac
+  done < "$ENV_FILE"
+  [ "$found" = 1 ] || printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+# --p PORT: validate, persist, and force a reconfigure so the change actually
+# lands (write the unit with the new port + restart, not "already live, skip").
+PORT_CHANGED=0
+if [ -n "$NEW_PORT" ]; then
+  if ! [[ "$NEW_PORT" =~ ^[0-9]+$ ]] || [ "$NEW_PORT" -lt 1 ] || [ "$NEW_PORT" -gt 65535 ]; then
+    err "invalid port '$NEW_PORT' — use a number between 1 and 65535"
+    exit 1
+  fi
+  if [ "$NEW_PORT" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then
+    warn "port $NEW_PORT is privileged (<1024); a --user service usually cannot bind it."
+    warn "  pick a port ≥1024 unless you know this user may bind low ports."
+  fi
+  PORT="$NEW_PORT"
+  URL="http://$HOST:$PORT"
+  env_file_set ARGUS_WEB_PORT "$PORT"
+  PORT_CHANGED=1
+  say "dashboard port set to $PORT (saved to .env)"
+fi
 
 # --------------------------------------------------------------------------- #
 # `systemctl --user` finds the per-user manager through XDG_RUNTIME_DIR. Shells
@@ -327,16 +397,222 @@ install_python_env() {
   say "python environment ready ✔  ($ARGUS_PY)"
 }
 
+# --------------------------------------------------------------------------- #
+# --check : doctor. Forces every dependency check and prints a readiness report,
+# the way a "system ready?" health check would. It is read-only with one
+# deliberate repair — a stale or corrupt SQLite store (the cache the dashboard
+# reads a finished scan out of) is migrated or rebuilt in place, because a broken
+# store is one of the things that makes a completed scan open to an empty panel
+# and empty graph.
+# --------------------------------------------------------------------------- #
+D_PASS=0; D_WARN=0; D_FAIL=0
+dcheck() {                              # dcheck pass|warn|fail "label" "detail"
+  case "$1" in
+    pass) D_PASS=$((D_PASS+1)); printf '  \033[1;32m✔\033[0m  %-24s %s\n' "$2" "${3:-}" ;;
+    warn) D_WARN=$((D_WARN+1)); printf '  \033[1;33m!\033[0m  %-24s %s\n' "$2" "${3:-}" ;;
+    fail) D_FAIL=$((D_FAIL+1)); printf '  \033[1;31m✘\033[0m  %-24s %s\n' "$2" "${3:-}" ;;
+  esac
+}
+dsection() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# App-level checks (external tools, graph backend, SQLite store) run through the
+# project's own Python so the doctor reports exactly what the running dashboard
+# would see — validated Go binaries included. Emits "status|label|detail" lines.
+doctor_python() {
+  local py="$HERE/.venv/bin/python"
+  [ -x "$py" ] || py="$(command -v python3 || true)"
+  [ -n "$py" ] || return 1
+  ARGUS_STORE_REPAIR="${1:-0}" "$py" - "$HERE" <<'PY'
+import os, sys, importlib
+root = sys.argv[1]
+sys.path.insert(0, root)
+
+def emit(status, label, detail=""):
+    print(f"{status}|{label}|{detail}")
+
+try:
+    from modules import config
+    from modules.util import resolve_tool, resolve_recon_tool
+except Exception as exc:
+    emit("fail", "load config", f"cannot import project modules: {exc}")
+    sys.exit(0)
+
+# Python requirements the pipeline imports at runtime.
+for mod, label in [("flask","flask"),("httpx","httpx"),("bs4","beautifulsoup4"),
+                   ("lxml","lxml"),("dns","dnspython"),("tldextract","tldextract"),
+                   ("jsbeautifier","jsbeautifier"),("requests","requests"),
+                   ("socks","PySocks")]:
+    try:
+        importlib.import_module(mod)
+        emit("pass", f"py: {label}")
+    except Exception:
+        emit("fail", f"py: {label}", "missing — pip install -r requirements.txt")
+
+# External recon tools. Validated where the app validates them.
+def tool(label, name):
+    p = resolve_tool(name)
+    emit("pass" if p else "warn", f"tool: {label}", p or "not found (a stage falls back)")
+
+tool("fingerprint (whatweb)", config.WHATWEB_BIN)
+if resolve_tool(config.FFUF_BIN) or resolve_tool(config.FEROX_BIN):
+    emit("pass", "tool: content brute", resolve_tool(config.FFUF_BIN) or resolve_tool(config.FEROX_BIN))
+else:
+    emit("warn", "tool: content brute", "ffuf/feroxbuster not found")
+tool("passive enum (bbot)", config.BBOT_BIN)
+tool("tor", config.TOR_BIN)
+tool("torsocks", config.TORSOCKS_BIN)
+
+# Port-scan engine — the toggle is locked without it.
+ps = resolve_tool(config.PORTSCAN_BIN)
+emit("pass" if ps else "warn", "tool: port scan", ps or "not found — port-scan toggle stays locked")
+
+# Go speed tools: validated (an unrelated httpx on PATH must not count).
+for label, name in [("http probe","httpx"),("deep crawl","katana"),
+                    ("passive names","subfinder"),("bulk DNS","dnsx")]:
+    aliases = config.TOOL_ALIASES.get(name)
+    p = resolve_recon_tool(getattr(config, name.upper()+"_BIN", name), aliases)
+    emit("pass" if p else "warn", f"speed: {label}", p or "not validated — Python fallback")
+
+# Graph backend.
+try:
+    import kuzu  # noqa
+    emit("pass", "graph: kuzu", "embedded backend importable")
+except Exception:
+    emit("warn", "graph: kuzu", "not installed — graph renders from JSON")
+
+# SQLite store: integrity + schema migration, with an opt-in rebuild if corrupt.
+import sqlite3
+db = config.STORE_DB
+repair = os.environ.get("ARGUS_STORE_REPAIR") == "1"
+try:
+    if db.exists():
+        conn = sqlite3.connect(str(db), timeout=5)
+        integ = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        conn.close()
+        if integ != "ok":
+            if repair:
+                for suf in ("", "-wal", "-shm"):
+                    try: os.remove(str(db)+suf)
+                    except OSError: pass
+                emit("warn", "store: sqlite", f"was corrupt ({integ}) — rebuilt (derived cache)")
+            else:
+                emit("fail", "store: sqlite", f"corrupt: {integ} — re-run with --check to rebuild")
+        else:
+            emit("pass", "store: integrity", "ok")
+    else:
+        emit("pass", "store: sqlite", "no cache yet (built on first scan)")
+except Exception as exc:
+    emit("warn", "store: sqlite", f"unreadable: {exc}")
+
+# Trigger the store's own connect (runs the schema migration incl. the `panel`
+# column an older DB predates) and confirm the columns the dashboard needs.
+try:
+    from modules import store
+    conn = store._connect()
+    if conn is not None:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(scans)")}
+        need = {"summary", "panel"}
+        missing = need - cols
+        if missing:
+            emit("fail", "store: schema", f"missing columns {sorted(missing)}")
+        else:
+            emit("pass", "store: schema", "summary + panel cache present")
+    else:
+        emit("pass", "store: schema", "store disabled (ARGUS_STORE=0)")
+except Exception as exc:
+    emit("warn", "store: schema", f"{exc}")
+PY
+}
+
+doctor() {
+  echo
+  printf '\033[1m  Argus Recon — system doctor\033[0m\n'
+  echo   "  checkout: $HERE"
+
+  dsection "Base system"
+  command -v python3 >/dev/null && dcheck pass "python3" "$(python3 -V 2>&1)" || dcheck fail "python3" "not installed"
+  python3 -c 'import venv' 2>/dev/null && dcheck pass "python venv module" || dcheck fail "python venv module" "install python3-venv"
+  python3 -m pip --version >/dev/null 2>&1 && dcheck pass "pip" || dcheck warn "pip" "install python3-pip"
+  command -v curl >/dev/null && dcheck pass "curl" || dcheck warn "curl" "install curl"
+  command -v git  >/dev/null && dcheck pass "git"  || dcheck warn "git" "install git"
+  command -v systemctl >/dev/null && dcheck pass "systemd" || dcheck fail "systemd" "required to run as a service"
+  command -v go >/dev/null 2>&1 && dcheck pass "go toolchain" "$(go version 2>/dev/null | awk '{print $3}')" \
+    || dcheck warn "go toolchain" "absent — speed tools use the Python fallback"
+
+  dsection "Python virtualenv"
+  if [ -x "$HERE/.venv/bin/python" ]; then
+    dcheck pass "venv" "$HERE/.venv"
+  else
+    dcheck fail "venv" "not created — run ./install.sh"
+  fi
+
+  dsection "Dependencies, tools & storage"
+  local out
+  if out="$(doctor_python "$DOCTOR_REPAIR" 2>/dev/null)"; then
+    while IFS='|' read -r st label detail; do
+      [ -n "$st" ] && dcheck "$st" "$label" "$detail"
+    done <<< "$out"
+  else
+    dcheck fail "app checks" "could not run project Python checks"
+  fi
+
+  dsection "Service"
+  if unit_exists; then
+    dcheck pass "unit installed" "$UNIT"
+    unit_active && dcheck pass "unit active" "pid $(svc_pid)" || dcheck fail "unit active" "not running — systemctl --user start $SERVICE"
+    if systemctl --user is-enabled --quiet "$SERVICE.service" 2>/dev/null; then
+      dcheck pass "unit enabled" "starts on login/boot"
+    else
+      dcheck warn "unit enabled" "not enabled — systemctl --user enable $SERVICE"
+    fi
+    if loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null | grep -qi yes; then
+      dcheck pass "linger" "survives logout"
+    else
+      dcheck warn "linger" "off — service stops at logout (loginctl enable-linger $(id -un))"
+    fi
+  else
+    dcheck warn "unit installed" "not installed — run ./install.sh"
+  fi
+
+  dsection "Network"
+  dcheck pass "configured port" "$PORT ($URL)"
+  if http_live; then
+    dcheck pass "dashboard" "answering at $URL"
+  elif unit_active; then
+    dcheck warn "dashboard" "unit up but $URL not answering yet (may be installing deps)"
+  else
+    dcheck warn "dashboard" "not answering (service not running)"
+  fi
+
+  echo
+  local total=$((D_PASS + D_WARN + D_FAIL))
+  printf '  \033[1mResult:\033[0m %d checks · \033[1;32m%d ok\033[0m · \033[1;33m%d warn\033[0m · \033[1;31m%d fail\033[0m\n' \
+    "$total" "$D_PASS" "$D_WARN" "$D_FAIL"
+  if [ "$D_FAIL" -eq 0 ] && [ "$D_WARN" -eq 0 ]; then
+    ok "system is ready."
+  elif [ "$D_FAIL" -eq 0 ]; then
+    say "system is functional; warnings are optional capabilities (a missing tool just disables one stage)."
+  else
+    err "system is NOT ready — resolve the ✘ items above (usually: ./install.sh, or ./install.sh --force)."
+  fi
+  echo
+  [ "$D_FAIL" -eq 0 ]
+}
+
 usage() {
   cat <<EOF
 Argus Recon — installer and service manager
 
   ./install.sh              install everything, register the service, start it
+  ./install.sh --p PORT     change the dashboard port (persists + restarts)
+  ./install.sh --check      doctor: force every dependency check, report readiness
   ./install.sh --upgrade    pull the latest from GitHub + restart the service
   ./install.sh --status     is it live?
   ./install.sh --restart    bounce the service
   ./install.sh --force      reinstall dependencies + unit, then restart
   ./install.sh --uninstall  stop and remove the service
+
+--p PORT may front any action:  ./install.sh --p 8080 --force
 
 Service : systemctl --user {status|restart|stop|start} $SERVICE
 Logs    : journalctl --user -u $SERVICE -f
@@ -346,10 +622,48 @@ EOF
 }
 
 # --------------------------------------------------------------------------- #
+# --p PORT reconfigure. A port change must rewrite the unit on the new port and
+# bring the service up on it — not hit the "already live, nothing to do" path.
+# If the service is not installed yet, fall through to a normal install (which
+# now uses the new PORT).
+# --------------------------------------------------------------------------- #
+if [ "$PORT_CHANGED" = 1 ]; then
+  case "${1:-}" in
+    --uninstall|--help|-h|--check) : ;;   # let these run as themselves
+    *)
+      if command -v systemctl >/dev/null && unit_exists; then
+        migrate_legacy
+        write_unit
+        systemctl --user enable "$SERVICE.service" >/dev/null 2>&1 || true
+        say "restarting $SERVICE on port $PORT …"
+        systemctl --user restart "$SERVICE.service"
+        if wait_live 40; then
+          ok "dashboard now on port $PORT."
+          report_live
+        else
+          err "restarted, but $URL is not answering — journalctl --user -u $SERVICE -e"
+          exit 1
+        fi
+        exit 0
+      fi
+      say "service not installed yet — installing it on port $PORT …"
+      # fall through to the full install below, which uses $PORT
+      ;;
+  esac
+fi
+
+# --------------------------------------------------------------------------- #
 # --help / --status / --uninstall / --restart : quick paths
 # --------------------------------------------------------------------------- #
 case "${1:-}" in
   --help|-h) usage ;;
+
+  --check)
+    # A second --check asks the doctor to repair the SQLite store if it is
+    # corrupt (the rebuild is safe — the store is a derived cache).
+    DOCTOR_REPAIR=1
+    doctor; exit $?
+    ;;
 
   --status)
     if unit_active && http_live; then report_live; exit 0; fi

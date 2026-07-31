@@ -7,7 +7,7 @@
    ========================================================================== */
 'use strict';
 
-const NODE_TYPES = ['Domain', 'Subdomain', 'IP', 'ASN', 'Endpoint', 'JS',
+const NODE_TYPES = ['Domain', 'Subdomain', 'IP', 'ASN', 'Port', 'Endpoint', 'JS',
   'Request', 'Field', 'Secret', 'File', 'External'];
 
 /* Per-page detail: these carry the bulk of a scan (thousands of nodes) and are
@@ -496,23 +496,30 @@ function createGraph(canvas, data, opts) {
 
   // ---- legend ----
   // Counts are always the scan's real totals — locked layers still report how
-  // much is there, they just are not drawn until a subdomain is picked.
+  // much is there, they just are not drawn until a subdomain is picked. When a
+  // view budget trimmed a layer the server sends stats.totals alongside what it
+  // actually shipped, so the legend keeps reporting the true size of the surface
+  // and says how much of it is on screen.
+  const TOTALS = (data.stats && data.stats.totals) || null;
   function buildLegend(elm) {
     if (!elm) return;
     legendEl = elm;
     const present = {};
     nodes.forEach(n => present[n.type] = (present[n.type] || 0) + 1);
-    const types = NODE_TYPES.filter(t => present[t]);
+    const total = t => (TOTALS && TOTALS[t] != null ? TOTALS[t] : present[t]);
+    const types = NODE_TYPES.filter(t => present[t] || (TOTALS && TOTALS[t]));
     const anyLocked = types.some(t => DETAIL_TYPES.has(t)) && !detailUnlocked;
     elm.innerHTML = types.map(t => {
       const lock = DETAIL_TYPES.has(t) && !detailUnlocked;
       const off = !lock && hidden.has(t);
-      const tip = lock ? `${present[t]} ${t} nodes — select a subdomain to activate this layer`
-        : `${present[t]} ${t} nodes — click to ${off ? 'show' : 'hide'}`;
+      const partial = total(t) > (present[t] || 0);
+      const tip = lock ? `${total(t)} ${t} nodes — select a subdomain to activate this layer`
+        : partial ? `${total(t)} ${t} nodes in this scan — ${present[t] || 0} drawn (view budget)`
+          : `${total(t)} ${t} nodes — click to ${off ? 'show' : 'hide'}`;
       return `<span class="lg${lock ? ' locked' : ''}${off ? ' off' : ''}" data-t="${t}" title="${tip}">
         ${lock ? `<svg class="ic lk" aria-hidden="true"><use href="#i-lock"></use></svg>`
         : `<span class="sw" style="background:${typeColor(t)}"></span>`}
-        ${t} <span class="n">${present[t]}</span></span>`;
+        ${t} <span class="n">${total(t)}${partial ? '*' : ''}</span></span>`;
     }).join('') + (anyLocked
       ? `<span class="lg-hint" id="lgHint"><svg class="ic" aria-hidden="true"><use href="#i-filter"></use></svg>
           select a subdomain to reveal endpoints, files &amp; fields</span>` : '');

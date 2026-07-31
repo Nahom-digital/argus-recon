@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS scans (
     started_at  TEXT,
     finished_at TEXT,
     summary     TEXT,          -- json: the home-page summary object
+    panel       TEXT,          -- json: the scan doc minus `endpoints`
     updated     REAL
 );
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -93,6 +94,7 @@ def _connect() -> sqlite3.Connection | None:
         with _init_lock:
             if not _initialised:
                 conn.executescript(_SCHEMA)
+                _migrate(conn)
                 conn.commit()
                 _initialised = True
         _local.conn = conn
@@ -101,6 +103,29 @@ def _connect() -> sqlite3.Connection | None:
         log.warning(f"store unavailable ({exc}) — running without the cache/queue")
         _DISABLED = True
         return None
+
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
+# existing table alone, so a database created by an older build keeps the old
+# shape and every query naming a new column fails — which, because every read
+# here is wrapped in `except: return None`, degrades silently into "the cache
+# never hits" rather than into an error anyone would see. Add them explicitly.
+_ADDED_COLUMNS = {"scans": {"panel": "TEXT"}}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, cols in _ADDED_COLUMNS.items():
+        try:
+            have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        except Exception:
+            continue
+        for col, decl in cols.items():
+            if col not in have:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                    log.debug(f"store: added {table}.{col}")
+                except Exception as exc:
+                    log.debug(f"store: could not add {table}.{col}: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -132,6 +157,18 @@ def build_summary(doc: dict, *, scan_id: str, mtime: float, size: int) -> dict:
     }
 
 
+def build_panel(doc: dict) -> dict:
+    """Everything the scan page's left panel and header need — meta, subdomains,
+    infra, dns, files, secrets, js_files — with the endpoint list left out.
+
+    The endpoints are the part that scales with the crawl (tens of thousands of
+    records, hundreds of megabytes); everything else stays small no matter how
+    big the scan gets. Splitting them lets the scan view be answered entirely
+    from SQLite instead of re-parsing the whole JSON document.
+    """
+    return {k: v for k, v in doc.items() if k != "endpoints"}
+
+
 def index_scan(scan_id: str, doc: dict, path: Path) -> None:
     """Populate the cache for one scan document. Called by the engine after save
     and by the server on a cache miss."""
@@ -144,17 +181,19 @@ def index_scan(scan_id: str, doc: dict, path: Path) -> None:
     except OSError:
         mtime, size = time.time(), 0
     summary = build_summary(doc, scan_id=scan_id, mtime=mtime, size=size)
+    panel = json.dumps(build_panel(doc))
     meta = doc.get("meta", {})
     try:
         with conn:
             conn.execute(
-                "INSERT INTO scans(scan_id,domain,mtime,size,started_at,finished_at,summary,updated) "
-                "VALUES(?,?,?,?,?,?,?,?) "
+                "INSERT INTO scans(scan_id,domain,mtime,size,started_at,finished_at,summary,panel,updated) "
+                "VALUES(?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(scan_id) DO UPDATE SET domain=excluded.domain,"
                 "mtime=excluded.mtime,size=excluded.size,started_at=excluded.started_at,"
-                "finished_at=excluded.finished_at,summary=excluded.summary,updated=excluded.updated",
+                "finished_at=excluded.finished_at,summary=excluded.summary,"
+                "panel=excluded.panel,updated=excluded.updated",
                 (scan_id, meta.get("domain"), mtime, size, meta.get("started_at"),
-                 meta.get("finished_at"), json.dumps(summary), time.time()))
+                 meta.get("finished_at"), json.dumps(summary), panel, time.time()))
             conn.execute("DELETE FROM endpoints WHERE scan_id=?", (scan_id,))
             rows = [(scan_id, e.get("id") or "", json.dumps(_light_endpoint(e)))
                     for e in doc.get("endpoints", []) if e.get("id")]
@@ -193,6 +232,29 @@ def light_endpoints(scan_id: str, mtime: float) -> list[dict] | None:
             return None
         cur = conn.execute("SELECT light FROM endpoints WHERE scan_id=?", (scan_id,))
         return [json.loads(r["light"]) for r in cur.fetchall()]
+    except Exception:
+        return None
+
+
+def light_view(scan_id: str, mtime: float) -> dict | None:
+    """The whole scan-page document (panel + table-ready endpoints) from cache,
+    or None if anything about it is missing or stale.
+
+    This is the one that matters for a big scan: a complete hit here means the
+    multi-hundred-megabyte JSON file is never opened to render the page.
+    """
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute("SELECT mtime, panel FROM scans WHERE scan_id=?",
+                           (scan_id,)).fetchone()
+        if not row or abs((row["mtime"] or 0) - mtime) > 1e-6 or not row["panel"]:
+            return None
+        doc = json.loads(row["panel"])
+        cur = conn.execute("SELECT light FROM endpoints WHERE scan_id=?", (scan_id,))
+        doc["endpoints"] = [json.loads(r["light"]) for r in cur.fetchall()]
+        return doc
     except Exception:
         return None
 

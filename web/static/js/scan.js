@@ -25,13 +25,20 @@ async function init() {
   SCAN_ID = id;
   wireSections();
   wireGraphSplitter();
+  showLoading();
+
+  // Both requests go out together, but the page does not wait for both before
+  // drawing anything. The graph is much the slower of the two on a large scan,
+  // and awaiting them as a pair is what left the panel, the table *and* the
+  // graph blank until the slowest one had landed — the whole page looked dead.
+  // Each half now renders the moment its own response arrives, and one failing
+  // no longer blanks the other.
+  const viewP = getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/view`));
+  const graphP = getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/graph`))
+    .then(g => ({ g }), e => ({ e }));       // settled either way; never unhandled
+
   try {
-    // The list view omits response bodies / DOM / headers — those are the bulk
-    // of a large scan and are fetched per endpoint only when a row is expanded.
-    const [scan, graph] = await Promise.all([
-      getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/view`)),
-      getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/graph`)).catch(() => null),
-    ]);
+    const scan = await viewP;
     SCAN = scan;
     buildIpIndex(scan);
     renderPanel(scan);
@@ -40,11 +47,55 @@ async function init() {
     buildIpFilter();
     renderTable();
     wireTableControls();
-    if (graph) initGraph(graph);
   } catch (e) {
-    document.querySelector('.main').innerHTML =
-      `<div class="empty" style="margin:auto">${icon('alert-triangle')}<h4>Could not load scan</h4><p>${esc(e.message)}</p></div>`;
+    failLoading(e);
+    await graphP;                            // consume it; nothing to draw into
+    return;
   }
+
+  const { g, e } = await graphP;
+  clearGraphLoading();
+  if (g) initGraph(g);
+  else failGraph(e);
+}
+
+/* ---- load / error states --------------------------------------------------
+   Without these a slow scan is indistinguishable from a broken one: empty
+   panel, empty table, empty graph, no explanation. */
+function showLoading() {
+  const spin = t => `<div class="loading-mini">${icon('refresh', 'spinning')}<span>${esc(t)}</span></div>`;
+  document.getElementById('ovBody').innerHTML = spin('loading scan…');
+  document.getElementById('subList').innerHTML = spin('loading…');
+  document.getElementById('ipList').innerHTML = spin('loading…');
+  document.getElementById('tBody').innerHTML =
+    `<div class="empty">${icon('refresh', 'spinning')}<h4>Loading requests…</h4>
+     <p>Large scans take a moment to open.</p></div>`;
+  const wrap = document.getElementById('graphWrap');
+  if (wrap && !wrap.querySelector('.graph-loading'))
+    wrap.insertAdjacentHTML('beforeend',
+      `<div class="graph-loading"><div class="empty" style="margin:auto">${icon('refresh', 'spinning')}
+        <h4>Building graph…</h4></div></div>`);
+}
+
+function clearGraphLoading() {
+  document.querySelectorAll('.graph-loading').forEach(el => el.remove());
+}
+
+function failLoading(err) {
+  clearGraphLoading();
+  document.querySelector('.main').innerHTML =
+    `<div class="empty" style="margin:auto">${icon('alert-triangle')}<h4>Could not load scan</h4>
+     <p>${esc(err && err.message ? err.message : String(err))}</p></div>`;
+  ['ovBody', 'subList', 'ipList', 'dnsBody', 'techList', 'secretList', 'fileList']
+    .forEach(elId => { const el = document.getElementById(elId); if (el) el.innerHTML = emptyMini('unavailable'); });
+}
+
+function failGraph(err) {
+  const wrap = document.getElementById('graphWrap');
+  if (!wrap) return;
+  wrap.insertAdjacentHTML('beforeend',
+    `<div class="graph-empty"><div class="empty" style="margin:auto">${icon('alert-triangle')}
+      <h4>Graph unavailable</h4><p>${esc(err && err.message ? err.message : 'The graph could not be built for this scan.')}</p></div></div>`);
 }
 
 function buildIpIndex(s) {
@@ -153,6 +204,54 @@ function ipCard(ip) {
     <div class="ipmeta">${meta.map(x => `<span>${x}</span>`).join('<span class="faint">·</span>')}
       <span class="faint">·</span><span>${hosts.length} host${hosts.length === 1 ? '' : 's'}</span></div>
     ${hostList}
+    ${portsBlock(ip)}
+  </div>`;
+}
+
+/* Open ports on one address — the port-scan layer inside Infrastructure. Each
+   port is expandable: the summary is port/service/version, the detail is the
+   default-script output the scan captured. OS + traceroute, when present, sit
+   above the port list. */
+function portsBlock(ip) {
+  const ports = ip.ports || [];
+  const os = ip.os;
+  const trace = ip.traceroute || [];
+  if (!ports.length && !os && !trace.length) {
+    return ip.scanned
+      ? `<div class="ip-ports empty"><span class="faint">${icon('shield-check')} no open ports found</span></div>`
+      : '';
+  }
+  const osLine = os && os.name
+    ? `<div class="ip-os" title="OS guess${os.accuracy ? ' · ' + os.accuracy + '% match' : ''}">${icon('device-desktop')}
+        <span>${esc(os.name)}</span>${os.accuracy ? `<span class="faint">${os.accuracy}%</span>` : ''}</div>` : '';
+  const rows = ports.map(portRow).join('');
+  const traceLine = trace.length
+    ? `<div class="ip-trace"><span class="faint">${icon('route')} ${trace.length} hop${trace.length === 1 ? '' : 's'} to host</span></div>` : '';
+  const head = `<div class="ip-ports-h">${icon('plug-connected')} ${ports.length} open port${ports.length === 1 ? '' : 's'}</div>`;
+  return `<div class="ip-ports">${osLine}${ports.length ? head + rows : ''}${traceLine}</div>`;
+}
+
+function portRow(p) {
+  const svc = p.service || '—';
+  const ver = [p.product, p.version].filter(Boolean).join(' ');
+  const web = /https?/.test(svc) || p.tunnel === 'ssl';
+  const scripts = Object.entries(p.scripts || {});
+  const hasDetail = ver || p.extrainfo || scripts.length || p.cpe && p.cpe.length;
+  const badge = `<span class="port-num mono">${p.port}<span class="faint">/${esc(p.protocol || 'tcp')}</span></span>`;
+  const detail = hasDetail ? `<div class="port-detail">
+      ${ver ? `<div class="kv"><span class="k">version</span><span class="v mono">${esc(ver)}</span></div>` : ''}
+      ${p.extrainfo ? `<div class="kv"><span class="k">info</span><span class="v">${esc(p.extrainfo)}</span></div>` : ''}
+      ${(p.cpe || []).length ? `<div class="kv"><span class="k">cpe</span><span class="v mono">${p.cpe.map(esc).join('<br>')}</span></div>` : ''}
+      ${scripts.map(([name, out]) => `<div class="port-script"><span class="ps-name mono">${esc(name)}</span><pre class="ps-out">${esc(out)}</pre></div>`).join('')}
+    </div>` : '';
+  return `<div class="prow${hasDetail ? ' has-detail' : ''}" ${web ? 'data-web="1"' : ''}>
+    <button class="psummary"${hasDetail ? '' : ' tabindex="-1"'}>
+      ${badge}
+      <span class="port-svc">${esc(svc)}${web ? ` <span class="port-web" title="web service — crawled">${icon('world')}</span>` : ''}</span>
+      ${ver ? `<span class="port-ver mono faint">${esc(ver)}</span>` : ''}
+      ${hasDetail ? `<svg class="ic pchev"><use href="#i-chevron-down"></use></svg>` : ''}
+    </button>
+    ${detail}
   </div>`;
 }
 
@@ -316,6 +415,9 @@ function wirePanelInteractions() {
   document.querySelectorAll('.frow').forEach(r => {
     r.querySelector('.fsummary').addEventListener('click', () => toggleFile(r));
   });
+  // port rows: expand to reveal version / CPE / script output
+  document.querySelectorAll('.prow.has-detail .psummary').forEach(btn =>
+    btn.addEventListener('click', () => btn.closest('.prow').classList.toggle('open')));
 }
 function toggleFile(row) {
   const open = row.classList.toggle('open');
@@ -966,9 +1068,19 @@ let CY_STYLE = 'fcose';
 
 function initGraph(graph) {
   GRAPH_DATA = graph;
-  const n = graph.stats.nodes;
-  document.getElementById('graphSource').textContent =
-    (graph.source === 'neo4j' ? 'neo4j' : graph.source === 'kuzu' ? 'kuzu' : 'json') + ` · ${n} nodes`;
+  const st = graph.stats || {};
+  const n = st.nodes;
+  const total = st.total_nodes || n;
+  // Say plainly when the view is a bounded slice of a bigger graph, rather than
+  // quietly reporting the slice as if it were the whole scan.
+  const badge = document.getElementById('graphSource');
+  badge.textContent =
+    (graph.source === 'neo4j' ? 'neo4j' : graph.source === 'kuzu' ? 'kuzu' : 'json')
+    + (st.truncated ? ` · ${fmtNum(n)} of ${fmtNum(total)} nodes` : ` · ${fmtNum(n)} nodes`);
+  if (st.truncated)
+    badge.title = `This scan's graph has ${fmtNum(total)} nodes. `
+      + `${fmtNum(n)} are drawn — the structure in full, plus as much per-page `
+      + `detail as the view budget allows. Add ?limit=N to the URL to raise it.`;
   wireGraphEngineControls();
   if (!graph.nodes.length) {
     document.getElementById('graphWrap').insertAdjacentHTML('beforeend',

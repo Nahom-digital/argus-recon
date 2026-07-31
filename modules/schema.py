@@ -111,11 +111,57 @@ class ScanResult:
                 "provider": None, "type": None, "datacenter": None,
                 "whois": {}, "ip_history": [],
                 "enriched": False,
+                # port scan (module 7a) — open services on this address
+                "ports": [],        # [{port, protocol, state, service, ...}]
+                "os": None,         # best OS guess {name, accuracy, family}
+                "traceroute": [],   # [{hop, ip, rtt, host}]
+                "scanned": False,   # this address went through the port scan
             }
             self._ips[ip] = rec
         if source and source not in rec["sources"]:
             rec["sources"].append(source)
         return rec
+
+    # ------------------------------------------------------------------ #
+    # Ports / services (module 7a)
+    # ------------------------------------------------------------------ #
+    def add_port(self, ip: str, port: int, *, protocol: str = "tcp",
+                 state: str = "open", service: str | None = None,
+                 product: str | None = None, version: str | None = None,
+                 extrainfo: str | None = None, tunnel: str | None = None,
+                 cpe: list[str] | None = None, scripts: dict | None = None,
+                 reason: str | None = None, source: str = "p") -> dict:
+        """Record one open port on an address. Keyed by (port, protocol) so a
+        re-scan merges into the same record instead of duplicating it."""
+        rec = self.add_ip(ip, source=source)
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return {}
+        for existing in rec["ports"]:
+            if existing["port"] == port and existing["protocol"] == protocol:
+                entry = existing
+                break
+        else:
+            entry = {"port": port, "protocol": protocol, "state": state,
+                     "service": None, "product": None, "version": None,
+                     "extrainfo": None, "tunnel": None, "cpe": [],
+                     "scripts": {}, "reason": None}
+            rec["ports"].append(entry)
+            rec["ports"].sort(key=lambda p: (p["protocol"], p["port"]))
+        for key, val in (("state", state), ("service", service),
+                         ("product", product), ("version", version),
+                         ("extrainfo", extrainfo), ("tunnel", tunnel),
+                         ("reason", reason)):
+            if val and not entry.get(key):
+                entry[key] = val
+        for c in cpe or []:
+            if c and c not in entry["cpe"]:
+                entry["cpe"].append(c)
+        for name, out in (scripts or {}).items():
+            if name and out and name not in entry["scripts"]:
+                entry["scripts"][name] = out
+        return entry
 
     # ------------------------------------------------------------------ #
     # Endpoints / requests
@@ -297,9 +343,12 @@ class ScanResult:
         eps = list(self._endpoints.values())
         dns_records = sum(len(v) for v in self.dns.get("records", {}).values())
         dns_history = sum(len(v) for v in self.dns.get("history", {}).values())
+        open_ports = sum(len(r.get("ports") or []) for r in self._ips.values())
         return {
             "subdomains": len(self._subdomains),
             "ips": len(self._ips),
+            "open_ports": open_ports,
+            "scanned_ips": sum(1 for r in self._ips.values() if r.get("scanned")),
             "endpoints": len(eps),
             "in_scope_endpoints": sum(1 for e in eps if e["in_scope"]),
             "out_of_scope_endpoints": sum(1 for e in eps if not e["in_scope"]),

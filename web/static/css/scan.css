@@ -130,6 +130,15 @@
 .node-card .nc-close{position:absolute;top:10px;right:10px}
 .graph-empty{position:absolute;inset:0;display:flex}
 
+/* ---- load states ---------------------------------------------------------- */
+/* The panel and the graph resolve independently, so each says so on its own
+   rather than leaving a blank pane that reads as a broken page. */
+.graph-loading{position:absolute;inset:0;display:flex;background:var(--surface)}
+.ic.spinning{animation:spin .9s linear infinite}
+.loading-mini{display:flex;align-items:center;gap:7px;padding:9px 10px;
+  color:var(--muted);font-size:var(--fs-xs)}
+.loading-mini svg{width:13px;height:13px;color:var(--faint)}
+
 /* ---- requests table ------------------------------------------------------- */
 .table-wrap{flex:1;min-height:0;display:flex;flex-direction:column;background:var(--surface)}
 .tbar{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap}
@@ -228,6 +237,40 @@
 .frow .fchev{width:14px;height:14px;color:var(--faint);transition:transform .18s var(--ease)}
 .frow.open .fchev{transform:rotate(180deg)}
 .frow .fmeta{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:0 9px 8px;font-family:var(--mono);font-size:10.5px}
+
+/* ---- open ports (port-scan layer inside an IP card) ----------------------- */
+.ip-ports{margin-top:9px;border-top:1px dashed var(--border);padding-top:8px;display:flex;flex-direction:column;gap:4px}
+.ip-ports.empty{border-top:1px dashed var(--border);font-size:11px}
+.ip-ports.empty .faint{display:inline-flex;align-items:center;gap:5px}
+.ip-ports.empty svg{width:13px;height:13px;color:var(--ok)}
+.ip-ports-h{display:flex;align-items:center;gap:6px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;
+  color:var(--faint);font-weight:600;margin-bottom:1px}
+.ip-ports-h svg{width:13px;height:13px}
+.ip-os{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-2);margin-bottom:4px}
+.ip-os svg{width:13px;height:13px;color:var(--muted)}
+.ip-trace{font-size:11px;margin-top:3px}
+.ip-trace .faint{display:inline-flex;align-items:center;gap:5px}
+.ip-trace svg{width:13px;height:13px}
+.prow{border:1px solid var(--border);border-radius:var(--r-xs);background:var(--bg);overflow:hidden}
+.prow .psummary{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;background:none;border:none;
+  text-align:left;cursor:default;color:var(--ink)}
+.prow.has-detail .psummary{cursor:pointer}
+.prow.has-detail .psummary:hover{background:var(--hover)}
+.prow .port-num{font-size:12px;font-weight:600;color:var(--n-port);min-width:52px}
+.prow .port-svc{flex:none;font-size:11.5px;color:var(--ink);display:inline-flex;align-items:center;gap:4px}
+.prow .port-web svg{width:12px;height:12px;color:var(--accent)}
+.prow .port-ver{flex:1;min-width:0;font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.prow .pchev{width:13px;height:13px;color:var(--faint);flex:none;transition:transform .18s var(--ease)}
+.prow.open .pchev{transform:rotate(180deg)}
+.prow .port-detail{display:none}
+.prow.open .port-detail{display:flex;flex-direction:column;gap:7px;border-top:1px solid var(--border);
+  background:var(--surface-2);padding:8px 9px}
+.prow .port-detail .kv{display:flex;gap:8px;font-size:11px}
+.prow .port-detail .kv .k{color:var(--muted);min-width:52px;flex:none}
+.prow .port-detail .kv .v{color:var(--ink-2);word-break:break-word}
+.port-script .ps-name{display:block;font-size:10px;color:var(--accent-ink);margin-bottom:2px}
+.port-script .ps-out{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);white-space:pre-wrap;
+  word-break:break-word;margin:0;max-height:180px;overflow:auto;background:var(--bg);padding:6px 7px;border-radius:var(--r-xs)}
 .frow .fdetail{display:none}
 .frow.open .fdetail{display:block;border-top:1px solid var(--border);background:var(--surface-2);padding:10px 9px}
 .fdet{display:flex;flex-direction:column;gap:11px}

@@ -11,6 +11,23 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
+def _int_env(name: str, default: int) -> int:
+    """int() an environment value, but treat empty or non-numeric as unset.
+
+    A bare `ARGUS_WEB_PORT=` in .env or a systemd unit (or an exported-but-empty
+    variable) used to make `int("")` raise at import time — which takes the whole
+    app, and every `import config`, down with it. Tolerate it instead.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
@@ -80,6 +97,7 @@ FFUF_BIN = os.environ.get("ARGUS_FFUF", "ffuf")
 FEROX_BIN = os.environ.get("ARGUS_FEROX", "feroxbuster")
 TOR_BIN = os.environ.get("ARGUS_TOR", "tor")
 TORSOCKS_BIN = os.environ.get("ARGUS_TORSOCKS", "torsocks")
+PORTSCAN_BIN = os.environ.get("ARGUS_PORTSCAN", "nmap")
 
 # --------------------------------------------------------------------------- #
 # Go recon binaries. These run the wide, fan-out heavy passes (name enum, mass
@@ -105,29 +123,52 @@ TOOL_ALIASES = {
     "dnsx": ["dnsx-pd"],
 }
 
+# --------------------------------------------------------------------------- #
+# Port scan (module 7a, source code "p")
+#
+# Off by default: it is the one stage that touches the target's infrastructure
+# rather than its web surface, it is slow, and it is loud. The dashboard exposes
+# it as an explicit toggle next to "Via Tor" for exactly that reason.
+#
+# The aggressive profile is the point of the feature — service/version detection,
+# OS inference, the default script set and a traceroute — so PORTSCAN_ARGS is not
+# something to trim without also changing what the Infrastructure panel can show.
+# --------------------------------------------------------------------------- #
+PORTSCAN_ARGS = [a for a in os.environ.get("ARGUS_PORTSCAN_ARGS", "-T4 -A").split() if a]
+# Per-target ceiling. An -A scan of one address is minutes, not seconds, and a
+# scope with 40 addresses must not turn a scan into an overnight job.
+PORTSCAN_TIMEOUT = _int_env("ARGUS_PORTSCAN_TIMEOUT", 600)
+# Addresses scanned in one run, most-connected first. 0 = no limit.
+PORTSCAN_MAX_TARGETS = _int_env("ARGUS_PORTSCAN_MAX_TARGETS", 25)
+# How many addresses are scanned at once.
+PORTSCAN_PARALLEL = _int_env("ARGUS_PORTSCAN_PARALLEL", 3)
+# Open HTTP(S) ports found off the standard 80/443 are handed to the crawler as
+# extra seeds — an admin panel on :8443 is exactly what this stage is for.
+PORTSCAN_SEED_CRAWL = os.environ.get("ARGUS_PORTSCAN_SEED_CRAWL", "1") != "0"
+
 # --- mass HTTP probe (httpx) ------------------------------------------------ #
-PROBE_THREADS = int(os.environ.get("ARGUS_PROBE_THREADS", "150"))
-PROBE_RATE = int(os.environ.get("ARGUS_PROBE_RATE", "300"))       # requests/sec cap
-PROBE_TIMEOUT = int(os.environ.get("ARGUS_PROBE_TIMEOUT", "8"))   # per request
-PROBE_RETRIES = int(os.environ.get("ARGUS_PROBE_RETRIES", "1"))
-PROBE_MAXTIME = int(os.environ.get("ARGUS_PROBE_MAXTIME", "600")) # whole batch
+PROBE_THREADS = _int_env("ARGUS_PROBE_THREADS", 150)
+PROBE_RATE = _int_env("ARGUS_PROBE_RATE", 300)       # requests/sec cap
+PROBE_TIMEOUT = _int_env("ARGUS_PROBE_TIMEOUT", 8)   # per request
+PROBE_RETRIES = _int_env("ARGUS_PROBE_RETRIES", 1)
+PROBE_MAXTIME = _int_env("ARGUS_PROBE_MAXTIME", 600) # whole batch
 
 # --- deep crawl (katana) --------------------------------------------------- #
-KATANA_DEPTH = int(os.environ.get("ARGUS_KATANA_DEPTH", "3"))
-KATANA_CONCURRENCY = int(os.environ.get("ARGUS_KATANA_CONCURRENCY", "20"))
-KATANA_PARALLEL = int(os.environ.get("ARGUS_KATANA_PARALLEL", "10"))  # hosts at once
-KATANA_RATE = int(os.environ.get("ARGUS_KATANA_RATE", "150"))
-KATANA_TIMEOUT = int(os.environ.get("ARGUS_KATANA_TIMEOUT", "900"))  # whole run
+KATANA_DEPTH = _int_env("ARGUS_KATANA_DEPTH", 3)
+KATANA_CONCURRENCY = _int_env("ARGUS_KATANA_CONCURRENCY", 20)
+KATANA_PARALLEL = _int_env("ARGUS_KATANA_PARALLEL", 10)  # hosts at once
+KATANA_RATE = _int_env("ARGUS_KATANA_RATE", 150)
+KATANA_TIMEOUT = _int_env("ARGUS_KATANA_TIMEOUT", 900)  # whole run
 # Headless rendering finds routes a static fetch never sees (SPA routers, lazy
 # chunks) but needs a Chromium and far more RAM, so it is opt-in.
 KATANA_HEADLESS = os.environ.get("ARGUS_KATANA_HEADLESS", "0") == "1"
 
 # --- bulk resolver (dnsx) -------------------------------------------------- #
-DNSX_THREADS = int(os.environ.get("ARGUS_DNSX_THREADS", "200"))
-DNSX_TIMEOUT = int(os.environ.get("ARGUS_DNSX_TIMEOUT", "300"))
+DNSX_THREADS = _int_env("ARGUS_DNSX_THREADS", 200)
+DNSX_TIMEOUT = _int_env("ARGUS_DNSX_TIMEOUT", 300)
 
 # --- passive name enum (subfinder) ----------------------------------------- #
-SUBFINDER_TIMEOUT = int(os.environ.get("ARGUS_SUBFINDER_TIMEOUT", "180"))
+SUBFINDER_TIMEOUT = _int_env("ARGUS_SUBFINDER_TIMEOUT", 180)
 # -all queries every configured source (slower, wider). Off by default so the
 # quick first pass stays quick; BBOT is the deep sweep behind it.
 SUBFINDER_ALL = os.environ.get("ARGUS_SUBFINDER_ALL", "0") == "1"
@@ -139,23 +180,23 @@ USER_AGENT = os.environ.get(
     "ARGUS_UA",
     "Mozilla/5.0 (X11; Linux x86_64) ArgusRecon/1.0 (+https://localhost)",
 )
-HTTP_TIMEOUT = int(os.environ.get("ARGUS_HTTP_TIMEOUT", "12"))
-CRAWL_THREADS = int(os.environ.get("ARGUS_CRAWL_THREADS", "12"))
-CRAWL_MAX_PAGES = int(os.environ.get("ARGUS_CRAWL_MAX_PAGES", "600"))   # per subdomain safety cap
-CRAWL_MAX_DEPTH = int(os.environ.get("ARGUS_CRAWL_MAX_DEPTH", "6"))
+HTTP_TIMEOUT = _int_env("ARGUS_HTTP_TIMEOUT", 12)
+CRAWL_THREADS = _int_env("ARGUS_CRAWL_THREADS", 12)
+CRAWL_MAX_PAGES = _int_env("ARGUS_CRAWL_MAX_PAGES", 600)   # per subdomain safety cap
+CRAWL_MAX_DEPTH = _int_env("ARGUS_CRAWL_MAX_DEPTH", 6)
 
 # The crawler's HTTP layer is asyncio (modules.asynchttp, an httpx.AsyncClient
 # behind a semaphore) rather than one thread per request, so concurrency is
 # bounded by these numbers instead of by the thread pool. CRAWL_THREADS stays as
 # the fallback pool size for the synchronous path and as the default fan-out for
 # other modules.
-CRAWL_CONCURRENCY = int(os.environ.get("ARGUS_CRAWL_CONCURRENCY", "80"))   # in-flight requests
-CRAWL_HOST_CONCURRENCY = int(os.environ.get("ARGUS_CRAWL_HOST_CONCURRENCY", "12"))  # per host
+CRAWL_CONCURRENCY = _int_env("ARGUS_CRAWL_CONCURRENCY", 80)   # in-flight requests
+CRAWL_HOST_CONCURRENCY = _int_env("ARGUS_CRAWL_HOST_CONCURRENCY", 12)  # per host
 # Parsing is CPU work; bodies above this size are handed to a worker thread so a
 # single huge bundle cannot stall the event loop.
-PARSE_OFFLOAD_BYTES = int(os.environ.get("ARGUS_PARSE_OFFLOAD_BYTES", "60000"))
-MAX_JS_BYTES = int(os.environ.get("ARGUS_MAX_JS_BYTES", "3000000"))     # skip huge bundles above this
-MAX_BODY_STORE = int(os.environ.get("ARGUS_MAX_BODY_STORE", "20000"))   # chars of response body kept in JSON
+PARSE_OFFLOAD_BYTES = _int_env("ARGUS_PARSE_OFFLOAD_BYTES", 60000)
+MAX_JS_BYTES = _int_env("ARGUS_MAX_JS_BYTES", 3000000)     # skip huge bundles above this
+MAX_BODY_STORE = _int_env("ARGUS_MAX_BODY_STORE", 20000)   # chars of response body kept in JSON
 
 VERIFY_TLS = os.environ.get("ARGUS_VERIFY_TLS", "0") == "1"             # recon targets often have bad certs
 
@@ -166,8 +207,8 @@ VERIFY_TLS = os.environ.get("ARGUS_VERIFY_TLS", "0") == "1"             # recon 
 # so the flags live in one place instead of being threaded through call sites.
 # --------------------------------------------------------------------------- #
 TOR_SOCKS_HOST = os.environ.get("ARGUS_TOR_HOST", "127.0.0.1")
-TOR_SOCKS_PORT = int(os.environ.get("ARGUS_TOR_PORT", "9050"))
-TOR_BOOTSTRAP_TIMEOUT = int(os.environ.get("ARGUS_TOR_BOOTSTRAP", "180"))
+TOR_SOCKS_PORT = _int_env("ARGUS_TOR_PORT", 9050)
+TOR_BOOTSTRAP_TIMEOUT = _int_env("ARGUS_TOR_BOOTSTRAP", 180)
 TOR_ACTIVE = False          # the scan is running over Tor
 HTTP_PROXY: str | None = None   # e.g. "socks5h://127.0.0.1:9050"
 # DNS-over-HTTPS resolvers used instead of UDP DNS while Tor is active (a UDP
@@ -213,6 +254,7 @@ SOURCE_CODES = {
     "httpx": "h",           # mass HTTP probe
     "katana": "k",          # JS-aware deep crawl engine
     "dnsx": "r",            # bulk resolver
+    "portscan": "p",        # port / service scan
 }
 # Human labels for the dashboard legend (still no real tool names).
 SOURCE_LABELS = {
@@ -226,6 +268,7 @@ SOURCE_LABELS = {
     "h": "http probe",
     "k": "deep crawl",
     "r": "bulk DNS",
+    "p": "port scan",
     "crawler": "crawler",
     "js": "JS analysis",
     "robots": "robots.txt",
@@ -238,7 +281,7 @@ SOURCE_LABELS = {
 
 # Graph: above this node count the dashboard defers physics until the user
 # activates it (module 6 in the fix list).
-GRAPH_LAZY_THRESHOLD = int(os.environ.get("ARGUS_GRAPH_LAZY", "500"))
+GRAPH_LAZY_THRESHOLD = _int_env("ARGUS_GRAPH_LAZY", 500)
 
 # --------------------------------------------------------------------------- #
 # Graph storage
@@ -263,6 +306,23 @@ NEO4J_DATABASE = os.environ.get("NEO4J_DATABASE", "neo4j")
 KUZU_DIR = Path(os.environ.get("ARGUS_KUZU_DIR", str(ROOT / "scans" / ".kuzu")))
 
 # --------------------------------------------------------------------------- #
+# Graph *view* budget
+#
+# The backend stores every node of a scan; the browser must not be handed every
+# node of a scan. A 46k-endpoint scan expands to ~67k nodes / ~218k edges, which
+# is a 30 MB response the tab then has to turn into 67k objects, 218k edges and a
+# 67k-entry adjacency map before it can paint a single pixel — the page just sits
+# there empty. These caps bound what the dashboard is served; the response still
+# reports the true totals (stats.totals) so the legend shows the real size of the
+# surface, and ?limit= raises the cap for anyone who wants the whole thing.
+# --------------------------------------------------------------------------- #
+GRAPH_VIEW_NODES = _int_env("ARGUS_GRAPH_VIEW_NODES", 6000)
+GRAPH_VIEW_EDGES = _int_env("ARGUS_GRAPH_VIEW_EDGES", 14000)
+# Hard ceiling for an explicit ?limit= — past this the browser stalls no matter
+# what the caller asked for.
+GRAPH_VIEW_MAX = _int_env("ARGUS_GRAPH_VIEW_MAX", 40000)
+
+# --------------------------------------------------------------------------- #
 # SQLite job/cache store (modules.store)
 #
 # Sits in front of the graph backend and the JSON files: stage checkpoints, the
@@ -278,17 +338,17 @@ STORE_ENABLED = os.environ.get("ARGUS_STORE", "1") != "0"
 # Web dashboard
 # --------------------------------------------------------------------------- #
 WEB_HOST = os.environ.get("ARGUS_WEB_HOST", "127.0.0.1")
-WEB_PORT = int(os.environ.get("ARGUS_WEB_PORT", "7666"))
+WEB_PORT = _int_env("ARGUS_WEB_PORT", 7666)
 
 # --------------------------------------------------------------------------- #
 # Bruteforce
 # --------------------------------------------------------------------------- #
 # Standard extension set the spec calls for, always appended to the generated list.
 BRUTE_EXTENSIONS = ["xml", "json", "conf", "bak", "env", "sql", "yml"]
-BRUTE_THREADS = int(os.environ.get("ARGUS_BRUTE_THREADS", "40"))
+BRUTE_THREADS = _int_env("ARGUS_BRUTE_THREADS", 40)
 # Requests per second. Unbounded fan-out gets a scanner rate-limited (429s and
 # tarpits that look like hits), which costs more time than it saves.
-BRUTE_RATE = int(os.environ.get("ARGUS_BRUTE_RATE", "180"))
+BRUTE_RATE = _int_env("ARGUS_BRUTE_RATE", 180)
 
 # Matching strategy: take *every* status code and subtract the noise instead of
 # listing the codes we like. A soft-404 answers 200, so a status allow-list keeps
@@ -303,7 +363,7 @@ BRUTE_STATUS_MATCH = os.environ.get("ARGUS_BRUTE_STATUS", "200,204,301,302,307,4
 # and merged with anything set here (comma list, ffuf -fs syntax).
 BRUTE_FILTER_SIZES = os.environ.get("ARGUS_BRUTE_FS", "").strip()
 # How many random paths are requested to learn a host's catch-all size/body.
-BRUTE_CALIBRATE_PROBES = int(os.environ.get("ARGUS_BRUTE_CALIBRATE", "3"))
+BRUTE_CALIBRATE_PROBES = _int_env("ARGUS_BRUTE_CALIBRATE", 3)
 
 # A compact, stack-agnostic base list. Stack-specific paths are added at runtime
 # by bruteforce.generate_wordlist() based on the fingerprint.

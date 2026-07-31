@@ -35,20 +35,42 @@ from .util import get_logger, short_hash, host_of
 log = get_logger("graph")
 
 # Node type -> display colour hint (consumed by the dashboard legend).
-NODE_TYPES = ["Domain", "Subdomain", "IP", "ASN", "Endpoint", "JS",
+NODE_TYPES = ["Domain", "Subdomain", "IP", "ASN", "Port", "Endpoint", "JS",
               "Request", "Field", "Secret", "File", "External"]
+
+# The layers the graph opens on, and the ones a view budget must never trim:
+# they are few, they are the structure, and everything else hangs off them. The
+# rest (Endpoint/Request/Field/JS/File/External) is per-page detail the client
+# keeps hidden until a single host is selected anyway.
+SPINE_TYPES = frozenset(["Domain", "Subdomain", "IP", "ASN", "Port", "Secret"])
 
 
 def _ep_node_id(method: str, url: str) -> str:
     return "ep:" + short_hash(method, url)
 
 
-def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
-    """Build {nodes, edges, stats} from a scan dict."""
+def graph_from_scan(data: dict, *, max_nodes: int = 4000,
+                    max_edges: int | None = None) -> dict:
+    """Build {nodes, edges, stats} from a scan dict.
+
+    `max_nodes` is a real budget, not a hint. The structural spine (domain,
+    subdomains, IPs, ASNs) and the secrets are always kept — they are few and
+    they are the point of the view — and what is left of the budget is spent on
+    endpoints in priority order, then on discovered files. Whatever did not fit
+    is still counted, so `stats.totals` reports the true size of the scan even
+    when `stats.by_type` describes the subset that was built.
+    """
     domain = data["meta"]["domain"]
     nodes: dict[str, dict] = {}
     edges: list[dict] = []
     seen_edges: set[tuple] = set()
+    # true node counts (everything the scan holds, budget or no budget)
+    totals: dict[str, int] = {}
+    truncated = False
+    max_edges = max_edges if max_edges is not None else max_nodes * 4
+
+    def count(ntype: str, n: int = 1):
+        totals[ntype] = totals.get(ntype, 0) + n
 
     def node(nid: str, ntype: str, label: str, **props):
         if nid not in nodes:
@@ -56,8 +78,12 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
         return nid
 
     def edge(src: str, dst: str, rel: str):
+        nonlocal truncated
         key = (src, dst, rel)
         if key in seen_edges or src not in nodes or dst not in nodes:
+            return
+        if len(edges) >= max_edges:
+            truncated = True
             return
         seen_edges.add(key)
         edges.append({"source": src, "target": dst, "type": rel})
@@ -82,10 +108,33 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
     for ip in data.get("infra", {}).get("ips", []):
         iid = node(f"ip:{ip['ip']}", "IP", ip["ip"],
                    asn=ip.get("asn"), org=ip.get("org"), country=ip.get("country"),
-                   type=ip.get("type"), datacenter=ip.get("datacenter"))
+                   type=ip.get("type"), datacenter=ip.get("datacenter"),
+                   os=(ip.get("os") or {}).get("name"),
+                   open_ports=len(ip.get("ports") or []) or None)
+        # The IP node may have been created bare when a subdomain resolved to it,
+        # before its enrichment/port data existed. Fold that detail onto the node
+        # now so the IP node-card and the legend see asn/org/os/open-ports.
+        enrich = {"asn": ip.get("asn"), "org": ip.get("org"),
+                  "country": ip.get("country"), "type": ip.get("type"),
+                  "datacenter": ip.get("datacenter"),
+                  "os": (ip.get("os") or {}).get("name"),
+                  "open_ports": len(ip.get("ports") or []) or None}
+        nodes[iid]["props"].update({k: v for k, v in enrich.items() if v is not None})
         if ip.get("asn"):
             aid = node(f"asn:{ip['asn']}", "ASN", ip["asn"], org=ip.get("org"))
             edge(iid, aid, "ANNOUNCED_BY")
+        # open ports hang off the address that answered on them
+        for prt in ip.get("ports", []):
+            svc = prt.get("service") or "?"
+            ver = " ".join(x for x in (prt.get("product"), prt.get("version")) if x)
+            label = f"{prt['port']}/{prt.get('protocol', 'tcp')}"
+            count("Port")
+            pid = node(f"port:{ip['ip']}:{prt.get('protocol', 'tcp')}:{prt['port']}",
+                       "Port", label, port=prt["port"],
+                       protocol=prt.get("protocol"), service=svc,
+                       version=ver or None, state=prt.get("state"),
+                       tunnel=prt.get("tunnel"))
+            edge(iid, pid, "HAS_PORT")
 
     def ensure_sub(host: str) -> str | None:
         if not host:
@@ -120,8 +169,27 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
             p -= 2
         return -p
 
+    def ep_node_type(ep) -> str:
+        if not ep["in_scope"]:
+            return "External"
+        if ep["type"] in ("form", "xhr", "fetch"):
+            return "Request"
+        if ep["type"] == "js":
+            return "JS"
+        return "Endpoint"
+
+    # Keep room for the small, high-value layers built after the endpoints, so a
+    # 46k-page crawl cannot starve secrets and files out of the view entirely.
+    reserve = min(len(data.get("secrets", [])), 400) + min(len(data.get("files", [])), 800)
+    ep_ceiling = max(0, max_nodes - reserve)
+
     for ep in sorted(endpoints, key=priority):
-        if len(nodes) >= max_nodes and ep["type"] in ("link", "page") and not ep["fields"]:
+        # Counted whether or not it fits: stats.totals must describe the scan,
+        # not the subset that was rendered.
+        count(ep_node_type(ep))
+        count("Field", sum(1 for f in ep.get("fields", []) if f.get("name")))
+        if len(nodes) >= ep_ceiling:
+            truncated = True
             continue
         nid = _ep_node_id(ep["method"], ep["url"])
         srcs = ", ".join(ep.get("sources", []))
@@ -166,6 +234,10 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
 
     # ---- secrets (linked to the JS/page that exposed them) -------------- #
     for sec in data.get("secrets", []):
+        count("Secret")
+        if len(nodes) >= max_nodes:
+            truncated = True
+            continue
         sid_node = node("secret:" + short_hash(sec["type"], sec["match"], sec["source"]),
                         "Secret", sec["type"], severity=sec.get("severity"),
                         match=sec.get("match"),
@@ -181,6 +253,10 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
 
     # ---- files ---------------------------------------------------------- #
     for f in data.get("files", []):
+        count("File")
+        if len(nodes) >= max_nodes:
+            truncated = True
+            continue
         fid = node("file:" + short_hash(f["url"]), "File", f["url"],
                    kind=f.get("kind"), subtype=f.get("subtype"), status=f.get("status"),
                    sources=", ".join(f.get("sources", [])))
@@ -191,9 +267,16 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000) -> dict:
     counts: dict[str, int] = {}
     for n in nodes.values():
         counts[n["type"]] = counts.get(n["type"], 0) + 1
+    # Types that are never truncated (the spine) have no separate tally; their
+    # built count *is* their total.
+    for t, c in counts.items():
+        if totals.get(t, 0) < c:
+            totals[t] = c
 
     return {"nodes": list(nodes.values()), "edges": edges,
-            "stats": {"nodes": len(nodes), "edges": len(edges), "by_type": counts}}
+            "stats": {"nodes": len(nodes), "edges": len(edges), "by_type": counts,
+                      "totals": totals, "truncated": truncated,
+                      "total_nodes": sum(totals.values())}}
 
 
 # --------------------------------------------------------------------------- #
@@ -296,13 +379,16 @@ def delete_scan(scan_id: str, **conn) -> bool:
     return ok
 
 
-def fetch_graph(scan_id: str, backend: str | None = None, **conn) -> dict | None:
-    """Read a scan's graph back out of the active backend. None if unavailable."""
+def fetch_graph(scan_id: str, backend: str | None = None, *,
+                max_nodes: int | None = None, max_edges: int | None = None,
+                **conn) -> dict | None:
+    """Read a scan's graph back out of the active backend, bounded by the view
+    budget. None if unavailable."""
     b = backend or active_backend()
     if b == "neo4j":
-        return _neo4j_fetch(scan_id, **conn)
+        return _neo4j_fetch(scan_id, max_nodes=max_nodes, max_edges=max_edges, **conn)
     if b == "kuzu":
-        return _kuzu_fetch(scan_id)
+        return _kuzu_fetch(scan_id, max_nodes=max_nodes, max_edges=max_edges)
     return None
 
 
@@ -387,7 +473,12 @@ def _neo4j_delete(scan_id: str, **conn) -> bool:
         return False
 
 
-def _neo4j_fetch(scan_id: str, **conn) -> dict | None:
+def _neo4j_fetch(scan_id: str, *, max_nodes: int | None = None,
+                 max_edges: int | None = None, **conn) -> dict | None:
+    """Same view budget as the kuzu path — see _kuzu_fetch."""
+    max_nodes = max_nodes or config.GRAPH_VIEW_NODES
+    max_edges = max_edges or config.GRAPH_VIEW_EDGES
+    detail_ceiling = max(0, max_nodes - min(1000, max_nodes // 4))
     try:
         drv = _driver(conn.get("uri"), conn.get("user"), conn.get("password"))
         drv.verify_connectivity()
@@ -395,6 +486,9 @@ def _neo4j_fetch(scan_id: str, **conn) -> dict | None:
         return None
     nodes: dict[str, dict] = {}
     edges: list[dict] = []
+    totals: dict[str, int] = {}
+    detail_kept = 0
+    truncated = False
     try:
         with drv.session(database=config.NEO4J_DATABASE) as sess:
             for rec in sess.run(
@@ -402,8 +496,15 @@ def _neo4j_fetch(scan_id: str, **conn) -> dict | None:
                     sid=scan_id):
                 n = rec["n"]
                 labels = [l for l in rec["labels"] if l != "ArgusNode"]
+                ntype = labels[0] if labels else "Node"
+                totals[ntype] = totals.get(ntype, 0) + 1
+                if ntype not in SPINE_TYPES:
+                    if detail_kept >= detail_ceiling:
+                        truncated = True
+                        continue
+                    detail_kept += 1
                 nodes[n["id"]] = {
-                    "id": n["id"], "type": labels[0] if labels else "Node",
+                    "id": n["id"], "type": ntype,
                     "label": n.get("name", n["id"]),
                     "props": {k: v for k, v in dict(n).items()
                               if k not in ("id", "scan_id", "domain")},
@@ -411,14 +512,24 @@ def _neo4j_fetch(scan_id: str, **conn) -> dict | None:
             for rec in sess.run(
                     "MATCH (a:ArgusNode {scan_id:$sid})-[r]->(b:ArgusNode {scan_id:$sid}) "
                     "RETURN a.id AS s, b.id AS t, type(r) AS rel", sid=scan_id):
-                edges.append({"source": rec["s"], "target": rec["t"], "type": rec["rel"]})
+                if len(edges) >= max_edges:
+                    truncated = True
+                    break
+                if rec["s"] in nodes and rec["t"] in nodes:
+                    edges.append({"source": rec["s"], "target": rec["t"], "type": rec["rel"]})
         drv.close()
     except Exception:
         return None
     if not nodes:
         return None
+    by_type: dict[str, int] = {}
+    for n in nodes.values():
+        by_type[n["type"]] = by_type.get(n["type"], 0) + 1
     return {"nodes": list(nodes.values()), "edges": edges,
-            "stats": {"nodes": len(nodes), "edges": len(edges)}, "source": "neo4j"}
+            "stats": {"nodes": len(nodes), "edges": len(edges), "by_type": by_type,
+                      "totals": totals, "truncated": truncated,
+                      "total_nodes": sum(totals.values())},
+            "source": "neo4j"}
 
 
 # --------------------------------------------------------------------------- #
@@ -514,34 +625,73 @@ def _kuzu_delete(scan_id: str) -> bool:
         return False
 
 
-def _kuzu_fetch(scan_id: str) -> dict | None:
+def _kuzu_fetch(scan_id: str, *, max_nodes: int | None = None,
+                max_edges: int | None = None) -> dict | None:
+    """Read a scan's graph back, bounded by the view budget.
+
+    The database holds every node of a scan — for a 46k-endpoint crawl that is
+    ~67k nodes and ~218k edges, a 30 MB response no browser can lay out. So the
+    spine (SPINE_TYPES: what the graph opens on) always comes back whole and the
+    detail layers fill whatever budget is left. `stats.totals` still reports the
+    real per-type counts, so the legend shows the true size of the surface.
+
+    One pass over the result set, parsing the props blob only for the nodes that
+    are actually kept — decoding 67k JSON strings to throw most of them away is
+    itself most of the cost this is avoiding.
+    """
+    max_nodes = max_nodes or config.GRAPH_VIEW_NODES
+    max_edges = max_edges or config.GRAPH_VIEW_EDGES
+    # Room held back so a huge detail layer can never crowd out the spine.
+    detail_ceiling = max(0, max_nodes - min(1000, max_nodes // 4))
     try:
         with _KUZU_LOCK:
             conn = _kuzu_conn()
             nodes: dict[str, dict] = {}
+            totals: dict[str, int] = {}
+            detail_kept = 0
+            truncated = False
             res = conn.execute(
                 "MATCH (n:ArgusNode {scan_id:$sid}) "
                 "RETURN n.id, n.ntype, n.label, n.props", {"sid": scan_id})
             while res.has_next():
                 nid, ntype, label, props = res.get_next()
+                ntype = ntype or "Node"
+                totals[ntype] = totals.get(ntype, 0) + 1
+                if ntype not in SPINE_TYPES:
+                    if detail_kept >= detail_ceiling:
+                        truncated = True
+                        continue
+                    detail_kept += 1
                 try:
                     p = _json.loads(props) if props else {}
                 except Exception:
                     p = {}
                 p.pop("name", None)
-                nodes[nid] = {"id": nid, "type": ntype or "Node",
+                nodes[nid] = {"id": nid, "type": ntype,
                               "label": label or nid, "props": p}
             edges: list[dict] = []
             res = conn.execute(
                 "MATCH (a:ArgusNode {scan_id:$sid})-[r:REL]->(b:ArgusNode {scan_id:$sid}) "
                 "RETURN a.id, b.id, r.rtype", {"sid": scan_id})
             while res.has_next():
+                if len(edges) >= max_edges:
+                    truncated = True
+                    break
                 s, t, rel = res.get_next()
-                edges.append({"source": s, "target": t, "type": rel})
+                # an edge to a node that did not fit the budget has nothing to
+                # attach to on the client — drop it rather than ship a dangling one
+                if s in nodes and t in nodes:
+                    edges.append({"source": s, "target": t, "type": rel})
     except Exception as exc:
         log.debug(f"kuzu fetch failed: {exc}")
         return None
     if not nodes:
         return None
+    by_type: dict[str, int] = {}
+    for n in nodes.values():
+        by_type[n["type"]] = by_type.get(n["type"], 0) + 1
     return {"nodes": list(nodes.values()), "edges": edges,
-            "stats": {"nodes": len(nodes), "edges": len(edges)}, "source": "kuzu"}
+            "stats": {"nodes": len(nodes), "edges": len(edges), "by_type": by_type,
+                      "totals": totals, "truncated": truncated,
+                      "total_nodes": sum(totals.values())},
+            "source": "kuzu"}

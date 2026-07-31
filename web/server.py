@@ -40,6 +40,7 @@ from modules import config
 from modules import graph_loader
 from modules import store
 from modules import tor
+from modules import portscan
 from modules.util import resolve_tool
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -159,23 +160,26 @@ def _light_scan(d: dict) -> dict:
 
 
 def _light_view(scan_id: str) -> dict:
-    """Light document for the scan page. The endpoint list — the heavy part — is
-    served from the SQLite index when it is fresh, so a huge scan opens without
-    parsing the whole JSON. Panel data (subdomains, infra, dns, files, secrets)
-    is small and still comes from the parsed doc."""
+    """Light document for the scan page, served whole from the SQLite index when
+    it is fresh — panel data *and* the endpoint list.
+
+    Serving only the endpoints from the store was pointless: the panel came from
+    `_load()`, which was called unconditionally, so every view of a 141 MB scan
+    still parsed 141 MB of JSON (~20 s and a gigabyte of interpreter heap) before
+    it could answer. The store now holds the panel document too, so a hit here
+    never opens the file at all."""
     path = config.SCANS_DIR / f"{scan_id}.json"
     try:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = 0
-    cached = store.light_endpoints(scan_id, mtime) if mtime else None
+    if mtime:
+        cached = store.light_view(scan_id, mtime)
+        if cached is not None:
+            return cached
+    # Cache miss (first view of a new scan, or store disabled): parse once, strip
+    # inline, and backfill the index so every later view skips the file.
     doc = _load(scan_id)
-    if cached is not None:
-        out = dict(doc)
-        out["endpoints"] = cached
-        return out
-    # Cache miss (first view after a restart, or store disabled): strip inline and
-    # backfill the index so the next view is served from the store.
     light = _light_scan(doc)
     try:
         store.index_scan(scan_id, doc, path)
@@ -304,13 +308,39 @@ def api_scan_delete(scan_id):
 
 @app.route("/api/scan/<scan_id>/graph")
 def api_graph(scan_id):
-    data = _load(scan_id)
-    # Prefer the live Neo4j graph if the DB is up; fall back to JSON-derived.
+    """The scan's graph, bounded by a node/edge budget.
+
+    Two things this deliberately does not do. It does not parse the scan JSON to
+    ask the graph backend for a graph — the backend is keyed by scan_id, which is
+    already in the URL, so the old `_load()` here was a multi-hundred-megabyte
+    parse to recover a string we were handed. And it does not return the full
+    stored graph: a large crawl is ~67k nodes / ~218k edges, which is a 30 MB
+    response the browser cannot lay out, so the page renders nothing at all.
+    ?limit=N raises the node budget for a caller that really wants more.
+    """
+    if not SCAN_ID_RE.match(scan_id):
+        abort(400, "bad scan id")
+    path = config.SCANS_DIR / f"{scan_id}.json"
+    if not path.exists():
+        abort(404, "scan not found")
+
+    max_nodes = config.GRAPH_VIEW_NODES
+    raw = request.args.get("limit")
+    if raw:
+        try:
+            max_nodes = max(200, min(int(raw), config.GRAPH_VIEW_MAX))
+        except ValueError:
+            pass
+    max_edges = max(config.GRAPH_VIEW_EDGES, max_nodes * 2)
+
+    # Prefer the live graph DB if one is up; fall back to JSON-derived.
     if request.args.get("source") != "json":
-        g = graph_loader.fetch_graph(data["meta"]["scan_id"])
+        g = graph_loader.fetch_graph(scan_id, max_nodes=max_nodes,
+                                     max_edges=max_edges)
         if g:
             return jsonify(g)
-    g = graph_loader.graph_from_scan(data)
+    g = graph_loader.graph_from_scan(_load(scan_id), max_nodes=max_nodes,
+                                     max_edges=max_edges)
     g["source"] = "json"
     return jsonify(g)
 
@@ -376,6 +406,8 @@ def api_status():
         # can a scan actually be routed over Tor from this machine? The launcher
         # locks the toggle rather than letting a run fail at the first step.
         "tor": tor.availability(),
+        # is the port-scan engine installed? (gates the "port scan" toggle)
+        "portscan_available": portscan.available(),
         "service": {**svc, "uptime_sec": round(time.time() - STARTED_AT),
                     "url": f"http://{config.WEB_HOST}:{config.WEB_PORT}"},
         # the launcher form shows these as the real defaults rather than inventing numbers
@@ -502,6 +534,13 @@ def api_launch():
     if want_tor and not tor.availability()["available"]:
         return jsonify({"error": "Tor is not available on this machine — install "
                                  "tor (and the Python SOCKS dependency) first"}), 400
+    want_portscan = bool(body.get("portscan"))
+    if want_portscan and body.get("passive"):
+        return jsonify({"error": "a port scan is an active probe — it cannot run in "
+                                 "a passive scan"}), 400
+    if want_portscan and not portscan.available():
+        return jsonify({"error": "the port-scan engine is not installed on this "
+                                 "machine — run ./install.sh to add it"}), 400
 
     extra: list[str] = ["--no-prompt"]   # background job: never block on stdin
     if body.get("passive"):
@@ -514,6 +553,8 @@ def api_launch():
         extra.append("--exact-scope")
     if want_tor:
         extra.append("--tor")
+    if want_portscan:
+        extra.append("--portscan")
     if body.get("no_bbot"):
         extra.append("--no-bbot")
     if body.get("no_graph"):
@@ -539,6 +580,7 @@ def api_launch():
                          "exact_scope": bool(body.get("exact_scope")) and not single,
                          "single": single,
                          "tor": want_tor,
+                         "portscan": want_portscan,
                          "skipped": skip + (["graph"] if body.get("no_graph") and "graph" not in skip else []),
                      }}
     threading.Thread(target=_run_job, args=(job_id, domain, extra),

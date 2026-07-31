@@ -27,6 +27,7 @@ const SBGN_CLASS = {
   Subdomain: 'macromolecule',
   IP: 'simple chemical',
   ASN: 'nucleic acid feature',
+  Port: 'simple chemical',
   Endpoint: 'process',
   JS: 'macromolecule multimer',
   Request: 'process',
@@ -74,7 +75,7 @@ function loadScript(src) {
 
 const CY_DETAIL_TYPES = window.GRAPH_DETAIL_TYPES ||
   new Set(['Endpoint', 'Request', 'Field', 'JS', 'File', 'External']);
-const CY_TYPE_ORDER = ['Domain', 'Subdomain', 'IP', 'ASN', 'Endpoint', 'JS',
+const CY_TYPE_ORDER = ['Domain', 'Subdomain', 'IP', 'ASN', 'Port', 'Endpoint', 'JS',
   'Request', 'Field', 'Secret', 'File', 'External'];
 
 function cyTypeColor(t) {
