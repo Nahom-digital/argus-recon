@@ -1,10 +1,10 @@
 """
-Module 5 — JS source parser (combines and exceeds JSluice + LinkFinder).
+Module 5 · JS source parser (combines and exceeds JSluice + LinkFinder).
 
 For any JavaScript body (linked file or inline block) it recovers:
 
   1. hardcoded endpoints / API paths  (LinkFinder-style extraction)
-  2. request logic — fetch / axios / XHR / jQuery / Angular HttpClient /
+  2. request logic · fetch / axios / XHR / jQuery / Angular HttpClient /
      WebSocket calls, each with method + URL + the nearest enclosing function
      or click/submit handler, so a button can be traced to the request it fires
   3. exposed secrets, keys and tokens (config.SECRET_PATTERNS)
@@ -19,7 +19,7 @@ import re
 from . import config
 
 # --------------------------------------------------------------------------- #
-# 1. Endpoint extraction — the well-known LinkFinder pattern, lightly adapted.
+# 1. Endpoint extraction · the well-known LinkFinder pattern, lightly adapted.
 # --------------------------------------------------------------------------- #
 _ENDPOINT_RX = re.compile(r"""
   (?:"|'|`)
@@ -43,7 +43,7 @@ _ENDPOINT_DENY = re.compile(
 )
 
 # --------------------------------------------------------------------------- #
-# 2. Request-logic patterns. Each yields (method, url) — method may be None.
+# 2. Request-logic patterns. Each yields (method, url) · method may be None.
 # --------------------------------------------------------------------------- #
 _REQUEST_PATTERNS = [
     ("fetch", re.compile(

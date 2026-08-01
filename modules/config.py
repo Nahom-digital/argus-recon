@@ -16,7 +16,7 @@ def _int_env(name: str, default: int) -> int:
     """int() an environment value, but treat empty or non-numeric as unset.
 
     A bare `ARGUS_WEB_PORT=` in .env or a systemd unit (or an exported-but-empty
-    variable) used to make `int("")` raise at import time — which takes the whole
+    variable) used to make `int("")` raise at import time · which takes the whole
     app, and every `import config`, down with it. Tolerate it instead.
     """
     raw = (os.environ.get(name) or "").strip()
@@ -42,7 +42,7 @@ WORDLISTS_DIR.mkdir(exist_ok=True)
 
 
 # --------------------------------------------------------------------------- #
-# .env — minimal loader (no external dependency). Keys already present in the
+# .env · minimal loader (no external dependency). Keys already present in the
 # real environment win; the file only fills what is unset.
 # --------------------------------------------------------------------------- #
 def load_env(path: Path = ENV_FILE) -> dict:
@@ -130,8 +130,8 @@ TOOL_ALIASES = {
 # rather than its web surface, it is slow, and it is loud. The dashboard exposes
 # it as an explicit toggle next to "Via Tor" for exactly that reason.
 #
-# The aggressive profile is the point of the feature — service/version detection,
-# OS inference, the default script set and a traceroute — so PORTSCAN_ARGS is not
+# The aggressive profile is the point of the feature · service/version detection,
+# OS inference, the default script set and a traceroute · so PORTSCAN_ARGS is not
 # something to trim without also changing what the Infrastructure panel can show.
 # --------------------------------------------------------------------------- #
 PORTSCAN_ARGS = [a for a in os.environ.get("ARGUS_PORTSCAN_ARGS", "-T4 -A").split() if a]
@@ -143,7 +143,7 @@ PORTSCAN_MAX_TARGETS = _int_env("ARGUS_PORTSCAN_MAX_TARGETS", 25)
 # How many addresses are scanned at once.
 PORTSCAN_PARALLEL = _int_env("ARGUS_PORTSCAN_PARALLEL", 3)
 # Open HTTP(S) ports found off the standard 80/443 are handed to the crawler as
-# extra seeds — an admin panel on :8443 is exactly what this stage is for.
+# extra seeds · an admin panel on :8443 is exactly what this stage is for.
 PORTSCAN_SEED_CRAWL = os.environ.get("ARGUS_PORTSCAN_SEED_CRAWL", "1") != "0"
 
 # --- mass HTTP probe (httpx) ------------------------------------------------ #
@@ -201,7 +201,7 @@ MAX_BODY_STORE = _int_env("ARGUS_MAX_BODY_STORE", 20000)   # chars of response b
 VERIFY_TLS = os.environ.get("ARGUS_VERIFY_TLS", "0") == "1"             # recon targets often have bad certs
 
 # --------------------------------------------------------------------------- #
-# Tor transport — set at runtime by modules.tor.connect() and read by
+# Tor transport · set at runtime by modules.tor.connect() and read by
 # util.make_session() (HTTP) and subdomain (name resolution). Nothing here is a
 # preference: while TOR_ACTIVE is true every request must go through the proxy,
 # so the flags live in one place instead of being threaded through call sites.
@@ -225,7 +225,7 @@ DNS_NAMESERVERS = [s for s in os.environ.get(
 IPINFO_TOKEN = os.environ.get("IPINFO_TOKEN", "").strip()
 
 # --------------------------------------------------------------------------- #
-# SecurityTrails — deep DNS / subdomain / historical-DNS source (module "s").
+# SecurityTrails · deep DNS / subdomain / historical-DNS source (module "s").
 # The key is read from the environment / .env (SECURITYTRAILS_KEY). Without a
 # key, "Deep" mode is unavailable and the tool relies on the local resolver +
 # the other passive sources only.
@@ -239,7 +239,7 @@ DNS_HISTORY_TYPES = ["a", "aaaa", "mx", "ns", "soa", "txt"]
 DNS_RECORD_TYPES = ["A", "AAAA", "MX", "NS", "CNAME", "TXT", "SOA"]
 
 # --------------------------------------------------------------------------- #
-# Source codes — findings are tagged with a short code rather than the real tool
+# Source codes · findings are tagged with a short code rather than the real tool
 # name so the dashboard / exported JSON do not disclose the toolchain. The real
 # names live only in the README. (own components keep readable names)
 # --------------------------------------------------------------------------- #
@@ -311,14 +311,14 @@ KUZU_DIR = Path(os.environ.get("ARGUS_KUZU_DIR", str(ROOT / "scans" / ".kuzu")))
 # The backend stores every node of a scan; the browser must not be handed every
 # node of a scan. A 46k-endpoint scan expands to ~67k nodes / ~218k edges, which
 # is a 30 MB response the tab then has to turn into 67k objects, 218k edges and a
-# 67k-entry adjacency map before it can paint a single pixel — the page just sits
+# 67k-entry adjacency map before it can paint a single pixel · the page just sits
 # there empty. These caps bound what the dashboard is served; the response still
 # reports the true totals (stats.totals) so the legend shows the real size of the
 # surface, and ?limit= raises the cap for anyone who wants the whole thing.
 # --------------------------------------------------------------------------- #
 GRAPH_VIEW_NODES = _int_env("ARGUS_GRAPH_VIEW_NODES", 6000)
 GRAPH_VIEW_EDGES = _int_env("ARGUS_GRAPH_VIEW_EDGES", 14000)
-# Hard ceiling for an explicit ?limit= — past this the browser stalls no matter
+# Hard ceiling for an explicit ?limit= · past this the browser stalls no matter
 # what the caller asked for.
 GRAPH_VIEW_MAX = _int_env("ARGUS_GRAPH_VIEW_MAX", 40000)
 
@@ -352,7 +352,7 @@ BRUTE_RATE = _int_env("ARGUS_BRUTE_RATE", 180)
 
 # Matching strategy: take *every* status code and subtract the noise instead of
 # listing the codes we like. A soft-404 answers 200, so a status allow-list keeps
-# it while `-mc all` plus a size/regex filter drops it — the classifier then only
+# it while `-mc all` plus a size/regex filter drops it · the classifier then only
 # ever sees responses that differ from the host's own catch-all.
 BRUTE_MATCH_ALL = os.environ.get("ARGUS_BRUTE_MATCH_ALL", "1") != "0"
 # Codes never worth a row even under -mc all.
@@ -442,7 +442,7 @@ STACK_WORDLISTS = {
 }
 
 # --------------------------------------------------------------------------- #
-# Field-intent classifier (module 8) — name substring -> (category, severity)
+# Field-intent classifier (module 8) · name substring -> (category, severity)
 # Order matters: the first matching pattern wins for a given field name.
 # --------------------------------------------------------------------------- #
 FIELD_PATTERNS = [

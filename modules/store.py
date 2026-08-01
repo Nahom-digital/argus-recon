@@ -1,5 +1,5 @@
 """
-SQLite (WAL) store — cache + job queue in front of the graph backend.
+SQLite (WAL) store · cache + job queue in front of the graph backend.
 
 Two costs this removes:
 
@@ -7,7 +7,7 @@ Two costs this removes:
     the scan page reads a per-endpoint index; without a store both mean parsing a
     multi-megabyte JSON file per request. Here the summary and endpoint index are
     written once (when the engine saves the scan) and read back as rows. The JSON
-    file stays the source of truth — the store is a derived cache keyed by the
+    file stays the source of truth · the store is a derived cache keyed by the
     file's mtime, so a stale or deleted row is simply rebuilt from the file.
 
   * Lost graph loads. The engine finishes a scan whether or not Neo4j/kuzu is up.
@@ -100,14 +100,14 @@ def _connect() -> sqlite3.Connection | None:
         _local.conn = conn
         return conn
     except Exception as exc:
-        log.warning(f"store unavailable ({exc}) — running without the cache/queue")
+        log.warning(f"store unavailable ({exc}) · running without the cache/queue")
         _DISABLED = True
         return None
 
 
 # Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
 # existing table alone, so a database created by an older build keeps the old
-# shape and every query naming a new column fails — which, because every read
+# shape and every query naming a new column fails · which, because every read
 # here is wrapped in `except: return None`, degrades silently into "the cache
 # never hits" rather than into an error anyone would see. Add them explicitly.
 _ADDED_COLUMNS = {"scans": {"panel": "TEXT"}}
@@ -158,8 +158,8 @@ def build_summary(doc: dict, *, scan_id: str, mtime: float, size: int) -> dict:
 
 
 def build_panel(doc: dict) -> dict:
-    """Everything the scan page's left panel and header need — meta, subdomains,
-    infra, dns, files, secrets, js_files — with the endpoint list left out.
+    """Everything the scan page's left panel and header need · meta, subdomains,
+    infra, dns, files, secrets, js_files · with the endpoint list left out.
 
     The endpoints are the part that scales with the crawl (tens of thousands of
     records, hundreds of megabytes); everything else stays small no matter how

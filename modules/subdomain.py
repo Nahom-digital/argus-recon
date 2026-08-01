@@ -1,19 +1,19 @@
 """
-Module 1 — Subdomain discovery + infrastructure correlation.
+Module 1 · Subdomain discovery + infrastructure correlation.
 
 Two passive engines run in sequence, fast one first:
 
   1. a lightweight passive name enum (source "n") that queries the public
-     sources and returns in seconds. Everything after it — the probe, the
-     crawl, the brute — can start from a real host list almost immediately
+     sources and returns in seconds. Everything after it · the probe, the
+     crawl, the brute · can start from a real host list almost immediately
      instead of waiting on the deep sweep,
   2. BBOT (source "b"), the deep sweep: many more modules, ASN correlation,
      findings, and minutes rather than seconds. It adds to what pass 1 found.
 
 If neither is available we fall back to crt.sh certificate transparency plus a
 small DNS brute of common names. Whatever the source, every discovered host is
-then resolved — through the bulk resolver (source "r") when it is installed,
-otherwise the local resolver pool — and the apex domain's WHOIS is captured once.
+then resolved · through the bulk resolver (source "r") when it is installed,
+otherwise the local resolver pool · and the apex domain's WHOIS is captured once.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from .util import (get_logger, in_scope, make_session, pick_flag, registrable_do
 
 log = get_logger("subdomain")
 
-# Source codes (no tool names leak into findings) — see config.SOURCE_CODES.
+# Source codes (no tool names leak into findings) · see config.SOURCE_CODES.
 SRC_BBOT = config.SOURCE_CODES["bbot"]            # "b"
 SRC_CRTSH = config.SOURCE_CODES["crtsh"]          # "c"
 SRC_PASSIVE = config.SOURCE_CODES["subfinder"]    # "n"
@@ -68,7 +68,7 @@ def _resolver() -> dns.resolver.Resolver:
 
 
 # --------------------------------------------------------------------------- #
-# DNS over HTTPS — used instead of the UDP resolver while Tor is active.
+# DNS over HTTPS · used instead of the UDP resolver while Tor is active.
 #
 # A plain resolver would send every hostname we look up straight out of this
 # machine, past the proxy, which defeats the point of scanning over Tor. DoH goes
@@ -238,7 +238,7 @@ def run_passive_enum(result: ScanResult, domain: str, *, timeout: int | None = N
             cmd.append(f)
     if tor.active():
         # A Go binary ignores torsocks' LD_PRELOAD shim, and this one has no
-        # SOCKS option — running it would query every public source directly from
+        # SOCKS option · running it would query every public source directly from
         # this address, which is exactly what a Tor scan is avoiding.
         log.warning("quick passive enum skipped over Tor (no SOCKS support in the engine)")
         return 0
@@ -409,7 +409,7 @@ def _apply_asn(result: ScanResult, asn_by_ip: dict[str, dict]) -> None:
 def run_bbot(result: ScanResult, domain: str, passive: bool, timeout: int) -> int:
     bbot = resolve_tool(config.BBOT_BIN)
     if not bbot:
-        log.warning("BBOT not found on PATH — using crt.sh + DNS fallback")
+        log.warning("BBOT not found on PATH · using crt.sh + DNS fallback")
         return 0
     with tempfile.TemporaryDirectory(prefix="argus_bbot_") as tmp:
         outdir = Path(tmp)
@@ -423,7 +423,7 @@ def run_bbot(result: ScanResult, domain: str, passive: bool, timeout: int) -> in
                             "not installed, and running it unwrapped would bypass Tor")
                 return 0
             cmd = wrapped
-        log.info(f"running BBOT ({'passive' if passive else 'subdomain-enum'}) — this can take a few minutes")
+        log.info(f"running BBOT ({'passive' if passive else 'subdomain-enum'}) · this can take a few minutes")
         log.info("  " + " ".join(cmd))
         proc = run_cmd(cmd, timeout=timeout, log=log)
         if proc is None:
@@ -539,30 +539,30 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
 
     if single:
         # Single-target scan: the target is the whole host list. No passive
-        # enumeration, no certificate transparency, no name brute — the point of
+        # enumeration, no certificate transparency, no name brute · the point of
         # this mode is that nothing widens the scope beyond what was asked for.
-        log.info(f"single-target scan — {domain} only, no host enumeration")
+        log.info(f"single-target scan · {domain} only, no host enumeration")
         result.add_subdomain(domain, source="input")
         if deep and securitytrails.available():
             log.info("deep DNS: records + history for this host only")
             securitytrails.run(result, domain, subdomains=False)
         elif deep:
-            log.warning("deep DNS requested but no key configured — skipping")
+            log.warning("deep DNS requested but no key configured · skipping")
     else:
-        # 1. quick pass — seconds, so the deep engine is never the only thing
+        # 1. quick pass · seconds, so the deep engine is never the only thing
         #    standing between the operator and a host list.
         quick = run_passive_enum(result, domain)
 
         # 2. deep pass.
         n = run_bbot(result, domain, passive, timeout) if use_bbot else 0
 
-        # Deep DNS (SecurityTrails, code "s") — subdomains + current & historical DNS.
+        # Deep DNS (SecurityTrails, code "s") · subdomains + current & historical DNS.
         deep_added = 0
         if deep and securitytrails.available():
             log.info("deep DNS: pulling subdomains + current/historical records")
             deep_added = securitytrails.run(result, domain)
         elif deep:
-            log.warning("deep DNS requested but no key configured — skipping")
+            log.warning("deep DNS requested but no key configured · skipping")
 
         # Fallback / supplement with crt.sh if the passive engines gave little.
         if (quick + n + deep_added) < 3:
@@ -589,8 +589,8 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
             result._link_ip(rec, ip, source=res_src)  # type: ignore[attr-defined]
         rec["resolved"] = bool(rec["ips"])
 
-    # Drop unresolved noise? Keep them — a non-resolving CNAME can be a takeover
-    # candidate — but mark them clearly via resolved=False.
+    # Drop unresolved noise? Keep them · a non-resolving CNAME can be a takeover
+    # candidate · but mark them clearly via resolved=False.
 
     # Local DNS records for the DNS panel (A/AAAA/MX/NS/CNAME/TXT/SOA). Deep
     # records (with first_seen) take precedence; the resolver fills any gaps.

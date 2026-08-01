@@ -1,5 +1,5 @@
 """
-Module 2a — mass HTTP probe (source code "h").
+Module 2a · mass HTTP probe (source code "h").
 
 Runs before fingerprinting and before the crawl. One pass over every discovered
 host answers the questions the rest of the pipeline keeps asking:
@@ -12,7 +12,7 @@ host answers the questions the rest of the pipeline keeps asking:
 Why it matters more than the numbers suggest: the crawler and the content brute
 both start from "live roots". Before this stage that list came from a sequential
 Python probe of every subdomain, and dead hosts stayed in it until something
-timed out on them — so a scope with 300 mostly-parked subdomains spent most of
+timed out on them · so a scope with 300 mostly-parked subdomains spent most of
 its time discovering nothing. This does the whole sweep at Go concurrency and
 hands the pipeline only hosts that answered.
 
@@ -124,7 +124,7 @@ def _ingest(result: ScanResult, rec: dict) -> str | None:
         http["location"] = rec["location"]
     sub["http"].update({k: v for k, v in http.items() if v is not None})
 
-    # tech tags — merged with (not overwritten by) the deep fingerprint later
+    # tech tags · merged with (not overwritten by) the deep fingerprint later
     tags = [t for t in (rec.get("tech") or []) if t and t not in _TECH_NOISE]
     for t in tags:
         if t not in sub["tech"]:
@@ -155,7 +155,7 @@ def run(result: ScanResult, *, hosts: list[str] | None = None,
     """Probe every known host. Returns False if the engine is unavailable."""
     bin_path = binary()
     if not bin_path:
-        log.info("mass probe engine not installed — using the built-in async probe")
+        log.info("mass probe engine not installed · using the built-in async probe")
         return False
 
     t0 = time.time()
@@ -183,7 +183,7 @@ def run(result: ScanResult, *, hosts: list[str] | None = None,
         if host:
             live.add(host)
         if seen % 200 == 0:
-            log.info(f"probed {seen} hosts — {len(live)} live so far")
+            log.info(f"probed {seen} hosts · {len(live)} live so far")
 
     try:
         log.info(f"probing {len(targets)} hosts for live HTTP services "
@@ -210,7 +210,7 @@ def run(result: ScanResult, *, hosts: list[str] | None = None,
 
 
 def live_roots(result: ScanResult) -> list[str]:
-    """`scheme://host` for every host that answered — the seed list the crawler
+    """`scheme://host` for every host that answered · the seed list the crawler
     and the content brute both start from."""
     roots: list[str] = []
     for sub in result._subdomains.values():               # type: ignore[attr-defined]

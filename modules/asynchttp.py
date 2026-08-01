@@ -5,7 +5,7 @@ Everything around this module is a Go binary doing hundreds of requests at once
 (name enum, mass probe, deep crawl). Our own crawler used to be one blocking
 `requests.get` per thread, so it became the pipeline's floor: twelve requests in
 flight no matter how fast the target answered. This replaces that with a single
-`httpx.AsyncClient` and a semaphore — hundreds of in-flight requests from one
+`httpx.AsyncClient` and a semaphore · hundreds of in-flight requests from one
 thread, with the fan-out actually bounded by a number instead of by how many
 threads the machine tolerates.
 
@@ -13,7 +13,7 @@ Two limits, not one:
 
   * a global semaphore (`concurrency`) caps total requests in flight,
   * a per-host semaphore (`host_concurrency`) stops a single subdomain from
-    absorbing the whole budget — which is also what keeps us from looking like a
+    absorbing the whole budget · which is also what keeps us from looking like a
     denial-of-service to one box while the rest of the scope idles.
 
 `available()` decides whether the async path can be used at all. Over Tor it also
@@ -223,7 +223,7 @@ class AsyncFetcher:
         each result to `on_result` as it completes (order is arrival order).
 
         The semaphores inside `get()` already bound the network, so the task set
-        is created eagerly — that is what keeps the pipe full instead of walking
+        is created eagerly · that is what keeps the pipe full instead of walking
         a batch in lock-step.
         """
         results: list = []
@@ -280,7 +280,7 @@ def run(coro):
     try:
         return asyncio.run(coro)
     except RuntimeError:
-        # A loop is already running (embedded use) — give the work its own.
+        # A loop is already running (embedded use) · give the work its own.
         loop = asyncio.new_event_loop()
         try:
             return loop.run_until_complete(coro)

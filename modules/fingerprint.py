@@ -1,5 +1,5 @@
 """
-Module 2 — Tech-stack fingerprinting.
+Module 2 · Tech-stack fingerprinting.
 
 WhatWeb in aggressive mode (`-a 3`) over every host that answered HTTP. The live
 scheme + HTTP metadata (status, server, title, final URL) normally comes from the
@@ -98,7 +98,7 @@ def _extract_tags(plugins: dict) -> list[str]:
 def _run_whatweb(urls: list[str], timeout: int) -> list[dict]:
     ww = resolve_tool(config.WHATWEB_BIN)
     if not ww:
-        log.warning("WhatWeb not found — skipping fingerprint")
+        log.warning("WhatWeb not found · skipping fingerprint")
         return []
     with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as tf:
         out = Path(tf.name)
@@ -122,7 +122,7 @@ def _run_whatweb(urls: list[str], timeout: int) -> list[dict]:
         if not text:
             return []
         # WhatWeb writes a JSON array, but a killed/partial run can leave it
-        # unterminated — recover line by line.
+        # unterminated · recover line by line.
         try:
             data = json.loads(text)
             return data if isinstance(data, list) else [data]
@@ -203,7 +203,7 @@ def run(result: ScanResult, *, timeout: int = 600, batch: int = 25) -> None:
         plugins = rec.get("plugins", {})
         tags = _extract_tags(plugins)
         sub = result.add_subdomain(host)
-        # Merge over the probe's first-guess tags rather than discarding them —
+        # Merge over the probe's first-guess tags rather than discarding them ·
         # the two engines catch different things (httpx sees headers/cookies,
         # WhatWeb runs deeper plugins).
         merged = list(sub.get("tech") or [])

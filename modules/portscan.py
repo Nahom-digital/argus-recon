@@ -1,5 +1,5 @@
 """
-Module 7a — port / service scan (source code "p").
+Module 7a · port / service scan (source code "p").
 
 Every other stage looks at the target's *web* surface. This one looks at the
 hosts behind it: for each discovered IP it enumerates open ports and, for each,
@@ -15,7 +15,7 @@ Infrastructure panel and the graph gain a Port layer without a new top-level
 store. Open HTTP(S) ports found off 80/443 are returned as extra crawl seeds.
 
 The engine's real name never appears in a finding, a log line or the saved JSON
-— every result is tagged with the source code "p" like every other stage, and
+· every result is tagged with the source code "p" like every other stage, and
 the scanner is resolved through config.PORTSCAN_BIN so it can be swapped without
 touching this module.
 
@@ -63,7 +63,7 @@ def _command(bin_path: str, ip: str) -> list[str]:
     Direct: the aggressive profile as configured (service/version, OS, scripts,
     traceroute). Over Tor: raw-packet features (SYN scan, OS detection,
     traceroute) cannot cross a SOCKS proxy, so the run is wrapped in torsocks and
-    reduced to a TCP-connect scan with version + default scripts — still the
+    reduced to a TCP-connect scan with version + default scripts · still the
     service/version intel, routed through the circuit, minus what the transport
     physically cannot carry.
     """
@@ -146,7 +146,7 @@ def _scan_one(bin_path: str, ip: str, timeout: int) -> dict | None:
     try:
         root = ET.fromstring(proc.stdout)
     except ET.ParseError:
-        # A cut-off XML (timeout mid-write) still often has a usable <host> — try
+        # A cut-off XML (timeout mid-write) still often has a usable <host> · try
         # to recover the last complete host block rather than lose the whole scan.
         chunk = proc.stdout
         end = chunk.rfind("</host>")
@@ -167,7 +167,7 @@ def _scan_one(bin_path: str, ip: str, timeout: int) -> dict | None:
 def _select_targets(result: ScanResult) -> list[str]:
     """Addresses to scan, most-connected first, capped. A public address is
     worth the time; private/reserved space (a CNAME that resolved to 10.x, a
-    scan run from inside a network) is skipped — it is noise, not attack
+    scan run from inside a network) is skipped · it is noise, not attack
     surface."""
     scored: list[tuple[int, str]] = []
     for rec in result._ips.values():              # type: ignore[attr-defined]
@@ -191,7 +191,7 @@ def run(result: ScanResult, *, timeout: int | None = None) -> bool:
     the scanner is not installed (the caller records the stage as unavailable)."""
     bin_path = binary()
     if not bin_path:
-        log.warning("port scan engine not installed — skipping "
+        log.warning("port scan engine not installed · skipping "
                     "(the Infrastructure panel keeps its DNS/enrichment data)")
         result.mark_module("portscan", "skip", note="engine not installed")
         return False
@@ -273,7 +273,7 @@ def _crawl_seeds_for(ip: str, rec: dict, port: dict) -> list[str]:
 
 
 def get_seeds(result: ScanResult) -> list[str]:
-    """Crawl seeds derived from every open web port already recorded — used when
+    """Crawl seeds derived from every open web port already recorded · used when
     run() was executed elsewhere and the caller just wants the seeds."""
     if not config.PORTSCAN_SEED_CRAWL:
         return []

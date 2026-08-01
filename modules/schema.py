@@ -1,5 +1,5 @@
 """
-ScanResult — the single in-memory container every module writes into.
+ScanResult · the single in-memory container every module writes into.
 
 It owns de-duplication (so the crawler, JS parser and bruteforce can all report
 the same URL without creating duplicates), merges evidence from multiple
@@ -111,7 +111,7 @@ class ScanResult:
                 "provider": None, "type": None, "datacenter": None,
                 "whois": {}, "ip_history": [],
                 "enriched": False,
-                # port scan (module 7a) — open services on this address
+                # port scan (module 7a) · open services on this address
                 "ports": [],        # [{port, protocol, state, service, ...}]
                 "os": None,         # best OS guess {name, accuracy, family}
                 "traceroute": [],   # [{hop, ip, rtt, host}]
@@ -386,7 +386,7 @@ class ScanResult:
             json.dump(doc, fh, indent=2, ensure_ascii=False)
         # Populate the SQLite cache (summary + per-endpoint light index) so the
         # dashboard never has to parse this whole file just to list it or expand
-        # a row. Best-effort — the JSON on disk stays the source of truth.
+        # a row. Best-effort · the JSON on disk stays the source of truth.
         try:
             from . import store
             store.index_scan(self.meta["scan_id"], doc, out)

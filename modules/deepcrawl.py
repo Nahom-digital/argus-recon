@@ -1,5 +1,5 @@
 """
-Module 3a — JS-aware deep crawl pre-pass (source code "k").
+Module 3a · JS-aware deep crawl pre-pass (source code "k").
 
 Runs before our own crawler and hands it a map of the application instead of a
 list of roots. Where the built-in crawler fetches HTML and reads what is in the
@@ -9,14 +9,14 @@ route tables, lazily-imported chunks, XHR/fetch targets assembled at runtime, an
 
 What it contributes to the scan:
 
-  * endpoints and request URLs discovered in JS — the class of finding a
+  * endpoints and request URLs discovered in JS · the class of finding a
     regex-over-source pass systematically misses, because the string never
     appears whole in the file,
   * the source that referenced each one (tag/attribute), kept as provenance,
   * live status codes and technologies for what it visited.
 
 Our own crawler still runs after it. It is what fetches bodies, extracts forms
-and fields, maps buttons to the requests they fire and scans for secrets — this
+and fields, maps buttons to the requests they fire and scans for secrets · this
 stage does discovery, not analysis, so both are needed and neither duplicates
 the other's work.
 
@@ -163,7 +163,7 @@ def run(result: ScanResult, *, roots: list[str] | None = None,
     with, or None if the engine is unavailable."""
     bin_path = binary()
     if not bin_path:
-        log.info("deep crawl engine not installed — the built-in crawler runs alone")
+        log.info("deep crawl engine not installed · the built-in crawler runs alone")
         return None
 
     t0 = time.time()

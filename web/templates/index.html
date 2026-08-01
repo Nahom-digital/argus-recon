@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Argus Recon — scans{% endblock %}
+{% block title %}Argus Recon · scans{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/home.css') }}">{% endblock %}
 
 {% block content %}
@@ -18,7 +18,7 @@
       <input class="input" id="domainInput" placeholder="target-domain.com" spellcheck="false" aria-label="Target domain">
       <div class="opts">
         <label class="chk" id="deepChk" title="Extra subdomains + full DNS records + historical DNS"><input type="checkbox" id="optDeep"> deep DNS</label>
-        <label class="chk" title="Passive enumeration only — nothing is sent to the target"><input type="checkbox" id="optPassive"> passive</label>
+        <label class="chk" title="Passive enumeration only · nothing is sent to the target"><input type="checkbox" id="optPassive"> passive</label>
         <label class="chk" id="torChk" title="Route the whole scan through Tor"><input type="checkbox" id="optTor"> via Tor</label>
         <label class="chk" id="portscanChk" title="Scan every discovered IP for open ports & services"><input type="checkbox" id="optPortscan"> port scan</label>
       </div>

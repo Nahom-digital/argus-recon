@@ -1,7 +1,21 @@
 /* ============================================================================
-   Scan view — left panel · graph · requests table
+   Scan view · left panel · graph · requests table
    ========================================================================== */
-.scan-layout{display:grid;grid-template-columns:336px 1fr;height:calc(100vh - 56px);overflow:hidden}
+.scan-layout{position:relative;display:grid;grid-template-columns:var(--side-w,336px) 1fr;
+  height:calc(100vh - 56px);overflow:hidden}
+
+/* drag handle on the left panel's right edge; sits over the border, follows the
+   panel width via --side-w, and mirrors the graph splitter's interaction */
+.side-resize{position:absolute;top:0;left:calc(var(--side-w,336px) - 3px);width:7px;
+  height:calc(100vh - 56px);z-index:6;cursor:col-resize;touch-action:none;background:transparent;
+  transition:background .12s var(--ease)}
+.side-resize::before{content:"";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:3px;height:36px;border-radius:2px;background:var(--border-strong);opacity:0;
+  transition:opacity .12s var(--ease),background .12s var(--ease)}
+.side-resize:hover,.side-resize.dragging{background:var(--hover)}
+.side-resize:hover::before,.side-resize.dragging::before{opacity:1;background:var(--accent)}
+.side-resize:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+.scan-layout.detail-mode .side-resize{display:none}
 
 /* ---- left panel ----------------------------------------------------------- */
 .side{background:var(--surface-2);border-right:1px solid var(--border);overflow-y:auto;overflow-x:hidden}
@@ -24,8 +38,11 @@
 .ov .kv{display:flex;gap:8px;font-size:var(--fs-sm)}
 .ov .kv .k{color:var(--muted);min-width:78px}
 .ov .kv .v{color:var(--ink);font-family:var(--mono);font-size:var(--fs-xs);word-break:break-word}
-.modline{display:flex;align-items:center;gap:7px;font-size:var(--fs-xs);color:var(--muted);padding:2px 0}
-.modline .dot{width:6px;height:6px}
+/* align to the top so the dot stays with the module name on the first line when
+   a long note (e.g. the crawler's) wraps; the dot is a fixed-size circle that
+   never gets squished by the flexbox */
+.modline{display:flex;align-items:flex-start;gap:7px;font-size:var(--fs-xs);color:var(--muted);padding:3px 0}
+.modline .dot{width:7px;height:7px;border-radius:50%;flex:none;margin-top:4px}
 .modline .dot.ok{background:var(--ok)}.modline .dot.empty{background:var(--faint)}.modline .dot.skip{background:var(--border-strong)}
 
 /* generic side list */
@@ -57,7 +74,7 @@
 /* ---- main column ---------------------------------------------------------- */
 .main{display:flex;flex-direction:column;min-width:0;min-height:0}
 
-/* graph — its height is user-controlled (drag the splitter, or collapse it) so
+/* graph · its height is user-controlled (drag the splitter, or collapse it) so
    the request table below is never squeezed into a sliver. --graph-h is set by
    scan.js from a saved preference; the value here is the first-run default. */
 .graph-wrap{position:relative;height:var(--graph-h,40vh);min-height:0;flex:none;background:var(--bg);
@@ -91,7 +108,7 @@
 .graph-overlay{position:absolute;inset:0;pointer-events:none}
 .graph-overlay > *{pointer-events:auto}
 .g-controls{position:absolute;top:12px;right:12px;display:flex;gap:6px;align-items:center}
-/* graph engine / stylesheet switches — compact segmented control */
+/* graph engine / stylesheet switches · compact segmented control */
 .gseg{display:inline-flex;height:28px;border:1px solid var(--border);border-radius:var(--r-pill);
   overflow:hidden;background:var(--surface)}
 .gseg-btn{display:inline-flex;align-items:center;justify-content:center;min-width:28px;padding:0 10px;
@@ -228,6 +245,11 @@
 .dns-org{width:100%;font-size:10px}
 
 /* ---- discovered files: expandable w/ source + request + response (item 10) - */
+/* type filter, built from the kinds actually discovered in the scan */
+.file-filter{display:flex;align-items:center;gap:6px;padding:2px 2px 8px}
+.file-filter svg{width:13px;height:13px;color:var(--faint);flex:none}
+.file-filter select.input{flex:1;min-width:0;height:28px;font-size:var(--fs-xs);font-family:var(--mono)}
+.file-filter[hidden]{display:none}
 .frow{border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);margin-bottom:5px;overflow:hidden}
 .frow .fsummary{display:flex;align-items:center;gap:7px;width:100%;padding:8px 9px;background:none;border:none;
   cursor:pointer;font:inherit;text-align:left;color:inherit;transition:background .12s var(--ease)}
@@ -319,7 +341,7 @@
   transition:background .12s var(--ease),color .12s var(--ease),border-color .12s var(--ease)}
 .dv-stat:hover{background:var(--hover);color:var(--ink-2);border-color:var(--border-strong)}
 .dv-stat b{color:var(--ink);font-weight:600;font-family:var(--mono)}
-/* One table per row, each the full width of the page — no two data sets share
+/* One table per row, each the full width of the page · no two data sets share
    a row, so nothing is read through a horizontal scrollbar. */
 .dv-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;max-width:var(--dv-w);margin:0 auto;align-items:start}
 .dv-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
@@ -395,14 +417,14 @@
 
 /* responsive: collapse to stacked. The page scrolls as one column here, so the
    drag splitter (which trades height between two panes in a fixed viewport)
-   doesn't apply — the graph takes a fixed slice and the table flows below it. */
+   doesn't apply · the graph takes a fixed slice and the table flows below it. */
 @media(max-width:900px){
   .scan-layout{grid-template-columns:1fr;height:auto;overflow:visible}
   .side{border-right:none;border-bottom:1px solid var(--border);max-height:none}
   .main{height:auto}
   .graph-wrap{height:60vh}
   .main.graph-collapsed .graph-wrap{height:60vh;border-bottom:1px solid var(--border)}
-  .graph-resize,.graph-restore{display:none !important}
+  .graph-resize,.graph-restore,.side-resize{display:none !important}
   .thead{display:none}
   .trow .tsummary{grid-template-columns:56px 1fr 60px;grid-auto-rows:auto}
   .trow .c-type{display:none}

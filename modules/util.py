@@ -1,7 +1,7 @@
 """
 Shared helpers: logging, a hardened HTTP session, and URL/scope utilities.
 
-The scope rule from the spec is enforced here in one place — `in_scope()` — so
+The scope rule from the spec is enforced here in one place · `in_scope()` · so
 every module (crawler, parsers, bruteforce, graph) agrees on what "the target
 domain and its subdomains" means.
 """
@@ -105,7 +105,7 @@ def make_session() -> requests.Session:
 # --------------------------------------------------------------------------- #
 def registrable_root(domain: str) -> str:
     """Lower-cased, stripped bare host (no scheme/port/path). Not reduced to
-    eTLD+1 — that's `registrable_domain()`."""
+    eTLD+1 · that's `registrable_domain()`."""
     domain = domain.strip().lower()
     domain = re.sub(r"^https?://", "", domain)
     domain = domain.split("/")[0].split("@")[-1].split(":")[0]
@@ -218,13 +218,13 @@ def host_of(url: str) -> str:
 
 # Single-target mode ("scan exactly what I gave you"). Process-wide because one
 # engine process runs exactly one scan, and because scope has to mean the same
-# thing to every module — the crawler, the parsers, the bruteforcer and the
+# thing to every module · the crawler, the parsers, the bruteforcer and the
 # graph all decide what to follow through `in_scope()`.
 _SINGLE_HOST = False
 
 
 def set_single_host(on: bool) -> None:
-    """Restrict `in_scope()` to the exact target host — no subdomains."""
+    """Restrict `in_scope()` to the exact target host · no subdomains."""
     global _SINGLE_HOST
     _SINGLE_HOST = bool(on)
 
@@ -432,7 +432,7 @@ def resolve_recon_tool(name: str, aliases: list[str] | None = None,
             continue
         blob = f"{proc.stdout}\n{proc.stderr}".lower()
         # A real Go recon tool answers `-version` with an exit-0 banner carrying
-        # the vendor name or a bare version. The name alone is not enough — the
+        # the vendor name or a bare version. The name alone is not enough · the
         # collision this guards against (python3-httpx vs ProjectDiscovery httpx)
         # is two different programs sharing the name `httpx`, and the impostor
         # exits non-zero here parsing `-version` as bundled short flags.
@@ -458,7 +458,7 @@ def tool_flags(bin_path: str) -> set[str]:
     """Every option the binary lists in its own help output.
 
     These tools rename and retire flags between releases, and an unrecognised
-    flag makes them exit instead of ignoring it — so one bad spelling silently
+    flag makes them exit instead of ignoring it · so one bad spelling silently
     turns a whole stage off. Asking the binary what it supports (once, cached)
     and only passing what is there costs a single subprocess and makes the
     integration version-proof.

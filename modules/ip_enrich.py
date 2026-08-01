@@ -1,5 +1,5 @@
 """
-Module 7 — IP enrichment.
+Module 7 · IP enrichment.
 
 For every resolved IP across all subdomains, query ipinfo.io and classify it:
 hosting provider / organisation, country, ASN, and a datacenter-vs-residential
@@ -80,7 +80,7 @@ def run(result: ScanResult, *, threads: int = 6) -> None:
         return
 
     log.info(f"enriching {len(ips)} IPs via ipinfo.io"
-             + ("" if config.IPINFO_TOKEN else " (no token — free tier)"))
+             + ("" if config.IPINFO_TOKEN else " (no token · free tier)"))
 
     enriched = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as ex:

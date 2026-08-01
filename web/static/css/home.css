@@ -1,5 +1,5 @@
 /* ============================================================================
-   Home — scan library
+   Home · scan library
    ========================================================================== */
 .home{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
 .home-head{display:flex;align-items:flex-end;gap:20px;margin-bottom:8px}
@@ -24,7 +24,7 @@
 .ns-error svg{width:14px;height:14px;color:var(--danger)}
 
 /* Advanced options: clipped disclosure, no modal. Only grid-template-rows
-   animates — the seam and its spacing sit inside the clip so they are revealed
+   animates · the seam and its spacing sit inside the clip so they are revealed
    by the same motion instead of being animated themselves. */
 .ns-adv{display:grid;grid-template-rows:0fr;transition:grid-template-rows .2s var(--ease)}
 .ns-adv.open{grid-template-rows:1fr}
@@ -57,7 +57,7 @@
 .stage{position:relative;display:inline-flex}
 .stage input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
 /* off state is carried by a dashed edge as well as colour, and stays at AA
-   contrast — these are controls, not decoration */
+   contrast · these are controls, not decoration */
 .stage span{display:inline-flex;align-items:center;gap:6px;height:25px;padding:0 10px;
   font-size:var(--fs-xs);font-weight:500;color:var(--muted);background:var(--surface-2);
   border:1px dashed var(--border-strong);border-radius:var(--r-pill);white-space:nowrap;

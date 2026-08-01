@@ -1,44 +1,21 @@
 /* ============================================================================
-   Argus Recon — Cytoscape.js graph engine (alternative to the canvas renderer)
+   Argus Recon · Cytoscape.js graph engine (alternative to the canvas renderer)
 
    Same {nodes, edges} model and the same public interface the canvas renderer
    exposes (fit / reheat / buildLegend / activate / setFilter / focusHost /
    destroy), so scan.js can swap one for the other behind a single GRAPH handle.
 
-   Cytoscape is built for exactly this — nodes/edges, click-to-expand, layouts
-   that scale — and it ships two looks the user can switch between:
-
-     * 'fcose' — the fCoSE force layout in the "gene-gene" style: solid coloured
-       nodes, curved edges. Fast and readable at thousands of nodes.
-     * 'sbgn'  — the SBGN stylesheet (cytoscape-sbgn-stylesheet): each Argus node
-       type is mapped to an SBGN glyph class (macromolecule, simple chemical,
-       process, …) and drawn with that notation's shapes, still laid out by fCoSE.
+   Cytoscape is built for exactly this: nodes/edges, click-to-expand, layouts
+   that scale. It renders with the fCoSE force layout in the "gene-gene" style:
+   solid coloured nodes, curved edges, fast and readable at thousands of nodes.
 
    The heavy vendor scripts are loaded on demand (loadCyEngine) the first time
    the user selects this engine, so the canvas default costs nothing extra.
    ========================================================================== */
 'use strict';
 
-/* Argus node type -> SBGN glyph class. SBGN has a fixed vocabulary of shapes;
-   this maps the recon graph onto the closest glyphs so the notation is
-   meaningful rather than decorative. */
-const SBGN_CLASS = {
-  Domain: 'compartment',
-  Subdomain: 'macromolecule',
-  IP: 'simple chemical',
-  ASN: 'nucleic acid feature',
-  Port: 'simple chemical',
-  Endpoint: 'process',
-  JS: 'macromolecule multimer',
-  Request: 'process',
-  Field: 'unspecified entity',
-  Secret: 'perturbing agent',
-  File: 'nucleic acid feature',
-  External: 'source and sink',
-};
-
-/* Load the vendored cytoscape + fcose + sbgn bundles once, in dependency order
-   (layoutBase -> coseBase -> fcose; cytoscape; sbgn). Returns a promise that
+/* Load the vendored cytoscape + fcose bundles once, in dependency order
+   (layoutBase -> coseBase -> fcose; cytoscape). Returns a promise that
    resolves when cytoscape is registered and ready. */
 let _cyReady = null;
 function loadCyEngine(base) {
@@ -49,7 +26,6 @@ function loadCyEngine(base) {
     'layout-base.js',
     'cose-base.js',
     'cytoscape-fcose.js',
-    'cytoscape-sbgn-stylesheet.js',
   ];
   _cyReady = chain.reduce((p, file) => p.then(() => loadScript(v(file))), Promise.resolve())
     .then(() => {
@@ -87,7 +63,6 @@ function cyTypeColor(t) {
 function createCyGraph(container, data, opts) {
   opts = opts || {};
   const cytoscape = window.cytoscape;
-  let style = opts.style === 'sbgn' ? 'sbgn' : 'fcose';
 
   // ---- model -> cytoscape elements ----
   const present = {};
@@ -97,15 +72,10 @@ function createCyGraph(container, data, opts) {
   const deg = {};
   data.edges.forEach(e => { if (ids.has(e.source) && ids.has(e.target)) { deg[e.source] = (deg[e.source] || 0) + 1; deg[e.target] = (deg[e.target] || 0) + 1; } });
   data.nodes.forEach(n => {
-    const glyph = SBGN_CLASS[n.type] || 'unspecified entity';
     elements.push({
       data: {
         id: n.id, ntype: n.type, label: n.label,
         short: shortCyLabel(n), props: n.props || {},
-        // `class` is the field the SBGN stylesheet keys its glyph selectors on;
-        // `sbgnbbox` gives those glyphs a size to draw into.
-        class: glyph, sbgnclass: glyph,
-        sbgnbbox: { w: 30, h: 24 },
         deg: deg[n.id] || 0, color: cyTypeColor(n.type),
       },
       classes: n.type,
@@ -123,7 +93,7 @@ function createCyGraph(container, data, opts) {
     pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
     textureOnViewport: elements.length > 1500,
     hideEdgesOnViewport: elements.length > 2500,
-    style: styleFor(style),
+    style: styleFor(),
     layout: { name: 'preset' },        // real layout runs in activate()/reheat()
   });
 
@@ -181,6 +151,12 @@ function createCyGraph(container, data, opts) {
   });
   cy.on('tap', evt => { if (evt.target === cy) clearSelect(); });
 
+  // Labels are hidden on the dense detail nodes by default (a crowd of dots
+  // stays legible as structure); pointing at a node reveals its name, the way
+  // the canvas engine and neo4j do. Domain/Subdomain anchors stay labelled.
+  cy.on('mouseover', 'node', evt => evt.target.addClass('hl'));
+  cy.on('mouseout', 'node', evt => evt.target.removeClass('hl'));
+
   function select(n) {
     clearSelect();
     selected = n;
@@ -216,15 +192,6 @@ function createCyGraph(container, data, opts) {
     if (window.wireDecode) wireDecode(card);
   }
 
-  // ---- style modes ----
-  function setStyle(mode) {
-    style = mode === 'sbgn' ? 'sbgn' : 'fcose';
-    cy.style(styleFor(style));
-    applyVisibility();
-    return style;
-  }
-  function currentStyle() { return style; }
-
   // ---- public interface (mirrors the canvas renderer) ----
   function activate(onProgress) {
     if (started) return Promise.resolve();
@@ -251,8 +218,8 @@ function createCyGraph(container, data, opts) {
     elm.innerHTML = types.map(t => {
       const lock = CY_DETAIL_TYPES.has(t) && !detailUnlocked;
       const off = !lock && hidden.has(t);
-      const tip = lock ? `${present[t]} ${t} nodes — select a subdomain to activate this layer`
-        : `${present[t]} ${t} nodes — click to ${off ? 'show' : 'hide'}`;
+      const tip = lock ? `${present[t]} ${t} nodes · select a subdomain to activate this layer`
+        : `${present[t]} ${t} nodes · click to ${off ? 'show' : 'hide'}`;
       return `<span class="lg${lock ? ' locked' : ''}${off ? ' off' : ''}" data-t="${t}" title="${tip}">
         ${lock ? `<svg class="ic lk" aria-hidden="true"><use href="#i-lock"></use></svg>`
         : `<span class="sw" style="background:${cyTypeColor(t)}"></span>`}
@@ -317,7 +284,7 @@ function createCyGraph(container, data, opts) {
   // theme repaint: recolour by type
   const onTheme = () => {
     cy.batch(() => cy.nodes().forEach(n => n.data('color', cyTypeColor(n.data('ntype')))));
-    cy.style(styleFor(style));
+    cy.style(styleFor());
     if (legendEl) buildLegend(legendEl);
   };
   window.addEventListener('themechange', onTheme);
@@ -325,7 +292,7 @@ function createCyGraph(container, data, opts) {
   return {
     fit: () => cy.fit(cy.elements(':visible'), 40),
     reheat: () => runLayout(true),
-    buildLegend, activate, setFilter, setStyle, currentStyle,
+    buildLegend, activate, setFilter,
     stats: data.stats,
     detailUnlocked: () => detailUnlocked,
     focusHost,
@@ -336,44 +303,39 @@ function createCyGraph(container, data, opts) {
   };
 }
 
-/* ---- stylesheets ---------------------------------------------------------- */
-function styleFor(mode) {
-  if (mode === 'sbgn' && window.cytoscapeSbgnStylesheet) {
-    try {
-      // Each node's data(class) is an SBGN glyph, so the stylesheet draws the
-      // right notation shapes; we overlay per-type colour + our fade/lit states.
-      const base = window.cytoscapeSbgnStylesheet(window.cytoscape);
-      const overrides = [
-        { selector: 'node', style: { 'label': 'data(short)', 'font-size': 9, 'background-color': 'data(color)' } },
-        { selector: '.faded', style: { 'opacity': 0.12 } },
-        { selector: 'node.lit', style: { 'border-width': 2, 'border-color': cyInk() } },
-        { selector: 'edge.lit', style: { 'line-color': '#e0b341', 'width': 2 } },
-      ];
-      // The library returns either a plain style array or a chainable stylesheet
-      // builder, depending on version — support both.
-      if (Array.isArray(base)) return base.concat(overrides);
-      if (base && typeof base.selector === 'function') {
-        overrides.forEach(o => base.selector(o.selector).css(o.style));
-        return base;
-      }
-    } catch (e) { /* fall through to the fcose style */ }
-  }
-  // fCoSE "gene-gene" look: solid coloured discs, curved faint edges.
+/* ---- stylesheet ----------------------------------------------------------- */
+/* fCoSE "gene-gene" look: solid coloured discs, curved faint edges.
+
+   Node labels are OFF by default. A large graph packs hundreds of dots close
+   together, and drawing every name turns it into an unreadable wall of
+   overlapping text. So only the few structural anchors (Domain, Subdomain)
+   carry a permanent label; every other node reveals its name on hover (class
+   `hl`) or when selected (class `lit`), the same read as the canvas engine and
+   neo4j. */
+function styleFor() {
   return [
     { selector: 'node', style: {
-        'background-color': 'data(color)', 'label': 'data(short)',
+        'background-color': 'data(color)', 'label': '',
         'width': 'mapData(deg, 0, 40, 14, 46)', 'height': 'mapData(deg, 0, 40, 14, 46)',
-        'font-size': 9, 'color': cyInk(), 'text-valign': 'center', 'text-halign': 'right',
+        'font-size': 9, 'font-family': 'Libertinus Serif, Georgia, serif',
+        'color': cyInk(), 'text-valign': 'center', 'text-halign': 'right',
         'text-margin-x': 3, 'min-zoomed-font-size': 8,
-        'text-background-color': cyBg(), 'text-background-opacity': 0.7,
-        'text-background-padding': 1, 'border-width': 0 } },
-    { selector: 'node.Domain', style: { 'width': 40, 'height': 40, 'font-size': 12, 'font-weight': 'bold' } },
-    { selector: 'node.Subdomain', style: { 'shape': 'round-rectangle' } },
+        'text-background-color': cyBg(), 'text-background-opacity': 0.82,
+        'text-background-padding': 2, 'text-background-shape': 'roundrectangle', 'border-width': 0 } },
+    // structural anchors are few, so they stay labelled at all times
+    { selector: 'node.Domain', style: {
+        'width': 40, 'height': 40, 'font-size': 12, 'font-weight': 'bold', 'label': 'data(short)' } },
+    { selector: 'node.Subdomain', style: { 'shape': 'round-rectangle', 'label': 'data(short)' } },
+    // hovered node reveals its name and lifts above its neighbours
+    { selector: 'node.hl', style: {
+        'label': 'data(short)', 'z-index': 30, 'text-background-opacity': 0.95 } },
     { selector: 'edge', style: {
         'width': 1, 'line-color': cyEdge(), 'curve-style': 'haystack',
         'haystack-radius': 0.4, 'opacity': 0.5 } },
     { selector: '.faded', style: { 'opacity': 0.12 } },
-    { selector: 'node.lit', style: { 'border-width': 2, 'border-color': cyInk() } },
+    // selected node keeps its label and gets an outline
+    { selector: 'node.lit', style: {
+        'label': 'data(short)', 'z-index': 30, 'border-width': 2, 'border-color': cyInk() } },
     { selector: 'edge.lit', style: { 'line-color': '#e0b341', 'width': 2, 'opacity': 1, 'curve-style': 'bezier' } },
   ];
 }

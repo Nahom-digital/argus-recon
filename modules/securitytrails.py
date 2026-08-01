@@ -7,7 +7,7 @@ their own, gated behind an API key + the dashboard's "Deep" toggle:
   * a much larger subdomain set,
   * the *current* DNS record set (A / AAAA / MX / NS / SOA / TXT) with the
     first-seen timestamp for each,
-  * the *historical* DNS timeline for each record type — previous IPs, previous
+  * the *historical* DNS timeline for each record type · previous IPs, previous
     name servers, old MX, and when each change happened (first_seen / last_seen).
 
 Everything is best-effort: no key, a rate-limit, or a network error degrades to
@@ -27,7 +27,7 @@ from .util import get_logger, make_session
 
 log = get_logger("deepdns")
 
-CODE = config.SOURCE_CODES["securitytrails"]   # "s" — no tool name leaks downstream
+CODE = config.SOURCE_CODES["securitytrails"]   # "s" · no tool name leaks downstream
 
 
 def available() -> bool:
@@ -46,11 +46,11 @@ def _get(session, path: str) -> dict | None:
         log.info(f"deep DNS request failed ({path}): {exc}")
         return None
     if resp.status_code == 429:
-        log.warning("deep DNS rate limit hit — backing off")
+        log.warning("deep DNS rate limit hit · backing off")
         time.sleep(1.5)
         return None
     if resp.status_code == 401 or resp.status_code == 403:
-        log.warning("deep DNS key rejected (401/403) — check SECURITYTRAILS_KEY")
+        log.warning("deep DNS key rejected (401/403) · check SECURITYTRAILS_KEY")
         return None
     if resp.status_code != 200:
         log.info(f"deep DNS http {resp.status_code} for {path}")
@@ -124,7 +124,7 @@ def run(result: ScanResult, domain: str, *, history: bool = True,
     Returns the number of new subdomains added. No-op without a key.
 
     `subdomains=False` keeps the DNS records and the history but skips the host
-    list — that is what a single-target scan wants: everything about this one
+    list · that is what a single-target scan wants: everything about this one
     host, nothing that widens the scope.
     """
     if not available():
@@ -157,7 +157,7 @@ def run(result: ScanResult, domain: str, *, history: bool = True,
                 recs = _norm_current(rtype, block)
                 if recs:
                     result.set_dns_records(rtype, recs, source=CODE)
-                    # A/AAAA current records are real infra — link them.
+                    # A/AAAA current records are real infra · link them.
                     if rtype in ("a", "aaaa"):
                         sub = result.add_subdomain(domain)
                         for r in recs:

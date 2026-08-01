@@ -1,5 +1,5 @@
 """
-Module 3 — In-scope crawler.
+Module 3 · In-scope crawler.
 
 Starts from each live subdomain root (plus whatever the deep-crawl pre-pass
 already discovered) and walks the target domain breadth-first, following internal
@@ -7,7 +7,7 @@ links, form actions and JS-discovered request URLs until no new in-domain URLs
 remain (bounded by page/depth safety caps). It drives the HTML parser (module 4)
 and JS parser (module 5) on every page and script.
 
-Transport: the fetch layer is asyncio (`modules.asynchttp`) — one event loop with
+Transport: the fetch layer is asyncio (`modules.asynchttp`) · one event loop with
 a semaphore-bounded pool, so hundreds of requests are in flight at once instead
 of one per thread. That matters because every stage around this one is a Go
 binary running at that concurrency already; a thread-per-request crawler was the
@@ -18,7 +18,7 @@ never in capability.
 
 Scope rule (enforced here via util.in_scope): anything pointing outside the
 target domain + subdomains is logged exactly once as an out-of-scope endpoint
-entry — method, full URL, where it was found — and never fetched or followed.
+entry · method, full URL, where it was found · and never fetched or followed.
 """
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class Crawler:
         self.stats: dict = {}
 
     # ------------------------------------------------------------------ #
-    # Networking — synchronous fallback path
+    # Networking · synchronous fallback path
     # ------------------------------------------------------------------ #
     def _fetch_sync(self, url: str) -> Fetched:
         """GET a URL with the blocking client, normalised to the same result
@@ -155,7 +155,7 @@ class Crawler:
                     in_scope=scoped, fields=_query_fields(norm))
                 if scoped:
                     new.add(norm)
-            # concrete request calls (fetch/axios/XHR) — the button->request map
+            # concrete request calls (fetch/axios/XHR) · the button->request map
             for r in parsed["requests"]:
                 norm = normalize_url(r["url"], url)
                 if not norm:
@@ -317,13 +317,13 @@ class Crawler:
                 break
 
     # ------------------------------------------------------------------ #
-    # Per-URL recording — shared by both engines, may run on a worker thread
+    # Per-URL recording · shared by both engines, may run on a worker thread
     # ------------------------------------------------------------------ #
     def _record(self, doc: Fetched, is_js: bool = False) -> tuple[set[str], set[str]]:
         """Fold one fetched document into the scan.
 
         Returns (new_in_scope_urls, js_urls_to_fetch). Pure bookkeeping plus
-        parsing — no network — so it is safe to run off the event loop.
+        parsing · no network · so it is safe to run off the event loop.
         """
         if not doc.ok:
             with self.lock:
@@ -502,7 +502,7 @@ class Crawler:
             depth += 1
 
     # ------------------------------------------------------------------ #
-    # Map-file seeding (robots.txt / sitemap.xml) — runs before the BFS
+    # Map-file seeding (robots.txt / sitemap.xml) · runs before the BFS
     # ------------------------------------------------------------------ #
     def _seed_urls_from_maps(self, roots: list[str]) -> list[str]:
         seeds: list[str] = []
@@ -564,7 +564,7 @@ class Crawler:
             run_async(self._crawl_async(seeds))
         else:
             self.engine = "threads"
-            log.warning(f"{why} — falling back to the thread-pool crawler "
+            log.warning(f"{why} · falling back to the thread-pool crawler "
                         f"({self.threads} threads)")
             self._crawl_sync(seeds)
 

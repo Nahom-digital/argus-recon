@@ -1,12 +1,12 @@
 /* ============================================================================
-   Argus Recon — scan detail controller
+   Argus Recon · scan detail controller
    ========================================================================== */
 'use strict';
 
 const ROW_CAP = 1500;
 const GRAPH_LAZY = 500;              // above this, defer physics until activated
 let SCAN = null, GRAPH = null, detailMode = false;
-const F = { search: '', type: '', status: '', scope: 'in', classifiedOnly: false, host: null, ip: null };
+const F = { search: '', type: '', status: '', scope: 'in', classifiedOnly: false, host: null, ip: null, fileType: '' };
 
 /* IP <-> host index, built once per scan from both directions (a subdomain
    lists its IPs, an IP record lists the hosts that resolve to it). */
@@ -25,12 +25,13 @@ async function init() {
   SCAN_ID = id;
   wireSections();
   wireGraphSplitter();
+  wireSideSplitter();
   showLoading();
 
   // Both requests go out together, but the page does not wait for both before
   // drawing anything. The graph is much the slower of the two on a large scan,
   // and awaiting them as a pair is what left the panel, the table *and* the
-  // graph blank until the slowest one had landed — the whole page looked dead.
+  // graph blank until the slowest one had landed · the whole page looked dead.
   // Each half now renders the moment its own response arrives, and one failing
   // no longer blanks the other.
   const viewP = getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/view`));
@@ -79,6 +80,19 @@ function showLoading() {
 
 function clearGraphLoading() {
   document.querySelectorAll('.graph-loading').forEach(el => el.remove());
+}
+
+/* A graph-loading overlay shown while an engine is (re)built. Switching to the
+   Cytoscape engine has to fetch and parse several vendor bundles the first time,
+   which used to freeze the tab with no feedback; this shows the switch is
+   working rather than stuck. */
+function showGraphLoading(text) {
+  const wrap = document.getElementById('graphWrap');
+  if (!wrap) return;
+  clearGraphLoading();
+  wrap.insertAdjacentHTML('beforeend',
+    `<div class="graph-loading"><div class="empty" style="margin:auto">${icon('refresh', 'spinning')}
+      <h4>${esc(text || 'Building graph…')}</h4></div></div>`);
 }
 
 function failLoading(err) {
@@ -163,10 +177,12 @@ function renderPanel(s) {
     emptyMini('none flagged');
   document.querySelector('.side-sec[data-sec="secrets"]').classList.toggle('collapsed', !secrets.length);
 
-  // files
+  // files (with a type filter built from what was actually discovered)
   const files = s.files || [];
   setCount('cFiles', files.length);
-  document.getElementById('fileList').innerHTML = files.map((f, i) => fileRow(f, i)).join('') || emptyMini('none');
+  F.fileType = '';
+  buildFileFilter(files);
+  renderFileList();
 
   wirePanelInteractions();
 }
@@ -208,7 +224,7 @@ function ipCard(ip) {
   </div>`;
 }
 
-/* Open ports on one address — the port-scan layer inside Infrastructure. Each
+/* Open ports on one address · the port-scan layer inside Infrastructure. Each
    port is expandable: the summary is port/service/version, the detail is the
    default-script output the scan captured. OS + traceroute, when present, sit
    above the port list. */
@@ -232,7 +248,7 @@ function portsBlock(ip) {
 }
 
 function portRow(p) {
-  const svc = p.service || '—';
+  const svc = p.service || '·';
   const ver = [p.product, p.version].filter(Boolean).join(' ');
   const web = /https?/.test(svc) || p.tunnel === 'ssl';
   const scripts = Object.entries(p.scripts || {});
@@ -247,7 +263,7 @@ function portRow(p) {
   return `<div class="prow${hasDetail ? ' has-detail' : ''}" ${web ? 'data-web="1"' : ''}>
     <button class="psummary"${hasDetail ? '' : ' tabindex="-1"'}>
       ${badge}
-      <span class="port-svc">${esc(svc)}${web ? ` <span class="port-web" title="web service — crawled">${icon('world')}</span>` : ''}</span>
+      <span class="port-svc">${esc(svc)}${web ? ` <span class="port-web" title="web service · crawled">${icon('world')}</span>` : ''}</span>
       ${ver ? `<span class="port-ver mono faint">${esc(ver)}</span>` : ''}
       ${hasDetail ? `<svg class="ic pchev"><use href="#i-chevron-down"></use></svg>` : ''}
     </button>
@@ -296,7 +312,7 @@ function renderDns(dns) {
   const wh = dns.whois || {};
   const hasWhois = Object.values(wh).some(Boolean);
   if (!nRec && !nHist && !hasWhois) {
-    body.innerHTML = emptyMini('no DNS data yet — run with Deep for full records + history');
+    body.innerHTML = emptyMini('no DNS data yet · run with Deep for full records + history');
     document.querySelector('.side-sec[data-sec="dns"]').classList.add('collapsed');
     return;
   }
@@ -357,7 +373,7 @@ function secRow(x) {
   </div>`;
 }
 
-/* Files: expandable — source + request + response (item 10) */
+/* Files: expandable · source + request + response (item 10) */
 function fileRow(f, i) {
   const p = splitUrl(f.url);
   const srcs = (f.sources || []).map(sc => `<span class="src-chip mini" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`).join('');
@@ -371,6 +387,59 @@ function fileRow(f, i) {
     <div class="fmeta"><span class="faint">${esc(p.host)}</span>${srcs}</div>
     <div class="fdetail"></div>
   </div>`;
+}
+
+/* Discovered-files type filter, built from the kinds actually present in this
+   scan (js, json, config, backup, image, ...), plus a synthetic "code" group
+   that collects the source / config / data kinds. Client-side; re-renders the
+   list without refetching. */
+const CODE_FILE_TYPES = new Set(['js', 'ts', 'jsx', 'tsx', 'json', 'config', 'env',
+  'source', 'php', 'py', 'rb', 'go', 'java', 'xml', 'yaml', 'yml', 'ini', 'log',
+  'backup', 'angular', 'sql']);
+function fileTypeOf(f) { return (f.subtype || f.kind || 'other'); }
+
+function buildFileFilter(files) {
+  const el = document.getElementById('fileFilter');
+  if (!el) return;
+  const types = [...new Set(files.map(fileTypeOf))].sort();
+  const codeCount = files.filter(f => CODE_FILE_TYPES.has(fileTypeOf(f))).length;
+  // nothing worth filtering if there is a single kind and no distinct code group
+  if (types.length < 2 && !(codeCount && codeCount < files.length)) {
+    el.hidden = true; el.innerHTML = ''; return;
+  }
+  el.hidden = false;
+  const opts = [`<option value="">all types (${files.length})</option>`];
+  if (codeCount && codeCount < files.length)
+    opts.push(`<option value="__code">code (${codeCount})</option>`);
+  types.forEach(t => {
+    const n = files.filter(f => fileTypeOf(f) === t).length;
+    opts.push(`<option value="${esc(t)}">${esc(t)} (${n})</option>`);
+  });
+  el.innerHTML = `<svg class="ic"><use href="#i-filter"></use></svg>
+    <select class="input" id="fileTypeFilter" aria-label="Filter discovered files by type">${opts.join('')}</select>`;
+  const sel = el.querySelector('#fileTypeFilter');
+  sel.value = F.fileType || '';
+  sel.addEventListener('change', () => { F.fileType = sel.value; renderFileList(); });
+}
+
+function fileMatches(f) {
+  if (!F.fileType) return true;
+  if (F.fileType === '__code') return CODE_FILE_TYPES.has(fileTypeOf(f));
+  return fileTypeOf(f) === F.fileType;
+}
+
+/* Render (or re-render) the file rows for the active type filter. Each row keeps
+   its original index into SCAN.files, so expanding still finds the record. */
+function renderFileList() {
+  const list = document.getElementById('fileList');
+  if (!list) return;
+  const files = (SCAN && SCAN.files) || [];
+  const rows = [];
+  files.forEach((f, i) => { if (fileMatches(f)) rows.push(fileRow(f, i)); });
+  list.innerHTML = rows.join('') ||
+    emptyMini(F.fileType ? 'no files of this type' : 'none');
+  list.querySelectorAll('.frow').forEach(r =>
+    r.querySelector('.fsummary').addEventListener('click', () => toggleFile(r)));
 }
 
 function fileDetail(f) {
@@ -412,9 +481,7 @@ function wirePanelInteractions() {
     el.addEventListener('click', (e) => { e.stopPropagation(); setHostFilter(el.dataset.host); }));
   document.querySelectorAll('.chip-ip[data-ip], .ipaddr[data-ip]').forEach(el =>
     el.addEventListener('click', (e) => { e.stopPropagation(); setIpFilter(el.dataset.ip); }));
-  document.querySelectorAll('.frow').forEach(r => {
-    r.querySelector('.fsummary').addEventListener('click', () => toggleFile(r));
-  });
+  // file rows are wired by renderFileList (they re-render when the type filter changes)
   // port rows: expand to reveal version / CPE / script output
   document.querySelectorAll('.prow.has-detail .psummary').forEach(btn =>
     btn.addEventListener('click', () => btn.closest('.prow').classList.toggle('open')));
@@ -497,12 +564,12 @@ function buildStatusFilter() {
   sel.innerHTML = opts.join('');
 }
 
-/* Domain / subdomain filter — every host seen in this scan (apex first).
+/* Domain / subdomain filter · every host seen in this scan (apex first).
 
    The host and IP filters are supportive, not exclusive: you can hold a
    subdomain AND an IP at once and the list/graph show their intersection. So
    when an IP is active this dropdown is narrowed to the hosts that resolve to it
-   (`constraintIp`) — picking from it can only ever produce a valid combination.
+   (`constraintIp`) · picking from it can only ever produce a valid combination.
    With no IP held it lists every host. */
 function buildHostFilter(constraintIp) {
   const sel = document.getElementById('hostFilter');
@@ -522,7 +589,7 @@ function buildHostFilter(constraintIp) {
   if (F.host) sel.value = F.host;
 }
 
-/* IP filter — every resolved IP in this scan, busiest first, labelled with how
+/* IP filter · every resolved IP in this scan, busiest first, labelled with how
    many hosts sit on it and who owns it. Supportive with the host filter: when a
    subdomain is held this dropdown is narrowed to just that host's IPs
    (`constraintHost`), so selecting one further scopes to a single address served
@@ -721,7 +788,7 @@ function wireTableControls() {
   if (exp) exp.addEventListener('click', toggleDetailMode);
 }
 
-/* Central host filter — drives the request list AND the graph. Clicking the
+/* Central host filter · drives the request list AND the graph. Clicking the
    same host again clears it. Selecting one host is also what unlocks the
    graph's endpoint / file / field layers.
 
@@ -738,7 +805,7 @@ function setHostFilter(host) {
   syncGraphFilter();
 }
 
-/* IP filter — same contract; scopes to hosts resolving to that address, and
+/* IP filter · same contract; scopes to hosts resolving to that address, and
    combines with a held subdomain rather than replacing it. */
 function setIpFilter(ip) {
   F.ip = (F.ip === ip || !ip) ? null : ip;
@@ -802,7 +869,7 @@ function toggleDetailMode() {
   }
 }
 
-/* Every table gets the full width of the page and its own row — nothing sits
+/* Every table gets the full width of the page and its own row · nothing sits
    side by side, so no data set has to be read through a horizontal scrollbar. */
 function renderDetail() {
   const dv = document.getElementById('detailView');
@@ -915,7 +982,7 @@ function dvSubdomainsCard(subs) {
 }
 
 /* Tech stack: what was detected, on which subdomains, and on which IPs those
-   subdomains resolve to — not just a bare list of fingerprints. */
+   subdomains resolve to · not just a bare list of fingerprints. */
 function dvTechCard(subs) {
   const map = {};
   subs.forEach(sd => (sd.tech || []).forEach(t => { (map[t] = map[t] || []).push(sd.host); }));
@@ -994,7 +1061,7 @@ function setCollapsed(on, persist) {
   document.querySelector('.main').classList.toggle('graph-collapsed', on);
   document.getElementById('graphRestore').hidden = !on;
   const btn = document.getElementById('gCollapse');
-  if (btn) btn.setAttribute('title', on ? 'Show graph' : 'Collapse graph — give the table the full height');
+  if (btn) btn.setAttribute('title', on ? 'Show graph' : 'Collapse graph · give the table the full height');
   if (persist) { try { localStorage.setItem(GRAPH_COLLAPSED_KEY, on ? '1' : '0'); } catch (e) {} }
   if (!on && GRAPH) requestAnimationFrame(() => GRAPH.fit());
 }
@@ -1053,18 +1120,83 @@ function wireGraphSplitter() {
   if (restore) restore.addEventListener('click', () => setCollapsed(false, true));
 }
 
+/* ---- left panel width -----------------------------------------------------
+   The left panel was a fixed 336px column: the graph/table split could be
+   dragged but the panel could not, so a long host or IP list had no way to get
+   more room. It is now user-sized with the same handle vocabulary as the graph
+   splitter (drag, double-click to reset, arrow keys), remembered per browser. */
+const SIDE_W_KEY = 'argus-side-w';
+const SIDE_W_DEFAULT = 336;
+
+function sideWBounds() {
+  // keep the panel usable and always leave the main column the larger half
+  return { min: 240, max: Math.max(300, Math.round(window.innerWidth * 0.5)) };
+}
+function setSideW(px, persist) {
+  const { min, max } = sideWBounds();
+  const v = Math.max(min, Math.min(max, Math.round(px)));
+  const layout = document.querySelector('.scan-layout');
+  if (layout) layout.style.setProperty('--side-w', v + 'px');
+  if (persist) { try { localStorage.setItem(SIDE_W_KEY, String(v)); } catch (e) {} }
+  return v;
+}
+
+function wireSideSplitter() {
+  const layout = document.querySelector('.scan-layout');
+  const handle = document.getElementById('sideResize');
+  if (!layout || !handle) return;
+
+  let saved = null;
+  try { saved = parseInt(localStorage.getItem(SIDE_W_KEY) || '', 10); } catch (e) {}
+  setSideW(Number.isFinite(saved) && saved > 0 ? saved : SIDE_W_DEFAULT, false);
+
+  let startX = 0, startW = 0, dragging = false;
+  const onMove = (e) => {
+    if (!dragging) return;
+    const x = (e.touches ? e.touches[0].clientX : e.clientX);
+    setSideW(startW + (x - startX), false);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    const cur = parseInt(getComputedStyle(layout).getPropertyValue('--side-w'), 10);
+    if (Number.isFinite(cur)) { try { localStorage.setItem(SIDE_W_KEY, String(cur)); } catch (e) {} }
+    if (GRAPH) GRAPH.fit();
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+  };
+  const onDown = (e) => {
+    dragging = true;
+    startX = (e.touches ? e.touches[0].clientX : e.clientX);
+    startW = document.getElementById('side').getBoundingClientRect().width;
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    e.preventDefault();
+  };
+  handle.addEventListener('pointerdown', onDown);
+  handle.addEventListener('dblclick', () => { setSideW(SIDE_W_DEFAULT, true); if (GRAPH) GRAPH.fit(); });
+  handle.addEventListener('keydown', (e) => {
+    const cur = document.getElementById('side').getBoundingClientRect().width;
+    if (e.key === 'ArrowLeft') { setSideW(cur - 24, true); e.preventDefault(); if (GRAPH) GRAPH.fit(); }
+    else if (e.key === 'ArrowRight') { setSideW(cur + 24, true); e.preventDefault(); if (GRAPH) GRAPH.fit(); }
+  });
+}
+
 /* ---- graph ----------------------------------------------------------------
 
    Two interchangeable engines behind one GRAPH handle:
-     'canvas' — the built-in dependency-free renderer (default, engine "1"),
-     'cy'     — Cytoscape.js with the fCoSE layout and a switchable fCoSE/SBGN
-                stylesheet (engine "2"; its vendor bundles load on first use).
+     'canvas' is the built-in dependency-free renderer (default, engine "1").
+     'cy' is Cytoscape.js with the fCoSE layout (engine "2"; its vendor bundles
+     load on first use).
    Both expose the same {fit, reheat, buildLegend, activate, setFilter} surface,
    so switching is: tear the old one down, show the other container, rebuild, and
    re-apply the current host/IP filter. */
 let GRAPH_DATA = null;
 let ENGINE = 'canvas';
-let CY_STYLE = 'fcose';
 
 function initGraph(graph) {
   GRAPH_DATA = graph;
@@ -1079,7 +1211,7 @@ function initGraph(graph) {
     + (st.truncated ? ` · ${fmtNum(n)} of ${fmtNum(total)} nodes` : ` · ${fmtNum(n)} nodes`);
   if (st.truncated)
     badge.title = `This scan's graph has ${fmtNum(total)} nodes. `
-      + `${fmtNum(n)} are drawn — the structure in full, plus as much per-page `
+      + `${fmtNum(n)} are drawn · the structure in full, plus as much per-page `
       + `detail as the view budget allows. Add ?limit=N to the URL to raise it.`;
   wireGraphEngineControls();
   if (!graph.nodes.length) {
@@ -1096,11 +1228,16 @@ function initGraph(graph) {
 function startGraph(graph, reapplyFilter) {
   const detail = window.GRAPH_DETAIL_TYPES || new Set();
   const upfront = graph.nodes.reduce((a, x) => a + (detail.has(x.type) ? 0 : 1), 0);
-  const done = () => { if (reapplyFilter) syncGraphFilter(); };
+  const done = () => { clearGraphLoading(); if (reapplyFilter) syncGraphFilter(); };
   if (upfront > GRAPH_LAZY) {
+    // large graph: the activation overlay is its own progress UI
     showActivate(graph, upfront, done);
   } else {
-    buildGraph(graph, true).then(done);
+    // small graph builds and lays out immediately, but the Cytoscape engine
+    // still has to load its vendor bundles, so show a loading state until it is
+    // on screen instead of a frozen tab
+    if (ENGINE === 'cy') showGraphLoading('Loading graph engine…');
+    buildGraph(graph, true).then(done, (err) => { clearGraphLoading(); failGraph(err); });
   }
 }
 
@@ -1110,7 +1247,7 @@ const GRAPH_OPTS = {
     if (node.type === 'Subdomain') setHostFilter(node.label);
     else if (node.type === 'IP') setIpFilter(node.label);
   },
-  // a locked legend layer was clicked — send the user to the control that unlocks it
+  // a locked legend layer was clicked · send the user to the control that unlocks it
   onLocked() {
     const sel = document.getElementById('hostFilter');
     if (sel) { sel.focus(); sel.classList.add('nudge'); setTimeout(() => sel.classList.remove('nudge'), 900); }
@@ -1131,7 +1268,7 @@ function buildGraph(graph, autoStart) {
 function buildCyGraph(graph, autoStart) {
   const host = document.getElementById('cyGraph');
   return loadCyEngine(BASE).then(() => {
-    GRAPH = createCyGraph(host, graph, { ...GRAPH_OPTS, style: CY_STYLE });
+    GRAPH = createCyGraph(host, graph, { ...GRAPH_OPTS });
     GRAPH.buildLegend(document.getElementById('legend'));
     if (autoStart) return GRAPH.activate().then(() => GRAPH);
     return GRAPH;
@@ -1146,15 +1283,12 @@ function wireGraphButtonsOnce() {
   document.getElementById('gReheat').addEventListener('click', () => GRAPH && GRAPH.reheat());
 }
 
-/* Engine (1/2) + Cytoscape stylesheet (fCoSE/SBGN) switches. */
+/* Engine (1/2) switch. */
 function wireGraphEngineControls() {
   wireGraphButtonsOnce();
   const engSwitch = document.getElementById('engineSwitch');
-  const styleSwitch = document.getElementById('styleSwitch');
   if (engSwitch) engSwitch.querySelectorAll('.gseg-btn').forEach(btn =>
     btn.addEventListener('click', () => switchEngine(btn.dataset.engine)));
-  if (styleSwitch) styleSwitch.querySelectorAll('.gseg-btn').forEach(btn =>
-    btn.addEventListener('click', () => setCyStyle(btn.dataset.style)));
 }
 
 function switchEngine(engine) {
@@ -1165,8 +1299,6 @@ function switchEngine(engine) {
     const on = b.dataset.engine === engine;
     b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
   });
-  const styleSwitch = document.getElementById('styleSwitch');
-  if (styleSwitch) styleSwitch.hidden = engine !== 'cy';
 
   // tear the old engine down and reset the shared overlay bits
   if (GRAPH && GRAPH.destroy) { try { GRAPH.destroy(); } catch (e) {} }
@@ -1178,25 +1310,12 @@ function switchEngine(engine) {
   document.getElementById('cyGraph').hidden = engine !== 'cy';
 
   document.getElementById('graphSource').textContent =
-    (ENGINE === 'cy' ? 'cytoscape · ' + CY_STYLE : (GRAPH_DATA.source || 'json'))
+    (ENGINE === 'cy' ? 'cytoscape' : (GRAPH_DATA.source || 'json'))
     + ` · ${GRAPH_DATA.stats.nodes} nodes`;
   startGraph(GRAPH_DATA, /*reapplyFilter=*/true);
 }
 
-function setCyStyle(style) {
-  CY_STYLE = style === 'sbgn' ? 'sbgn' : 'fcose';
-  document.querySelectorAll('#styleSwitch .gseg-btn').forEach(b => {
-    const on = b.dataset.style === CY_STYLE;
-    b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
-  });
-  if (ENGINE === 'cy' && GRAPH && GRAPH.setStyle) {
-    GRAPH.setStyle(CY_STYLE);
-    document.getElementById('graphSource').textContent =
-      `cytoscape · ${CY_STYLE} · ${GRAPH_DATA.stats.nodes} nodes`;
-  }
-}
-
-/* Large graph: don't freeze the tab — let the user activate + show progress.
+/* Large graph: don't freeze the tab. Let the user activate and show progress.
    `onDone` fires once layout has settled (used to re-apply a filter after an
    engine switch). */
 function showActivate(graph, n, onDone) {
@@ -1204,7 +1323,7 @@ function showActivate(graph, n, onDone) {
   const ov = h('div', { class: 'graph-activate' });
   ov.innerHTML = `<div class="ga-inner">${icon('topology-star-3')}
     <h4>${fmtNum(n)} nodes</h4>
-    <p>This graph is large. Activate it to lay it out — the rest of the scan is ready below.</p>
+    <p>This graph is large. Activate it to lay it out · the rest of the scan is ready below.</p>
     <button class="btn primary" id="gaBtn">${icon('topology-star-3')} Activate graph</button>
     <div class="ga-prog" hidden><div class="ga-bar"><span></span></div><div class="ga-pct faint">laying out… 0%</div></div>
   </div>`;

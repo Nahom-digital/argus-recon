@@ -1,5 +1,5 @@
 /* ============================================================================
-   Argus Recon — canvas force-directed graph
+   Argus Recon · canvas force-directed graph
    Custom, dependency-free renderer for the crawl graph:
      Domain -> Subdomain -> Endpoint -> Request -> Field, IP/ASN, Secret, File.
    Grid-approximated repulsion keeps it smooth for thousands of nodes; the
@@ -11,8 +11,8 @@ const NODE_TYPES = ['Domain', 'Subdomain', 'IP', 'ASN', 'Port', 'Endpoint', 'JS'
   'Request', 'Field', 'Secret', 'File', 'External'];
 
 /* Per-page detail: these carry the bulk of a scan (thousands of nodes) and are
-   only meaningful inside one host. They stay hidden — and their legend entry
-   locked — until a specific subdomain is selected, so the "all hosts" view
+   only meaningful inside one host. They stay hidden · and their legend entry
+   locked · until a specific subdomain is selected, so the "all hosts" view
    stays readable. The legend still reports their real totals, so the true size
    of the surface is always visible even while they are locked. */
 const DETAIL_TYPES = new Set(['Endpoint', 'Request', 'Field', 'JS', 'File', 'External']);
@@ -77,7 +77,7 @@ function createGraph(canvas, data, opts) {
     return true;
   }
 
-  /* Visibility only changes when a filter or a legend toggle changes it — never
+  /* Visibility only changes when a filter or a legend toggle changes it · never
      during the simulation. Resolve it once into a flag + a dense list so the
      per-frame loops don't re-test three sets per node and per edge. */
   const visList = [];
@@ -91,7 +91,7 @@ function createGraph(canvas, data, opts) {
   // A crowded cell (right after a layer is revealed, everything starts stacked)
   // would make repulsion quadratic. Sample a bounded number of neighbours per
   // cell, rotating which ones each tick, and scale the force by what was
-  // skipped — the crowd disperses just as fast, at a fixed cost per node.
+  // skipped · the crowd disperses just as fast, at a fixed cost per node.
   const CELL_SAMPLE = 10;
   const GKEY = (cx, cy) => (cx + 8192) * 65536 + (cy + 8192);   // numeric grid key
   let ticks = 0;
@@ -187,7 +187,7 @@ function createGraph(canvas, data, opts) {
 
     // edges: everything unrelated to the focused node is stroked as one path.
     // On a big graph they are also the bulk of the raster cost, so while the
-    // layout is still moving we draw nodes only — the mesh lands the moment it
+    // layout is still moving we draw nodes only · the mesh lands the moment it
     // comes to rest.
     const settling = running && visList.length > 600;
     ctx.lineWidth = 1;
@@ -255,7 +255,7 @@ function createGraph(canvas, data, opts) {
     ctx.textBaseline = 'middle';
     for (const n of labelled) {
       const lbl = shortLabel(n);
-      ctx.font = (n.type === 'Domain' ? '600 12px ' : '500 11px ') + "'Hanken Grotesk',sans-serif";
+      ctx.font = (n.type === 'Domain' ? '600 12px ' : '500 11px ') + "'Libertinus Serif',Georgia,serif";
       const tw = ctx.measureText(lbl).width;
       const lx = n.x * k + tx + n.r + 4, ly = n.y * k + ty;
       ctx.fillStyle = TH.labelBg;
@@ -322,7 +322,7 @@ function createGraph(canvas, data, opts) {
       hover = n;
       canvas.style.cursor = n ? 'pointer' : 'grab';
       mark();
-      // hover only highlights adjacency — the card is shown on click (and locks)
+      // hover only highlights adjacency · the card is shown on click (and locks)
     }
   }
   function onDown(ev) {
@@ -333,7 +333,7 @@ function createGraph(canvas, data, opts) {
     if (n) {
       dragging = n; n.fixed = true;
       // Lock selection on first click; while locked, clicking a different node
-      // does NOT change the card — only the card's × releases it.
+      // does NOT change the card · only the card's × releases it.
       if (!locked) selectNode(n);
     } else {
       panning = true; last = { x: px, y: py }; canvas.classList.add('grabbing');
@@ -430,7 +430,7 @@ function createGraph(canvas, data, opts) {
         const m = byId.get(nb);
         if (!m) continue;
         if (m.type === 'Domain') { keep.add(nb); continue; }        // anchor only
-        if (m.type === 'Subdomain' && !subIds.has(nb)) continue;    // a sibling host (shared IP) — don't cross into it
+        if (m.type === 'Subdomain' && !subIds.has(nb)) continue;    // a sibling host (shared IP) · don't cross into it
         keep.add(nb); stack.push(nb);
       }
     }
@@ -468,7 +468,7 @@ function createGraph(canvas, data, opts) {
     for (const n of nodes) if (visible(n)) n.seeded = true;
   }
 
-  /* setFilter({hosts, detail}) — the single entry point the dashboard uses.
+  /* setFilter({hosts, detail}) · the single entry point the dashboard uses.
      `detail` unlocks DETAIL_TYPES; it is only ever true when exactly one
      subdomain is selected. */
   function setFilter(f) {
@@ -495,7 +495,7 @@ function createGraph(canvas, data, opts) {
   function filterHost(host) { setFilter({ hosts: host ? [host] : null, detail: !!host }); }
 
   // ---- legend ----
-  // Counts are always the scan's real totals — locked layers still report how
+  // Counts are always the scan's real totals · locked layers still report how
   // much is there, they just are not drawn until a subdomain is picked. When a
   // view budget trimmed a layer the server sends stats.totals alongside what it
   // actually shipped, so the legend keeps reporting the true size of the surface
@@ -513,9 +513,9 @@ function createGraph(canvas, data, opts) {
       const lock = DETAIL_TYPES.has(t) && !detailUnlocked;
       const off = !lock && hidden.has(t);
       const partial = total(t) > (present[t] || 0);
-      const tip = lock ? `${total(t)} ${t} nodes — select a subdomain to activate this layer`
-        : partial ? `${total(t)} ${t} nodes in this scan — ${present[t] || 0} drawn (view budget)`
-          : `${total(t)} ${t} nodes — click to ${off ? 'show' : 'hide'}`;
+      const tip = lock ? `${total(t)} ${t} nodes · select a subdomain to activate this layer`
+        : partial ? `${total(t)} ${t} nodes in this scan · ${present[t] || 0} drawn (view budget)`
+          : `${total(t)} ${t} nodes · click to ${off ? 'show' : 'hide'}`;
       return `<span class="lg${lock ? ' locked' : ''}${off ? ' off' : ''}" data-t="${t}" title="${tip}">
         ${lock ? `<svg class="ic lk" aria-hidden="true"><use href="#i-lock"></use></svg>`
         : `<span class="sw" style="background:${typeColor(t)}"></span>`}
@@ -535,7 +535,7 @@ function createGraph(canvas, data, opts) {
     if (hint) hint.addEventListener('click', flashHint);
   }
 
-  /* A locked layer was clicked — point at the control that unlocks it. */
+  /* A locked layer was clicked · point at the control that unlocks it. */
   function flashHint() {
     const hint = legendEl && legendEl.querySelector('#lgHint');
     if (hint) { hint.classList.remove('flash'); void hint.offsetWidth; hint.classList.add('flash'); }
@@ -576,13 +576,13 @@ function createGraph(canvas, data, opts) {
       })();
     });
   }
-  /* whatever was laid out up front is "in place" — later layers are seeded
+  /* whatever was laid out up front is "in place" · later layers are seeded
      relative to it */
   function markSeeded() { for (const n of visList) n.seeded = true; }
 
   if (opts.autoStart !== false) {
     started = true;
-    for (let i = 0; i < 110; i++) tick();   // settle synchronously — small graph
+    for (let i = 0; i < 110; i++) tick();   // settle synchronously · small graph
     markSeeded();
     fit();
     frame();

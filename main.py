@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Argus Recon — scan engine.
+Argus Recon · scan engine.
 
 Runs the full single-domain recon pipeline in order and writes one JSON file per
 scan into ./scans:
 
-    0. Tor transport (optional)           (modules.tor — before anything else)
+    0. Tor transport (optional)           (modules.tor · before anything else)
     1. subdomain discovery + infra        (modules.subdomain: fast passive → BBOT,
                                            bulk resolver)
-    2. mass HTTP probe                    (modules.probe — live hosts + scheme)
+    2. mass HTTP probe                    (modules.probe · live hosts + scheme)
     3. tech-stack fingerprinting          (modules.fingerprint, WhatWeb -a 3)
-    4. deep crawl pre-pass                (modules.deepcrawl — JS-aware discovery)
+    4. deep crawl pre-pass                (modules.deepcrawl · JS-aware discovery)
     5. crawl -> HTML parse -> JS parse    (modules.crawler, async transport)
     6. smart bruteforce                   (modules.bruteforce, ffuf)
     7. IP enrichment                      (modules.ip_enrich, ipinfo.io)
@@ -54,7 +54,7 @@ SRC_PORTSCAN = config.SOURCE_CODES["portscan"]
 # The stages a scan runs by default and can switch off from the dashboard. The
 # port scan is deliberately NOT here: it is opt-in (a toggle, like Tor and deep
 # DNS), because it touches the target's infrastructure directly rather than its
-# web surface — see --portscan.
+# web surface · see --portscan.
 ALL_MODULES = ["subdomain", "fingerprint", "crawl", "bruteforce",
                "ip_enrich", "classify", "graph"]
 
@@ -69,7 +69,7 @@ def _refuse_terminal_use() -> int:
 
       {url}
 
-  Enter the target there and press Run scan — you get the same pipeline,
+  Enter the target there and press Run scan · you get the same pipeline,
   a live log, and the result opens in the graph view when it finishes.
 
       ./argus            is the service live?
@@ -103,7 +103,7 @@ def run_pipeline(args) -> ScanResult:
     domain = raw_host if exact else registrable_domain(raw_host)
     input_host = raw_host if is_subdomain_of(raw_host, domain) else None
     if input_host:
-        log.info(f"target {raw_host} is a subdomain — pivoting scope to apex {domain}")
+        log.info(f"target {raw_host} is a subdomain · pivoting scope to apex {domain}")
 
     # Single-target mode: nothing outside this one host is in scope, for every
     # module at once (crawler, parsers, bruteforce, graph).
@@ -126,7 +126,7 @@ def run_pipeline(args) -> ScanResult:
              + ("  · single target" if args.single else "")
              + ("  · over Tor" if tor.active() else ""))
     if args.single:
-        log.info(f"scope: {domain} only — no subdomain enumeration, nothing off-host "
+        log.info(f"scope: {domain} only · no subdomain enumeration, nothing off-host "
                  "is followed")
 
     # 1. Subdomains + infra
@@ -140,7 +140,7 @@ def run_pipeline(args) -> ScanResult:
                       deep=deep, input_host=input_host,
                       single=args.single)  # resolve + DNS only
 
-    # 2. Mass HTTP probe — establishes which hosts are live and on which scheme
+    # 2. Mass HTTP probe · establishes which hosts are live and on which scheme
     #    for both the fingerprint and the crawl. Runs whenever either of those
     #    stages will (they both start from the live-host list it produces).
     if ("fingerprint" in run or "crawl" in run) and not args.no_probe:
@@ -173,7 +173,7 @@ def run_pipeline(args) -> ScanResult:
         crawler.run(result, max_pages=args.max_pages, max_depth=args.max_depth,
                     threads=args.threads, extra_seeds=seeds)
     elif args.portscan and port_seeds:
-        # crawl disabled but a scan still turned up web ports — record them as
+        # crawl disabled but a scan still turned up web ports · record them as
         # confirmed endpoints so they are not silently dropped.
         for seed in port_seeds:
             result.add_endpoint(seed, etype="page", source=SRC_PORTSCAN, in_scope=True)
@@ -265,7 +265,7 @@ def main(argv=None):
     p.add_argument("--exact-scope", action="store_true",
                    help="treat the given host literally; do not pivot a subdomain to its apex")
     p.add_argument("--single", action="store_true",
-                   help="single-target scan: this host only — no subdomain "
+                   help="single-target scan: this host only · no subdomain "
                         "enumeration, nothing off-host is in scope")
     p.add_argument("--tor", action="store_true",
                    help="route the whole scan through Tor; aborts if a circuit "
@@ -324,7 +324,7 @@ def main(argv=None):
             tor.connect()
         except tor.TorError as exc:
             log.error(f"Tor: {exc}")
-            print("\n  Scan aborted — Tor was requested and could not be "
+            print("\n  Scan aborted · Tor was requested and could not be "
                   "established.\n  Nothing was sent to the target.\n", file=sys.stderr)
             return 3
 
@@ -338,7 +338,7 @@ def main(argv=None):
 
         # 10. Graph. Neo4j is a server, so the engine can load it directly. An
         #     embedded kuzu DB can only be open in one process at a time and the
-        #     dashboard owns it — so for kuzu (and when no backend is up) the scan
+        #     dashboard owns it · so for kuzu (and when no backend is up) the scan
         #     is queued and the dashboard's worker loads it. Either way a failure
         #     is queued, never lost, and the graph still renders from JSON.
         if "graph" in _selected(args):
@@ -352,7 +352,7 @@ def main(argv=None):
             # Queue for the dashboard to load only when a backend actually exists
             # to load it into (kuzu is owned by the dashboard process; a failed
             # neo4j load is worth retrying). With graph storage off entirely there
-            # is nothing to queue — the dashboard still renders it from the JSON.
+            # is nothing to queue · the dashboard still renders it from the JSON.
             if not loaded and backend != "none":
                 try:
                     from modules import store

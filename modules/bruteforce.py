@@ -1,11 +1,11 @@
 """
-Module 6 — Smart content bruteforce.
+Module 6 · Smart content bruteforce.
 
 For every live subdomain root:
 
   1. read robots.txt and sitemap.xml first for free path hints (recorded as
      endpoints and folded into the wordlist),
-  2. generate a targeted wordlist from the detected tech stack — CMS/framework
+  2. generate a targeted wordlist from the detected tech stack · CMS/framework
      specific paths (config.STACK_WORDLISTS) plus a stack-agnostic base list and
      any robots/sitemap hints,
   3. run ffuf with that list and the standard extension set
@@ -18,13 +18,13 @@ recorded as discovered files.
 Noise control (item 6). Two things were wasting the classifier's time:
 
   * a status allow-list kept soft-404s, which answer 200. The run now takes
-    `-mc all` and subtracts noise instead — a per-host calibration probe learns
+    `-mc all` and subtracts noise instead · a per-host calibration probe learns
     the size of the host's own catch-all page, and `-fs` drops every response
     that size, so only responses that actually differ from "not found" survive,
   * an unbounded fan-out got the scanner rate-limited (429s, tarpits that read
     as hits). `-rate` caps requests per second to a value the target tolerates.
 
-The wordlist and the stack-aware generation are unchanged — that is the part
+The wordlist and the stack-aware generation are unchanged · that is the part
 worth keeping; only the request tuning and the response filtering changed.
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ from .util import (get_logger, make_session, resolve_tool, run_cmd, normalize_ur
 
 log = get_logger("bruteforce")
 
-SRC_FFUF = config.SOURCE_CODES["ffuf"]  # "f" — the tool name never reaches the JSON
+SRC_FFUF = config.SOURCE_CODES["ffuf"]  # "f" · the tool name never reaches the JSON
 _RESP_HEADER_KEYS = ("server", "content-type", "content-length", "location",
                      "set-cookie", "x-powered-by", "last-modified", "etag",
                      "content-disposition", "www-authenticate")
@@ -174,7 +174,7 @@ def generate_wordlist(tech_tags: list[str], hints: set[str]) -> tuple[list[str],
 
 
 # --------------------------------------------------------------------------- #
-# Calibration — learn a host's catch-all so real hits stand out from soft-404s
+# Calibration · learn a host's catch-all so real hits stand out from soft-404s
 # --------------------------------------------------------------------------- #
 def _calibrate(session, root: str) -> set[int]:
     """Request a few paths that cannot exist and collect the response sizes.
@@ -209,13 +209,13 @@ def _run_ffuf(root: str, wordlist: Path, timeout: int, maxtime: int,
               filter_sizes: set[int] | None = None) -> list[dict]:
     ffuf = resolve_tool(config.FFUF_BIN)
     if not ffuf:
-        log.warning("ffuf not found — skipping bruteforce for %s", root)
+        log.warning("ffuf not found · skipping bruteforce for %s", root)
         return []
     fuzz_url = root.rstrip("/") + "/FUZZ"
     with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as tf:
         out = Path(tf.name)
     try:
-        # ffuf is a Go binary — torsocks (an LD_PRELOAD shim) cannot cover it, so
+        # ffuf is a Go binary · torsocks (an LD_PRELOAD shim) cannot cover it, so
         # over Tor it gets the SOCKS proxy natively. A circuit is far slower than
         # a direct connection, so the fan-out comes down with it or everything
         # just times out.
@@ -230,7 +230,7 @@ def _run_ffuf(root: str, wordlist: Path, timeout: int, maxtime: int,
             "-maxtime", str(maxtime), "-timeout", "8",
             "-o", str(out), "-of", "json",
         ]
-        # Match everything, then subtract — a size-based catch-all (a 200 soft-404)
+        # Match everything, then subtract · a size-based catch-all (a 200 soft-404)
         # survives a status allow-list but is dropped here.
         if config.BRUTE_MATCH_ALL:
             cmd += ["-mc", "all", "-fc", config.BRUTE_STATUS_FILTER]

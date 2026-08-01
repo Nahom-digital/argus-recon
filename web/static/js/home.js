@@ -1,5 +1,5 @@
 /* ============================================================================
-   Home — scan library, launch + track scans, deep-DNS key, delete
+   Home · scan library, launch + track scans, deep-DNS key, delete
    ========================================================================== */
 'use strict';
 
@@ -46,9 +46,9 @@ async function loadStatus() {
     ].filter(Boolean).join(' · ');
     const live = svc.managed
       ? `<span class="st live"><span class="dot on"></span><b>Live</b> ${esc(detail)}</span>`
-      : `<span class="st live unmanaged" title="Running, but not registered as a service — run ./install.sh so it survives logout and reboot"><span class="dot warn"></span><b>Running</b> not a service${detail ? ' · ' + esc(detail) : ''}</span>`;
+      : `<span class="st live unmanaged" title="Running, but not registered as a service · run ./install.sh so it survives logout and reboot"><span class="dot warn"></span><b>Running</b> not a service${detail ? ' · ' + esc(detail) : ''}</span>`;
 
-    // No recon-tool names on the home page — only capability state (see README).
+    // No recon-tool names on the home page · only capability state (see README).
     const chip = (dot, label, val) =>
       `<span class="st"><span class="dot ${dot ? 'on' : 'off'}"></span><b>${esc(label)}</b> ${esc(val)}</span>`;
     const chips = [
@@ -83,7 +83,7 @@ function reflectDeep() {
   chk.classList.toggle('locked', !DEEP_AVAILABLE);
   chk.title = DEEP_AVAILABLE
     ? 'Extra subdomains + full DNS records + historical DNS'
-    : 'Deep DNS is locked — click to add an API key';
+    : 'Deep DNS is locked · click to add an API key';
   if (!DEEP_AVAILABLE && box) box.checked = false;
 }
 
@@ -97,8 +97,8 @@ function torReason() {
       ? 'Route the whole scan through the Tor proxy already running on ' + (TOR.socks || 'this machine')
       : 'Route the whole scan through Tor. A private tor is started for the run and stopped after it.';
   }
-  if (!TOR.socks_lib) return 'Tor needs the SOCKS dependency — run ./install.sh to add it';
-  if (!TOR.binary) return 'Tor is not installed on this machine — install tor, or start a Tor client';
+  if (!TOR.socks_lib) return 'Tor needs the SOCKS dependency · run ./install.sh to add it';
+  if (!TOR.binary) return 'Tor is not installed on this machine · install tor, or start a Tor client';
   return 'Tor is unavailable on this machine';
 }
 
@@ -123,9 +123,9 @@ function reflectPortscan() {
   const locked = !PORTSCAN_AVAILABLE || passiveOn;
   chk.classList.toggle('locked', locked);
   chk.title = !PORTSCAN_AVAILABLE
-    ? 'Port-scan engine is not installed — run ./install.sh to add it'
+    ? 'Port-scan engine is not installed · run ./install.sh to add it'
     : passiveOn
-      ? 'Port scan is an active probe — turn off “passive” to use it'
+      ? 'Port scan is an active probe · turn off “passive” to use it'
       : 'Scan every discovered IP for open ports & services (slow, and it touches the target directly)';
   if (locked && box) box.checked = false;
   if (box) box.disabled = locked;
@@ -268,7 +268,7 @@ const openLogs = new Set();
 
 const JOB_ACTIVE = ['queued', 'running', 'stopping'];
 
-/* what the run was launched with — this is the only place it is visible now
+/* what the run was launched with · this is the only place it is visible now
    that there is no command line to read it off */
 function jobOpts(j) {
   const o = j.options || {};
@@ -435,7 +435,7 @@ function wireOptions() {
   reflectScope();
   document.querySelectorAll('input[name=scope]').forEach(r =>
     r.addEventListener('change', reflectScope));
-  // a locked Tor toggle has nothing to open — say what is missing, in place
+  // a locked Tor toggle has nothing to open · say what is missing, in place
   const torChk = document.getElementById('torChk');
   if (torChk) torChk.addEventListener('click', e => {
     if (!TOR.available) { e.preventDefault(); formError(null, torReason()); }
@@ -495,7 +495,7 @@ function wireNewScan() {
   });
 }
 
-/* inline, next to the field that caused it — no toast, no modal. `input` is
+/* inline, next to the field that caused it · no toast, no modal. `input` is
    optional: a blocked option (Tor unavailable) is not the domain field's fault,
    so nothing gets marked invalid in that case. */
 function formError(input, msg) {

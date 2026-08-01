@@ -1,5 +1,5 @@
 """
-Module 4 — HTML / DOM parser.
+Module 4 · HTML / DOM parser.
 
 Built on BeautifulSoup + lxml but goes further than a plain link scrape. Per
 page it extracts:

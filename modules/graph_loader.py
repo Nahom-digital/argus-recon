@@ -1,5 +1,5 @@
 """
-Module 10 — Graph model + graph-database loader.
+Module 10 · Graph model + graph-database loader.
 
 `graph_from_scan()` turns a scan dict into a connected node/edge graph following
 the spec's shape:
@@ -14,9 +14,9 @@ it there.
 
 Two backends, selected by `config.GRAPH_BACKEND` (auto | neo4j | kuzu | none):
 
-  * neo4j — a server you run; batched MERGE statements, explorable in the Neo4j
+  * neo4j · a server you run; batched MERGE statements, explorable in the Neo4j
     browser,
-  * kuzu  — an *embedded* graph DB (SQLite's deployment model, Cypher's query
+  * kuzu  · an *embedded* graph DB (SQLite's deployment model, Cypher's query
     language): no server, one file on disk, the sensible default for a
     single-user local tool.
 
@@ -54,8 +54,8 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000,
     """Build {nodes, edges, stats} from a scan dict.
 
     `max_nodes` is a real budget, not a hint. The structural spine (domain,
-    subdomains, IPs, ASNs) and the secrets are always kept — they are few and
-    they are the point of the view — and what is left of the budget is spent on
+    subdomains, IPs, ASNs) and the secrets are always kept · they are few and
+    they are the point of the view · and what is left of the budget is spent on
     endpoints in priority order, then on discovered files. Whatever did not fit
     is still counted, so `stats.totals` reports the true size of the scan even
     when `stats.by_type` describes the subset that was built.
@@ -364,7 +364,7 @@ def load(data: dict, *, wipe_scan: bool = True, backend: str | None = None, **co
         return _neo4j_load(data, wipe_scan=wipe_scan, **conn)
     if b == "kuzu":
         return _kuzu_load(data, wipe_scan=wipe_scan)
-    log.info("no graph backend available — graph renders from JSON; "
+    log.info("no graph backend available · graph renders from JSON; "
              "scan queued for a later load")
     return False
 
@@ -475,7 +475,7 @@ def _neo4j_delete(scan_id: str, **conn) -> bool:
 
 def _neo4j_fetch(scan_id: str, *, max_nodes: int | None = None,
                  max_edges: int | None = None, **conn) -> dict | None:
-    """Same view budget as the kuzu path — see _kuzu_fetch."""
+    """Same view budget as the kuzu path · see _kuzu_fetch."""
     max_nodes = max_nodes or config.GRAPH_VIEW_NODES
     max_edges = max_edges or config.GRAPH_VIEW_EDGES
     detail_ceiling = max(0, max_nodes - min(1000, max_nodes // 4))
@@ -584,7 +584,7 @@ def _kuzu_load(data: dict, *, wipe_scan: bool = True) -> bool:
             conn = _kuzu_conn()
             if wipe_scan:
                 _kuzu_delete_locked(conn, scan_id)
-            # One UNWIND per batch instead of a query per element — 16k edges as
+            # One UNWIND per batch instead of a query per element · 16k edges as
             # 16k separate MERGE compilations is what made a load take minutes and
             # hold the lock the reader needs.
             for chunk in _chunks(node_rows, _KUZU_BATCH):
@@ -629,14 +629,14 @@ def _kuzu_fetch(scan_id: str, *, max_nodes: int | None = None,
                 max_edges: int | None = None) -> dict | None:
     """Read a scan's graph back, bounded by the view budget.
 
-    The database holds every node of a scan — for a 46k-endpoint crawl that is
+    The database holds every node of a scan · for a 46k-endpoint crawl that is
     ~67k nodes and ~218k edges, a 30 MB response no browser can lay out. So the
     spine (SPINE_TYPES: what the graph opens on) always comes back whole and the
     detail layers fill whatever budget is left. `stats.totals` still reports the
     real per-type counts, so the legend shows the true size of the surface.
 
     One pass over the result set, parsing the props blob only for the nodes that
-    are actually kept — decoding 67k JSON strings to throw most of them away is
+    are actually kept · decoding 67k JSON strings to throw most of them away is
     itself most of the cost this is avoiding.
     """
     max_nodes = max_nodes or config.GRAPH_VIEW_NODES
@@ -679,7 +679,7 @@ def _kuzu_fetch(scan_id: str, *, max_nodes: int | None = None,
                     break
                 s, t, rel = res.get_next()
                 # an edge to a node that did not fit the budget has nothing to
-                # attach to on the client — drop it rather than ship a dangling one
+                # attach to on the client · drop it rather than ship a dangling one
                 if s in nodes and t in nodes:
                     edges.append({"source": s, "target": t, "type": rel})
     except Exception as exc:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Argus Recon — local web dashboard.
+Argus Recon · local web dashboard.
 
 Flask app served on http://127.0.0.1:7666. Reads scan JSON straight from
 ./scans (the home page lists them). A scan view exposes:
@@ -142,7 +142,7 @@ def _load(scan_id: str) -> dict:
 
 # Per-endpoint fields the request *table* never shows: response/request bodies,
 # the captured DOM, every "found on" URL, and raw headers. They are the bulk of a
-# large scan (tens of MB) and are only needed when one row is expanded — served
+# large scan (tens of MB) and are only needed when one row is expanded · served
 # then by /api/scan/<id>/endpoint/<eid>. Stripping them from the list view is what
 # keeps the scan page loadable when a scan has tens of thousands of endpoints.
 _ENDPOINT_HEAVY = ("resp_body", "req_body", "dom", "found_on",
@@ -150,7 +150,7 @@ _ENDPOINT_HEAVY = ("resp_body", "req_body", "dom", "found_on",
 
 
 def _light_scan(d: dict) -> dict:
-    """The scan document with heavy per-endpoint fields removed — everything the
+    """The scan document with heavy per-endpoint fields removed · everything the
     left panel, the request table, its filters and the graph client need, and
     nothing that only the expanded-row detail uses."""
     out = dict(d)
@@ -161,7 +161,7 @@ def _light_scan(d: dict) -> dict:
 
 def _light_view(scan_id: str) -> dict:
     """Light document for the scan page, served whole from the SQLite index when
-    it is fresh — panel data *and* the endpoint list.
+    it is fresh · panel data *and* the endpoint list.
 
     Serving only the endpoints from the store was pointless: the panel came from
     `_load()`, which was called unconditionally, so every view of a 141 MB scan
@@ -311,7 +311,7 @@ def api_graph(scan_id):
     """The scan's graph, bounded by a node/edge budget.
 
     Two things this deliberately does not do. It does not parse the scan JSON to
-    ask the graph backend for a graph — the backend is keyed by scan_id, which is
+    ask the graph backend for a graph · the backend is keyed by scan_id, which is
     already in the URL, so the old `_load()` here was a multi-hundred-megabyte
     parse to recover a string we were handed. And it does not return the full
     stored graph: a large crawl is ~67k nodes / ~218k edges, which is a 30 MB
@@ -388,7 +388,7 @@ def _service_state() -> dict:
 
 @app.route("/api/status")
 def api_status():
-    # No tool names are exposed here — the dashboard only needs to know whether
+    # No tool names are exposed here · the dashboard only needs to know whether
     # deep DNS is unlocked and whether the graph DB is live. Engine readiness is
     # a single anonymous flag (the real toolchain is documented in the README).
     engines_ready = all([
@@ -519,8 +519,8 @@ SCAN_MODULES = ["subdomain", "fingerprint", "crawl", "bruteforce",
 
 @app.route("/api/scan", methods=["POST"])
 def api_launch():
-    """Start a scan. This is the only way to start one — the engine refuses to
-    run from a terminal — so every pipeline option is reachable from here."""
+    """Start a scan. This is the only way to start one · the engine refuses to
+    run from a terminal · so every pipeline option is reachable from here."""
     body = request.get_json(silent=True) or {}
     domain = (body.get("domain") or "").strip().lower()
     if not re.match(r"^[a-z0-9.\-]+\.[a-z]{2,}$", domain):
@@ -532,15 +532,15 @@ def api_launch():
     single = bool(body.get("single"))
     want_tor = bool(body.get("tor"))
     if want_tor and not tor.availability()["available"]:
-        return jsonify({"error": "Tor is not available on this machine — install "
+        return jsonify({"error": "Tor is not available on this machine · install "
                                  "tor (and the Python SOCKS dependency) first"}), 400
     want_portscan = bool(body.get("portscan"))
     if want_portscan and body.get("passive"):
-        return jsonify({"error": "a port scan is an active probe — it cannot run in "
+        return jsonify({"error": "a port scan is an active probe · it cannot run in "
                                  "a passive scan"}), 400
     if want_portscan and not portscan.available():
         return jsonify({"error": "the port-scan engine is not installed on this "
-                                 "machine — run ./install.sh to add it"}), 400
+                                 "machine · run ./install.sh to add it"}), 400
 
     extra: list[str] = ["--no-prompt"]   # background job: never block on stdin
     if body.get("passive"):
@@ -689,7 +689,7 @@ def _resolve_port(host: str, port: int) -> int | None:
     if _port_in_use(host, port):
         if ours and _pid_alive(ours):
             print(f"\n  Argus Recon is already running (pid {ours}) at "
-                  f"http://{host}:{port}\n  Open that URL — not starting a second instance.\n")
+                  f"http://{host}:{port}\n  Open that URL · not starting a second instance.\n")
             return None
         holder = _pid_on_port(port)
         print(f"\n  Port {port} is already in use"
@@ -719,7 +719,7 @@ def _resolve_port(host: str, port: int) -> int | None:
                 continue
             if ans.isdigit() and 1024 <= int(ans) <= 65535:
                 if _port_in_use(host, int(ans)):
-                    print(f"  port {ans} is also busy — pick another.")
+                    print(f"  port {ans} is also busy · pick another.")
                     continue
                 return int(ans)
             print("  enter 'k', a port number (1024-65535), or 'q'.")

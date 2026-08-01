@@ -1,5 +1,5 @@
 """
-Tor transport — the "Tor scan" option.
+Tor transport · the "Tor scan" option.
 
 When a scan is launched with Tor on this runs *first*, before anything touches
 the target: it finds a usable Tor SOCKS proxy (reusing a system tor if one is
@@ -53,7 +53,7 @@ _READY = threading.Event()
 
 
 class TorError(RuntimeError):
-    """Tor could not be brought up — the caller must abort, not fall back."""
+    """Tor could not be brought up · the caller must abort, not fall back."""
 
 
 # --------------------------------------------------------------------------- #
@@ -61,7 +61,7 @@ class TorError(RuntimeError):
 # --------------------------------------------------------------------------- #
 def socks_ready(host: str, port: int, timeout: float = 2.5) -> bool:
     """True only if a SOCKS5 server completes the no-auth handshake. An open
-    port proves nothing — something else could be sitting on 9050."""
+    port proves nothing · something else could be sitting on 9050."""
     try:
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -149,7 +149,7 @@ def _start_own(bootstrap_timeout: int) -> int:
     global _PROC, _DATADIR
     tor_bin = resolve_tool(config.TOR_BIN)
     if not tor_bin:
-        raise TorError("tor is not installed — install it (apt install tor) or "
+        raise TorError("tor is not installed · install it (apt install tor) or "
                        "start a Tor client on "
                        f"{config.TOR_SOCKS_HOST}:{config.TOR_SOCKS_PORT}")
     port = _free_port()
@@ -214,7 +214,7 @@ def _verify(proxy: str) -> tuple[str | None, bool]:
         if ip:
             return ip, bool(data.get("IsTor"))
     except Exception as exc:
-        log.info(f"tor checker unreachable ({exc}) — falling back to an exit-IP lookup")
+        log.info(f"tor checker unreachable ({exc}) · falling back to an exit-IP lookup")
     for url in ("https://api.ipify.org?format=json", "https://ifconfig.co/json"):
         try:
             data = sess.get(url, timeout=25).json()
@@ -234,7 +234,7 @@ def connect(*, bootstrap_timeout: int | None = None) -> dict:
     if _STATE["active"]:
         return state()
     if not socks_lib_available():
-        raise TorError("SOCKS support for the HTTP client is missing — run "
+        raise TorError("SOCKS support for the HTTP client is missing · run "
                        "./install.sh (or pip install -r requirements.txt)")
 
     host = config.TOR_SOCKS_HOST
@@ -243,7 +243,7 @@ def connect(*, bootstrap_timeout: int | None = None) -> dict:
     if socks_ready(host, port):
         log.info(f"using the Tor SOCKS proxy already listening on {host}:{port}")
     else:
-        log.info(f"nothing answering SOCKS5 on {host}:{port} — starting our own tor")
+        log.info(f"nothing answering SOCKS5 on {host}:{port} · starting our own tor")
         port = _start_own(bootstrap_timeout or config.TOR_BOOTSTRAP_TIMEOUT)
         own = True
 
@@ -256,15 +256,15 @@ def connect(*, bootstrap_timeout: int | None = None) -> dict:
         raise TorError("the SOCKS proxy answered but no request completed through "
                        f"it: {_tail() if own else 'check that the Tor client has a circuit'}")
     if confirmed:
-        log.info(f"Tor confirmed — traffic exits from {exit_ip}")
+        log.info(f"Tor confirmed · traffic exits from {exit_ip}")
     else:
         log.warning(f"proxied through {host}:{port} (exit {exit_ip}) but the Tor "
-                    "checker could not confirm it — treating the scan as proxied, "
+                    "checker could not confirm it · treating the scan as proxied, "
                     "not verified")
 
     has_torsocks = bool(resolve_tool(config.TORSOCKS_BIN))
     if not has_torsocks:
-        log.warning("torsocks is not installed — external tools that cannot take a "
+        log.warning("torsocks is not installed · external tools that cannot take a "
                     "SOCKS proxy themselves will be skipped instead of run in the clear")
 
     config.HTTP_PROXY = proxy
@@ -278,7 +278,7 @@ def connect(*, bootstrap_timeout: int | None = None) -> dict:
 def wrap_cmd(cmd: list[str]) -> list[str] | None:
     """torsocks-wrap a tool that has no SOCKS option of its own.
 
-    Returns None when Tor is on but torsocks is unavailable — the caller must
+    Returns None when Tor is on but torsocks is unavailable · the caller must
     then skip the tool rather than run it outside the proxy. Go binaries are the
     exception: they bypass libc, so torsocks cannot cover them and they must be
     given the proxy natively (see `proxy_url`).
@@ -301,7 +301,7 @@ def proxy_url(scheme: str = "socks5") -> str | None:
 
 def shutdown() -> None:
     """Stop a tor we started and drop its data directory. A system tor is left
-    alone — we did not start it."""
+    alone · we did not start it."""
     global _PROC, _DATADIR
     proc, _PROC = _PROC, None
     if proc and proc.poll() is None:

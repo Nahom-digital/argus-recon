@@ -1,11 +1,11 @@
 """
-Module 8 — Field intent classifier.
+Module 8 · Field intent classifier.
 
 Scans every captured form field and request parameter name against the pattern
 library in config.FIELD_PATTERNS (password, username, email, otp, api_key,
 token, redirect target, object id, …). Each field gets a classification, and the
 owning endpoint is tagged with the set of intents it exposes plus the highest
-severity seen — this is what the dashboard renders inline on request rows.
+severity seen · this is what the dashboard renders inline on request rows.
 """
 from __future__ import annotations
 
