@@ -146,7 +146,10 @@ class ScanResult:
             entry = {"port": port, "protocol": protocol, "state": state,
                      "service": None, "product": None, "version": None,
                      "extrainfo": None, "tunnel": None, "cpe": [],
-                     "scripts": {}, "reason": None}
+                     "scripts": {}, "reason": None,
+                     # tech fingerprint of the web service answering on this port
+                     # (WhatWeb against host:port · see portscan.fingerprint_web_ports)
+                     "tech": [], "whatweb": {}}
             rec["ports"].append(entry)
             rec["ports"].sort(key=lambda p: (p["protocol"], p["port"]))
         for key, val in (("state", state), ("service", service),
@@ -162,6 +165,30 @@ class ScanResult:
             if name and out and name not in entry["scripts"]:
                 entry["scripts"][name] = out
         return entry
+
+    def record_port_tech(self, ip: str, port: int, *, protocol: str = "tcp",
+                         tech: list[str] | None = None,
+                         whatweb: dict | None = None) -> dict | None:
+        """Attach a web-service fingerprint to an already-recorded open port.
+        Called after the port scan runs WhatWeb against the host:port that
+        answered · no-op if that port was never recorded."""
+        rec = self._ips.get((ip or "").strip())
+        if not rec:
+            return None
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return None
+        for entry in rec["ports"]:
+            if entry["port"] == port and entry["protocol"] == protocol:
+                for t in tech or []:
+                    t = (t or "").strip()
+                    if t and t not in entry["tech"]:
+                        entry["tech"].append(t)
+                if whatweb:
+                    entry["whatweb"] = whatweb
+                return entry
+        return None
 
     # ------------------------------------------------------------------ #
     # Endpoints / requests

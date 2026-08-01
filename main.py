@@ -155,6 +155,9 @@ def run_pipeline(args) -> ScanResult:
         got = portscan.run(result, timeout=args.portscan_timeout)
         if isinstance(got, list):
             port_seeds = got
+        # Name the stack behind each open web port (host:port), not just nmap's
+        # "http" · WhatWeb against the exact port, tags folded onto the record.
+        portscan.fingerprint_web_ports(result, timeout=args.tool_timeout)
 
     # 3. Fingerprint
     if "fingerprint" in run:

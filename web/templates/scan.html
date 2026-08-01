@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Argus Recon · {{ scan_id }}{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/scan.css') }}">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/scan.css', v=asset_v) }}">{% endblock %}
 
 {% block crumbs %}
 <nav class="crumbs">
@@ -148,7 +148,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/graph.js') }}"></script>
-<script src="{{ url_for('static', filename='js/cygraph.js') }}"></script>
-<script src="{{ url_for('static', filename='js/scan.js') }}"></script>
+<script src="{{ url_for('static', filename='js/graph.js', v=asset_v) }}"></script>
+<script src="{{ url_for('static', filename='js/cygraph.js', v=asset_v) }}"></script>
+<script src="{{ url_for('static', filename='js/scan.js', v=asset_v) }}"></script>
 {% endblock %}

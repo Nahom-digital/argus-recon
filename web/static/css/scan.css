@@ -42,7 +42,12 @@
    a long note (e.g. the crawler's) wraps; the dot is a fixed-size circle that
    never gets squished by the flexbox */
 .modline{display:flex;align-items:flex-start;gap:7px;font-size:var(--fs-xs);color:var(--muted);padding:3px 0}
-.modline .dot{width:7px;height:7px;border-radius:50%;flex:none;margin-top:4px}
+/* padding:0 + display:inline-block are load-bearing: the module status modifier
+   "empty" collides with the global .empty empty-state component (display:flex;
+   padding:52px 24px). Without neutralising those here an empty-status dot inflates
+   into a large ellipse. This selector outranks .empty, so it stays a 7px circle. */
+.modline .dot{width:7px;height:7px;border-radius:50%;flex:none;margin-top:4px;
+  display:inline-block;padding:0}
 .modline .dot.ok{background:var(--ok)}.modline .dot.empty{background:var(--faint)}.modline .dot.skip{background:var(--border-strong)}
 
 /* generic side list */
@@ -293,6 +298,12 @@
 .port-script .ps-name{display:block;font-size:10px;color:var(--accent-ink);margin-bottom:2px}
 .port-script .ps-out{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);white-space:pre-wrap;
   word-break:break-word;margin:0;max-height:180px;overflow:auto;background:var(--bg);padding:6px 7px;border-radius:var(--r-xs)}
+/* WhatWeb tech tags for the service on a port (port-detail "tech" row) */
+.port-tech{display:inline-flex;flex-wrap:wrap;gap:4px}
+/* full-width detail view · the rich ports block sits in its own table row */
+.dv-table .dv-ports-row td{border:none;background:transparent;padding:0 0 12px}
+.dv-ports{max-width:560px}
+.dv-ports .ip-ports{margin-top:0;border-top:none;padding-top:0}
 .frow .fdetail{display:none}
 .frow.open .fdetail{display:block;border-top:1px solid var(--border);background:var(--surface-2);padding:10px 9px}
 .fdet{display:flex;flex-direction:column;gap:11px}

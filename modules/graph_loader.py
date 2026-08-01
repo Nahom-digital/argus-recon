@@ -133,7 +133,8 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000,
                        "Port", label, port=prt["port"],
                        protocol=prt.get("protocol"), service=svc,
                        version=ver or None, state=prt.get("state"),
-                       tunnel=prt.get("tunnel"))
+                       tunnel=prt.get("tunnel"),
+                       tech=", ".join((prt.get("tech") or [])[:8]) or None)
             edge(iid, pid, "HAS_PORT")
 
     def ensure_sub(host: str) -> str | None:

@@ -252,10 +252,12 @@ function portRow(p) {
   const ver = [p.product, p.version].filter(Boolean).join(' ');
   const web = /https?/.test(svc) || p.tunnel === 'ssl';
   const scripts = Object.entries(p.scripts || {});
-  const hasDetail = ver || p.extrainfo || scripts.length || p.cpe && p.cpe.length;
+  const tech = p.tech || [];      // WhatWeb fingerprint of the service on this port
+  const hasDetail = ver || p.extrainfo || scripts.length || tech.length || p.cpe && p.cpe.length;
   const badge = `<span class="port-num mono">${p.port}<span class="faint">/${esc(p.protocol || 'tcp')}</span></span>`;
   const detail = hasDetail ? `<div class="port-detail">
       ${ver ? `<div class="kv"><span class="k">version</span><span class="v mono">${esc(ver)}</span></div>` : ''}
+      ${tech.length ? `<div class="kv"><span class="k">tech</span><span class="v"><span class="port-tech">${tech.map(t => `<span class="tag mono">${esc(t)}</span>`).join('')}</span></span></div>` : ''}
       ${p.extrainfo ? `<div class="kv"><span class="k">info</span><span class="v">${esc(p.extrainfo)}</span></div>` : ''}
       ${(p.cpe || []).length ? `<div class="kv"><span class="k">cpe</span><span class="v mono">${p.cpe.map(esc).join('<br>')}</span></div>` : ''}
       ${scripts.map(([name, out]) => `<div class="port-script"><span class="ps-name mono">${esc(name)}</span><pre class="ps-out">${esc(out)}</pre></div>`).join('')}
@@ -264,7 +266,7 @@ function portRow(p) {
     <button class="psummary"${hasDetail ? '' : ' tabindex="-1"'}>
       ${badge}
       <span class="port-svc">${esc(svc)}${web ? ` <span class="port-web" title="web service · crawled">${icon('world')}</span>` : ''}</span>
-      ${ver ? `<span class="port-ver mono faint">${esc(ver)}</span>` : ''}
+      ${ver ? `<span class="port-ver mono faint">${esc(ver)}</span>` : (tech.length ? `<span class="port-ver mono faint">${esc(tech[0])}</span>` : '')}
       ${hasDetail ? `<svg class="ic pchev"><use href="#i-chevron-down"></use></svg>` : ''}
     </button>
     ${detail}
@@ -906,6 +908,9 @@ function renderDetail() {
     el.addEventListener('click', () => { toggleDetailMode(); setHostFilter(el.dataset.host); }));
   dv.querySelectorAll('.chip-ip[data-ip]').forEach(el =>
     el.addEventListener('click', () => { toggleDetailMode(); setIpFilter(el.dataset.ip); }));
+  // port rows inside the infra card expand to their service / version / script detail
+  dv.querySelectorAll('.prow.has-detail .psummary').forEach(btn =>
+    btn.addEventListener('click', () => btn.closest('.prow').classList.toggle('open')));
   wireDecode(dv);
 }
 
@@ -952,18 +957,30 @@ function dvInfraCard(ips) {
   if (!ips.length) return dvCard('Infrastructure', 'server-2', 0, `<div class="dv-body faint" style="padding:16px">No IPs.</div>`, 'infra');
   const rows = ips.map(ip => {
     const hosts = ip.subdomains || [];
-    return `<tr>
+    const nports = (ip.ports || []).length;
+    const portsCell = nports
+      ? `<span class="tag mono" title="open ports · expand the row for services, versions and OS">${nports} open</span>`
+      : (ip.scanned ? '<span class="faint">0 open</span>' : '<span class="faint">·</span>');
+    const main = `<tr>
       <td class="mono"><span class="chip-ip" data-ip="${esc(ip.ip)}">${icon('server-2')}${esc(ip.ip)}</span></td>
       <td>${esc(ip.org || '')}</td>
       <td class="mono">${esc(ip.asn || '')}</td>
       <td>${esc(ip.country || '')} ${ip.datacenter ? '· hosting' : ip.type ? '· ' + esc(ip.type) : ''}</td>
+      <td>${esc((ip.os || {}).name || '')}${(ip.os || {}).accuracy ? ` <span class="faint">${ip.os.accuracy}%</span>` : ''}</td>
+      <td>${portsCell}</td>
       <td>${(ip.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
       <td class="mono">${hosts.length}</td>
       <td>${hosts.map(h => `<span class="chip-host" data-host="${esc(h)}">${esc(h)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
     </tr>`;
+    // A second, full-width row carries the rich port/OS/script detail · the same
+    // renderer the left Infrastructure panel uses, so the ports, service versions,
+    // WhatWeb tech and default-script output are all "seen" here too.
+    const pb = (nports || ip.os || (ip.traceroute || []).length) ? portsBlock(ip) : '';
+    const detailRow = pb ? `<tr class="dv-ports-row"><td colspan="9"><div class="dv-ports">${pb}</div></td></tr>` : '';
+    return main + detailRow;
   }).join('');
   return dvCard('Infrastructure', 'server-2', ips.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>IP</th><th>Org</th><th>ASN</th><th>Type</th><th>Src</th><th>Hosts</th><th>Resolves for</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    `<div class="dv-body"><table class="dv-table"><thead><tr><th>IP</th><th>Org</th><th>ASN</th><th>Type</th><th>OS</th><th>Ports</th><th>Src</th><th>Hosts</th><th>Resolves for</th></tr></thead><tbody>${rows}</tbody></table></div>`,
     'infra');
 }
 

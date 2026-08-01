@@ -16,6 +16,7 @@ so the view is identical whether or not the database is running.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -33,7 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from flask import (Flask, jsonify, render_template, send_from_directory,
-                   request, abort)
+                   request, abort, g)
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from modules import config
@@ -41,6 +42,7 @@ from modules import graph_loader
 from modules import store
 from modules import tor
 from modules import portscan
+from modules import access_log
 from modules.util import resolve_tool
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -63,10 +65,56 @@ except Exception:
     pass
 
 
+# --------------------------------------------------------------------------- #
+# Asset versioning (cache-busting + live reload)
+#
+# The browser caches CSS/JS aggressively, so after a UI change a returning tab
+# can keep painting the old build. Two mechanisms fix that together:
+#   1. every static URL carries `?v=<token>`, where the token is a hash of the
+#      CSS/JS files on disk · a changed file is a new URL, so the browser cannot
+#      serve the stale copy from cache, and
+#   2. /api/version serves that same token, which the client polls (web/static/
+#      js/version.js): when it changes under an open tab, the page reloads once
+#      and pulls the new build through the freshly-versioned URLs.
+# The HTML itself is sent no-cache (see _cache_control) so the versioned links a
+# page hands out are always the current ones.
+# --------------------------------------------------------------------------- #
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _compute_asset_version() -> str:
+    h = hashlib.sha1()
+    for sub in ("css", "js"):
+        d = _STATIC_DIR / sub
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.*")):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            h.update(f"{f.name}:{int(st.st_mtime)}:{st.st_size};".encode())
+    return h.hexdigest()[:12]
+
+
+# Re-hashing every asset on each request is wasteful; a short TTL keeps the
+# stat() work off the hot path while still noticing a change within seconds.
+_ASSET_V: dict = {"at": 0.0, "value": ""}
+_ASSET_V_TTL = 2.0
+
+
+def asset_version() -> str:
+    now = time.time()
+    if _ASSET_V["value"] and now - _ASSET_V["at"] < _ASSET_V_TTL:
+        return _ASSET_V["value"]
+    _ASSET_V.update(at=now, value=_compute_asset_version())
+    return _ASSET_V["value"]
+
+
 @app.context_processor
 def _inject_sprite():
     from markupsafe import Markup
-    return {"sprite": Markup(_SPRITE)}
+    return {"sprite": Markup(_SPRITE), "asset_v": asset_version()}
 
 
 import gzip as _gzip
@@ -99,6 +147,33 @@ def _compress(resp):
         resp.headers.setdefault("Vary", "Accept-Encoding")
     except Exception:
         pass
+    return resp
+
+
+@app.after_request
+def _cache_control(resp):
+    """HTML pages are sent no-cache so the browser always revalidates them and
+    picks up the current ?v= asset token; the versioned static files it then
+    points at are safe to cache. Never weakens caching on anything else."""
+    try:
+        ct = resp.content_type or ""
+        if ct.startswith("text/html"):
+            resp.headers["Cache-Control"] = "no-cache"
+    except Exception:
+        pass
+    return resp
+
+
+@app.before_request
+def _access_start():
+    g._req_start = time.time()
+
+
+@app.after_request
+def _access_log(resp):
+    """Append a JSON line recording who accessed the dashboard and what for
+    (modules.access_log · saved under scans/.access). Best-effort."""
+    access_log.record(request, resp, started=getattr(g, "_req_start", None))
     return resp
 
 SCAN_ID_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
@@ -637,6 +712,14 @@ def api_job_log(job_id):
     # strip ANSI colour codes for the browser
     text = re.sub(r"\x1b\[[0-9;]*m", "", text)
     return jsonify({"job": _JOBS.get(job_id, {}), "log": text[-16000:]})
+
+
+@app.route("/api/version")
+def api_version():
+    """The current UI build token. Polled by web/static/js/version.js: when it
+    changes under an open tab the client reloads once, pulling the new assets
+    through their freshly-versioned URLs."""
+    return jsonify({"version": asset_version()})
 
 
 @app.route("/favicon.ico")

@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 scans/*.json
 scans/.jobs/
+# dashboard access log (who connected · JSON Lines, one file per day)
+scans/.access/
 # runtime cache / job-queue store and the embedded graph DB (derived from scans)
 scans/.argus.db*
 scans/.kuzu*

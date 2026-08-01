@@ -28,6 +28,7 @@ import ipaddress
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 from . import config, tor
 from .schema import ScanResult
@@ -282,3 +283,88 @@ def get_seeds(result: ScanResult) -> list[str]:
         for p in rec.get("ports") or []:
             seeds += _crawl_seeds_for(rec["ip"], rec, p)
     return sorted(set(seeds))
+
+
+# --------------------------------------------------------------------------- #
+# Per-port web fingerprint
+#
+# nmap names the service on a port ("http", "ssl/http") but not the stack behind
+# it. For a web service on a non-standard port · an admin panel on :8443, a
+# staging app on :8080 · run WhatWeb against the exact host:port and fold the tech
+# tags onto that port record, so the Infrastructure panel and the Port node in
+# the graph show what is actually answering there, not just "http".
+# --------------------------------------------------------------------------- #
+def _web_url_for(rec: dict, port: dict) -> str | None:
+    """The host:port URL to fingerprint for one open web port, or None if it is
+    not a web service (or is one the crawler already covers on 80/443)."""
+    svc = (port.get("service") or "").lower()
+    tunnel = (port.get("tunnel") or "").lower()
+    pn = port.get("port")
+    if pn is None or pn in (80, 443):
+        return None
+    if not (svc in _WEB_SERVICES or "http" in svc):
+        return None
+    scheme = "https" if (tunnel == "ssl" or "https" in svc or pn in (8443, 4443)) else "http"
+    host = (rec.get("subdomains") or [rec["ip"]])[0]     # a vhost beats the bare IP
+    return f"{scheme}://{host}:{pn}/"
+
+
+def _host_port(url: str) -> tuple[str, int] | None:
+    try:
+        u = urlparse(url)
+        host = u.hostname
+        port = u.port or (443 if u.scheme == "https" else 80)
+        return (host, port) if host else None
+    except Exception:
+        return None
+
+
+def fingerprint_web_ports(result: ScanResult, *, timeout: int | None = None) -> int:
+    """WhatWeb every open web service that sits off 80/443, recording its tech on
+    the port. Returns the number of ports tagged. No-op when WhatWeb is missing
+    or nothing web-facing was found; never raises."""
+    if not resolve_tool(config.WHATWEB_BIN):
+        return 0
+    # url -> (ip, port, protocol, host); de-duplicated by (host, port)
+    targets: dict[str, tuple] = {}
+    seen: set[tuple] = set()
+    for rec in result._ips.values():              # type: ignore[attr-defined]
+        for p in rec.get("ports") or []:
+            url = _web_url_for(rec, p)
+            if not url:
+                continue
+            hp = _host_port(url)
+            if not hp or hp in seen:
+                continue
+            seen.add(hp)
+            targets[url] = (rec["ip"], p["port"], p.get("protocol", "tcp"), hp[0])
+    if not targets:
+        return 0
+
+    # Reuse the fingerprint module's WhatWeb runner (JSON parse, batching, Tor
+    # wrapping) and tag extractor rather than re-implementing them here.
+    from . import fingerprint as _fp
+    log.info(f"fingerprinting {len(targets)} open web port"
+             f"{'s' if len(targets) != 1 else ''} with WhatWeb")
+    records = _fp._run_whatweb(list(targets.keys()),
+                               timeout=timeout or config.PORTSCAN_TIMEOUT)
+    by_hp: dict[tuple, dict] = {}
+    for rec in records:
+        hp = _host_port(rec.get("target", ""))
+        if hp:
+            by_hp.setdefault(hp, rec)
+
+    tagged = 0
+    for (ip, pn, proto, host) in targets.values():
+        rec = by_hp.get((host, pn))
+        if not rec:
+            continue
+        plugins = rec.get("plugins", {})
+        tech = _fp._extract_tags(plugins)
+        result.record_port_tech(ip, pn, protocol=proto, tech=tech, whatweb={
+            "target": rec.get("target"), "http_status": rec.get("http_status"),
+            "plugins": sorted(plugins.keys())})
+        if tech:
+            tagged += 1
+    log.info(f"WhatWeb tagged {tagged} open web port{'s' if tagged != 1 else ''}")
+    return tagged
