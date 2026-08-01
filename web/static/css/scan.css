@@ -333,7 +333,7 @@
 .scan-layout.detail-mode .side,.scan-layout.detail-mode .main{display:none}
 .scan-layout.detail-mode .detail-view{display:block}
 .dv-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin:0 auto 20px;max-width:var(--dv-w)}
-.dv-head h2{font-size:var(--fs-2xl);letter-spacing:-.02em;color:var(--ink);font-family:var(--mono);font-weight:600}
+.dv-head h2{font-size:var(--fs-2xl);letter-spacing:0;color:var(--ink);font-family:var(--display);font-weight:400}
 .dv-substats{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 /* jump-to-section chips: the tables are stacked, so the header doubles as nav */
 .dv-stat{font-size:var(--fs-sm);color:var(--muted);background:var(--surface-2);border:1px solid var(--border);

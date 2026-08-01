@@ -15,6 +15,7 @@
 @font-face{font-family:'Libertinus Serif';font-style:italic;font-weight:400;font-display:swap;src:url(../fonts/libertinus-400i.woff2) format('woff2')}
 @font-face{font-family:'Libertinus Serif';font-style:normal;font-weight:600;font-display:swap;src:url(../fonts/libertinus-600.woff2) format('woff2')}
 @font-face{font-family:'Libertinus Serif';font-style:normal;font-weight:700;font-display:swap;src:url(../fonts/libertinus-700.woff2) format('woff2')}
+@font-face{font-family:'Acme';font-style:normal;font-weight:400;font-display:swap;src:url(../fonts/acme-400.woff2) format('woff2')}
 
 /* ---- tokens --------------------------------------------------------------- */
 :root{
@@ -36,8 +37,9 @@
   --r:10px; --r-sm:7px; --r-xs:5px; --r-pill:999px;
   --sans:'Libertinus Serif',Georgia,'Times New Roman',serif;
   --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
-  --fs-xs:11.5px; --fs-sm:12.5px; --fs-base:13.5px; --fs-md:14.5px;
-  --fs-lg:17px; --fs-xl:21px; --fs-2xl:27px;
+  --display:'Acme','Libertinus Serif',Georgia,sans-serif;
+  --fs-xs:12.5px; --fs-sm:13.5px; --fs-base:14.5px; --fs-md:16px;
+  --fs-lg:20px; --fs-xl:25px; --fs-2xl:34px;
   --ease:cubic-bezier(.23,1,.32,1); --ease-io:cubic-bezier(.77,0,.175,1);
   --z-sticky:20; --z-drop:40; --z-modal:60; --z-toast:80; --z-tip:100;
   color-scheme:light;
@@ -106,11 +108,12 @@ svg.ic{width:1em;height:1em;flex:none;vertical-align:-.14em}
   background:var(--surface);border-bottom:1px solid var(--border);
   position:sticky;top:0;z-index:var(--z-sticky);
 }
-.brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:var(--fs-md);color:var(--ink);letter-spacing:-.02em}
-.brand .mark{width:26px;height:26px;display:grid;place-items:center;color:var(--accent);
+.brand{display:flex;align-items:center;gap:9px;font-family:var(--display);font-weight:400;
+  font-size:var(--fs-lg);color:var(--ink);letter-spacing:.005em}
+.brand .mark{width:28px;height:28px;display:grid;place-items:center;color:var(--accent);
   background:var(--accent-weak);border-radius:var(--r-sm)}
-.brand .mark svg{width:17px;height:17px}
-.brand small{color:var(--muted);font-weight:450;font-size:var(--fs-xs);letter-spacing:0}
+.brand .mark svg{width:18px;height:18px}
+.brand small{font-family:var(--sans);color:var(--muted);font-weight:450;font-size:var(--fs-xs);letter-spacing:0}
 .topbar .spacer{flex:1}
 .topbar .crumbs{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:var(--fs-sm);min-width:0}
 .topbar .crumbs a{color:var(--muted)}.topbar .crumbs a:hover{color:var(--ink)}
