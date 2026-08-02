@@ -23,6 +23,9 @@
     {% block crumbs %}{% endblock %}
     <div class="spacer"></div>
     {% block topbar_actions %}{% endblock %}
+    <!-- signed-in account, admin link and sign-out · filled by app.js from
+         /api/auth/state, and left empty when the dashboard has no accounts -->
+    <div class="session" id="sessionBox"></div>
     <button class="btn icon ghost theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
       <svg class="ic sun"><use href="#i-sun"></use></svg>
       <svg class="ic moon"><use href="#i-moon"></use></svg>

@@ -361,6 +361,23 @@ install_go_tools() {
   case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
 }
 
+# waybackurls — the web-archive pass. Optional in the strict sense (Argus falls
+# back to querying the archive's CDX index over plain HTTP), but the binary is
+# both faster and wider, so install it alongside the other Go tools.
+install_wayback() {
+  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+  if command -v waybackurls >/dev/null 2>&1 || [ -x "$gobin/waybackurls" ]; then
+    say "web-archive engine already present ✔"
+    return 0
+  fi
+  install_go_toolchain || return 0     # non-fatal: the HTTP index path still works
+  mkdir -p "$gobin"
+  say "installing the web-archive engine (waybackurls) …"
+  GOBIN="$gobin" go install github.com/tomnomnom/waybackurls@latest \
+    || warn "  could not install waybackurls — Argus queries the archive index over HTTP instead"
+  case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
+}
+
 # bbot (passive subdomain / infra enum) via pipx — install pipx first if needed.
 install_bbot() {
   if command -v bbot >/dev/null; then
@@ -386,6 +403,7 @@ install_bbot() {
 install_external_tools() {
   install_apt_recon_tools
   install_go_tools
+  install_wayback
   install_bbot
 }
 
@@ -395,6 +413,100 @@ install_python_env() {
   source "$HERE/bootstrap.sh"
   _argus_bootstrap "$HERE" || { err "python bootstrap failed"; exit 1; }
   say "python environment ready ✔  ($ARGUS_PY)"
+}
+
+# --------------------------------------------------------------------------- #
+# Administrator account.
+#
+# The dashboard is open until key.json exists; from the moment it does, every
+# page and every API route needs a signed session. So the installer creates the
+# first administrator here, once, and the dashboard is authenticated from its
+# very first boot rather than "we'll lock it down later".
+#
+# The password is read with the terminal echo off and handed to Python through
+# the environment, never on a command line where `ps` would show it. It is
+# stored as a PBKDF2 hash (modules/auth.py) · never in plaintext, and never in
+# .env.
+# --------------------------------------------------------------------------- #
+KEY_FILE="$HERE/key.json"
+
+argus_py() {
+  if [ -x "$HERE/.venv/bin/python" ]; then printf '%s' "$HERE/.venv/bin/python"
+  else command -v python3; fi
+}
+
+admin_exists() {
+  local py; py="$(argus_py)" || return 1
+  [ -n "$py" ] || return 1
+  "$py" - "$HERE" <<'PY' >/dev/null 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+from modules import auth
+sys.exit(0 if auth.configured() else 1)
+PY
+}
+
+create_admin() {                        # create_admin <username> <password via $ARGUS_NEW_PW>
+  local py; py="$(argus_py)"
+  ARGUS_NEW_USER="$1" "$py" - "$HERE" <<'PY'
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from modules import auth
+try:
+    user = auth.bootstrap(os.environ["ARGUS_NEW_USER"], os.environ["ARGUS_NEW_PW"])
+except auth.AuthError as exc:
+    print(f"error: {exc}", file=sys.stderr)
+    sys.exit(1)
+print(f"created administrator '{user['username']}'")
+PY
+}
+
+setup_admin() {
+  if admin_exists; then
+    say "administrator account already configured ✔  (manage it at $URL/recon/admin)"
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    warn "no terminal to ask on — the dashboard will start WITHOUT authentication."
+    warn "  Anyone who can reach $URL can use it. To lock it down, run:"
+    warn "    ./install.sh --admin"
+    return 0
+  fi
+
+  echo
+  printf '\033[1m  Create the administrator account\033[0m\n'
+  echo   "  Argus requires a sign-in once this account exists. The administrator"
+  echo   "  can create operators, set what each of them may scan and how often,"
+  echo   "  and see every scan and every access to the dashboard."
+  echo   "  Stored hashed in $KEY_FILE (never in plaintext, never in .env)."
+  echo
+
+  local user pw pw2
+  while :; do
+    read -r -p "  admin username [admin]: " user
+    user="${user:-admin}"
+    # must match modules.auth.USERNAME_RE
+    if [[ "$user" =~ ^[a-z0-9][a-z0-9._-]{2,31}$ ]]; then break; fi
+    warn "  3-32 characters: lowercase letters, digits, dot, dash or underscore."
+  done
+  while :; do
+    read -r -s -p "  password (min 8 chars): " pw; echo
+    if [ "${#pw}" -lt 8 ]; then warn "  too short — at least 8 characters."; continue; fi
+    read -r -s -p "  repeat password: " pw2; echo
+    if [ "$pw" != "$pw2" ]; then warn "  they do not match — try again."; continue; fi
+    break
+  done
+
+  if ARGUS_NEW_PW="$pw" create_admin "$user"; then
+    unset pw pw2
+    chmod 600 "$KEY_FILE" 2>/dev/null || true
+    ok "authentication is on. Sign in at $URL/login"
+    echo "        admin area : $URL/recon/admin"
+    echo
+  else
+    unset pw pw2
+    err "could not create the administrator account — the dashboard will start open."
+  fi
 }
 
 # --------------------------------------------------------------------------- #
@@ -466,6 +578,11 @@ tool("torsocks", config.TORSOCKS_BIN)
 ps = resolve_tool(config.PORTSCAN_BIN)
 emit("pass" if ps else "warn", "tool: port scan", ps or "not found — port-scan toggle stays locked")
 
+# Web-archive engine — optional: without it Argus queries the archive index over
+# plain HTTP, which is slower and narrower but always available.
+wb = resolve_tool(config.WAYBACK_BIN)
+emit("pass" if wb else "warn", "tool: web archive", wb or "not found — the archive index over HTTP is used instead")
+
 # Go speed tools: validated (an unrelated httpx on PATH must not count).
 for label, name in [("http probe","httpx"),("deep crawl","katana"),
                     ("passive names","subfinder"),("bulk DNS","dnsx")]:
@@ -479,6 +596,23 @@ try:
     emit("pass", "graph: kuzu", "embedded backend importable")
 except Exception:
     emit("warn", "graph: kuzu", "not installed — graph renders from JSON")
+
+# Accounts. An open dashboard is a warning, not a failure: a fresh checkout that
+# has not been through the installer yet is a legitimate state.
+try:
+    from modules import auth
+    if auth.configured():
+        users = auth.list_users()
+        admins = sum(1 for u in users if u["role"] == "admin")
+        mode = oct(auth.store_path().stat().st_mode & 0o777)[2:]
+        if mode != "600":
+            emit("warn", "auth: key.json", f"mode {mode} — should be 600 (chmod 600 {auth.store_path()})")
+        else:
+            emit("pass", "auth: key.json", f"{len(users)} account(s), {admins} admin(s), mode 600")
+    else:
+        emit("warn", "auth: accounts", "none — the dashboard is OPEN. Run ./install.sh --admin")
+except Exception as exc:
+    emit("warn", "auth: accounts", f"{exc}")
 
 # SQLite store: integrity + schema migration, with an opt-in rebuild if corrupt.
 import sqlite3
@@ -605,6 +739,7 @@ Argus Recon — installer and service manager
 
   ./install.sh              install everything, register the service, start it
   ./install.sh --p PORT     change the dashboard port (persists + restarts)
+  ./install.sh --admin      create the administrator account (turns auth on)
   ./install.sh --check      doctor: force every dependency check, report readiness
   ./install.sh --upgrade    pull the latest from GitHub + restart the service
   ./install.sh --status     is it live?
@@ -657,6 +792,17 @@ fi
 # --------------------------------------------------------------------------- #
 case "${1:-}" in
   --help|-h) usage ;;
+
+  --admin)
+    # Needs the venv to import modules.auth; build it if this is a bare checkout.
+    [ -x "$HERE/.venv/bin/python" ] || install_python_env
+    setup_admin
+    if unit_active; then
+      say "restarting $SERVICE so it picks up the account store …"
+      systemctl --user restart "$SERVICE.service" >/dev/null 2>&1 || true
+    fi
+    exit 0
+    ;;
 
   --check)
     # A second --check asks the doctor to repair the SQLite store if it is
@@ -806,7 +952,12 @@ install_external_tools
 install_python_env
 
 # --------------------------------------------------------------------------- #
-# 4. register the service
+# 4. administrator account (turns authentication on)
+# --------------------------------------------------------------------------- #
+setup_admin
+
+# --------------------------------------------------------------------------- #
+# 5. register the service
 # --------------------------------------------------------------------------- #
 write_unit
 
@@ -819,7 +970,7 @@ say "starting $SERVICE …"
 systemctl --user enable --now "$SERVICE.service"
 
 # --------------------------------------------------------------------------- #
-# 5. verify it is actually serving, not just "active"
+# 6. verify it is actually serving, not just "active"
 # --------------------------------------------------------------------------- #
 # A stray `./serve` from before the service existed still owns the port, and the
 # server's single-instance guard makes our unit exit 0 on top of it. The port

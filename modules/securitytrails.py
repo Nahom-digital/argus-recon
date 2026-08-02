@@ -34,6 +34,102 @@ def available() -> bool:
     return bool(config.SECURITYTRAILS_KEY)
 
 
+# --------------------------------------------------------------------------- #
+# Quota
+#
+# A key with its monthly allowance spent does not fail loudly · it answers 429
+# to every call, and the scan simply comes back with no deep DNS at all after
+# having spent minutes pretending to look. So the dashboard asks first, before
+# the run starts, and puts the choice in front of the operator: go on without
+# deep DNS, or paste a key that still has room.
+# --------------------------------------------------------------------------- #
+_USAGE_CACHE: dict = {"at": 0.0, "key": None, "value": None}
+_USAGE_TTL = 120.0
+
+
+def check(*, force: bool = False) -> dict:
+    """Where the configured key stands. Never raises.
+
+    state is one of:
+      unset       · no key configured (deep DNS simply unavailable)
+      ok          · the key works and has allowance left
+      exhausted   · the monthly quota is spent
+      invalid     · the key was rejected (401/403)
+      unreachable · the API did not answer (network, outage)
+    """
+    key = config.SECURITYTRAILS_KEY
+    if not key:
+        return {"state": "unset", "ok": False, "available": False,
+                "message": "No deep-DNS key is configured."}
+    now = time.time()
+    if (not force and _USAGE_CACHE["value"] is not None
+            and _USAGE_CACHE["key"] == key and now - _USAGE_CACHE["at"] < _USAGE_TTL):
+        return _USAGE_CACHE["value"]
+
+    session = make_session()
+    url = f"{config.SECURITYTRAILS_BASE}/account/usage"
+    try:
+        resp = session.get(url, headers={"apikey": key, "Accept": "application/json"},
+                           timeout=config.HTTP_TIMEOUT)
+    except Exception as exc:
+        out = {"state": "unreachable", "ok": False, "available": True,
+               "message": f"Could not reach the deep-DNS API ({exc.__class__.__name__}). "
+                          "The scan can still run without it."}
+        return _cache_usage(key, out, now)
+
+    if resp.status_code in (401, 403):
+        out = {"state": "invalid", "ok": False, "available": True,
+               "message": "The deep-DNS key was rejected. Enter a valid key, or "
+                          "run without deep DNS."}
+        return _cache_usage(key, out, now)
+    if resp.status_code == 429:
+        out = {"state": "exhausted", "ok": False, "available": True,
+               "message": "The deep-DNS key has hit its rate limit. Enter another "
+                          "key, or run without deep DNS."}
+        return _cache_usage(key, out, now)
+    if resp.status_code != 200:
+        out = {"state": "unreachable", "ok": False, "available": True,
+               "message": f"The deep-DNS API answered {resp.status_code}. "
+                          "The scan can still run without it."}
+        return _cache_usage(key, out, now)
+
+    try:
+        data = resp.json() or {}
+    except Exception:
+        data = {}
+    used = _as_int(data.get("current_monthly_usage"))
+    limit = _as_int(data.get("allowed_monthly_usage"))
+    remaining = (max(0, limit - used) if limit and used is not None else None)
+    if limit and used is not None and used >= limit:
+        out = {"state": "exhausted", "ok": False, "available": True,
+               "used": used, "limit": limit, "remaining": 0,
+               "message": f"The deep-DNS key has used its full monthly allowance "
+                          f"({used}/{limit}). Enter another key, or run without it."}
+    else:
+        out = {"state": "ok", "ok": True, "available": True,
+               "used": used, "limit": limit, "remaining": remaining,
+               "message": (f"{remaining} of {limit} deep-DNS queries left this month"
+                           if remaining is not None else "Deep DNS is ready.")}
+    return _cache_usage(key, out, now)
+
+
+def _cache_usage(key: str, value: dict, at: float) -> dict:
+    _USAGE_CACHE.update(at=at, key=key, value=value)
+    return value
+
+
+def _as_int(v) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def forget_usage() -> None:
+    """Drop the cached quota · called when the key changes."""
+    _USAGE_CACHE.update(at=0.0, key=None, value=None)
+
+
 def _get(session, path: str) -> dict | None:
     if not config.SECURITYTRAILS_KEY:
         return None
@@ -46,11 +142,13 @@ def _get(session, path: str) -> dict | None:
         log.info(f"deep DNS request failed ({path}): {exc}")
         return None
     if resp.status_code == 429:
-        log.warning("deep DNS rate limit hit · backing off")
+        log.warning("deep DNS quota/rate limit hit · this key has no allowance "
+                    "left, so the rest of the deep-DNS pass will return nothing. "
+                    "Add a key with room in the dashboard.")
         time.sleep(1.5)
         return None
     if resp.status_code == 401 or resp.status_code == 403:
-        log.warning("deep DNS key rejected (401/403) · check SECURITYTRAILS_KEY")
+        log.warning("deep DNS key rejected (401/403) · check the key in the dashboard")
         return None
     if resp.status_code != 200:
         log.info(f"deep DNS http {resp.status_code} for {path}")

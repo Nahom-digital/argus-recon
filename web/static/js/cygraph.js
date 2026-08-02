@@ -86,6 +86,51 @@ function createCyGraph(container, data, opts) {
     elements.push({ data: { id: 'e' + i, source: e.source, target: e.target, rel: e.type } });
   });
 
+  /* ---- paged children (mirrors the canvas engine) --------------------------
+     A parent shows at most CY_PAGE_SIZE children of any one type; the rest wait
+     behind a single "+N more" node that loads the next batch when tapped. Same
+     rule, same batch size, so switching engines does not change what you see. */
+  const CY_PAGE_SIZE = window.GRAPH_PAGE_SIZE || 100;
+  const byIdRaw = new Map(data.nodes.map(n => [n.id, n]));
+  const pageHidden = new Set();          // node ids waiting behind a marker
+  const groups = new Map();              // marker id -> {children, shown, type, parent}
+
+  (function buildCyPages() {
+    const byParent = new Map();
+    data.edges.forEach(e => {
+      if (!ids.has(e.source) || !ids.has(e.target)) return;
+      let g = byParent.get(e.source);
+      if (!g) byParent.set(e.source, g = new Map());
+      const t = byIdRaw.get(e.target);
+      const list = g.get(t.type);
+      if (list) list.push(t); else g.set(t.type, [t]);
+    });
+    const accent = (getComputedStyle(document.documentElement)
+      .getPropertyValue('--accent') || '#bd5b3d').trim();
+    byParent.forEach((byType, pid) => {
+      byType.forEach((children, type) => {
+        if (children.length <= CY_PAGE_SIZE) return;
+        children.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+        for (let i = CY_PAGE_SIZE; i < children.length; i++) pageHidden.add(children[i].id);
+        const mid = `more:${pid}:${type}`;
+        const group = { children, shown: CY_PAGE_SIZE, type, parent: pid, id: mid };
+        groups.set(mid, group);
+        elements.push({
+          data: {
+            id: mid, ntype: 'More', childType: type, label: moreLabel(group),
+            short: moreLabel(group), props: {}, deg: 6, color: accent,
+          },
+          classes: 'More',
+        });
+        elements.push({ data: { id: 'e-' + mid, source: pid, target: mid, rel: 'MORE' } });
+      });
+    });
+  })();
+
+  function moreLabel(g) {
+    return `+${g.children.length - g.shown} more ${g.type}`;
+  }
+
   const cy = cytoscape({
     container,
     elements,
@@ -109,11 +154,39 @@ function createCyGraph(container, data, opts) {
     cy.batch(() => {
       cy.nodes().forEach(n => {
         const t = n.data('ntype');
-        const show = !isDetailLocked(t) && !hidden.has(t)
-          && (!hostVisibleIds || hostVisibleIds.has(n.id()));
+        const id = n.id();
+        let show;
+        if (t === 'More') {
+          // the marker follows the layer it pages, and retires when spent
+          const ct = n.data('childType');
+          const g = groups.get(id);
+          show = !!g && g.shown < g.children.length
+            && !isDetailLocked(ct) && !hidden.has(ct)
+            && (!hostVisibleIds || hostVisibleIds.has(id));
+        } else {
+          show = !pageHidden.has(id) && !isDetailLocked(t) && !hidden.has(t)
+            && (!hostVisibleIds || hostVisibleIds.has(id));
+        }
         n.style('display', show ? 'element' : 'none');
       });
     });
+  }
+
+  /* Reveal the next batch behind a marker, then re-run the layout so the new
+     nodes find room rather than landing on top of their siblings. */
+  function expandGroup(id) {
+    const g = groups.get(id);
+    if (!g || g.shown >= g.children.length) return;
+    const end = Math.min(g.children.length, g.shown + CY_PAGE_SIZE);
+    for (let i = g.shown; i < end; i++) pageHidden.delete(g.children[i].id);
+    g.shown = end;
+    const marker = cy.getElementById(id);
+    if (marker && marker.length) {
+      marker.data('label', moreLabel(g));
+      marker.data('short', moreLabel(g));
+    }
+    applyVisibility();
+    runLayout(true);
   }
 
   // ---- fcose layout ----
@@ -145,6 +218,7 @@ function createCyGraph(container, data, opts) {
   // ---- interaction ----
   cy.on('tap', 'node', evt => {
     const n = evt.target;
+    if (n.data('ntype') === 'More') { expandGroup(n.id()); return; }
     if (isDetailLocked(n.data('ntype'))) { if (opts.onLocked) opts.onLocked(); return; }
     select(n);
     if (opts.onSelect) opts.onSelect({ type: n.data('ntype'), label: n.data('label') });
@@ -296,6 +370,16 @@ function createCyGraph(container, data, opts) {
     stats: data.stats,
     detailUnlocked: () => detailUnlocked,
     focusHost,
+    /* Same paging surface as the canvas engine, so both behave alike. */
+    pages: () => [...groups.entries()].map(([id, g]) => ({
+      parent: g.parent, type: g.type, shown: g.shown, total: g.children.length,
+      visible: cy.getElementById(id).style('display') === 'element',
+    })),
+    expandPage(parentId, type) {
+      const hit = [...groups.entries()].find(([, g]) => g.parent === parentId && g.type === type);
+      if (hit) expandGroup(hit[0]);
+      return !!hit;
+    },
     destroy() {
       window.removeEventListener('themechange', onTheme);
       try { cy.destroy(); } catch (e) {}
@@ -326,6 +410,11 @@ function styleFor() {
     { selector: 'node.Domain', style: {
         'width': 40, 'height': 40, 'font-size': 12, 'font-weight': 'bold', 'label': 'data(short)' } },
     { selector: 'node.Subdomain', style: { 'shape': 'round-rectangle', 'label': 'data(short)' } },
+    // "+N more" markers are controls: always labelled, always legible
+    { selector: 'node.More', style: {
+        'shape': 'round-rectangle', 'label': 'data(short)', 'width': 18, 'height': 18,
+        'font-size': 10, 'font-weight': 'bold', 'text-halign': 'right',
+        'text-background-opacity': 0.95, 'z-index': 20 } },
     // hovered node reveals its name and lifts above its neighbours
     { selector: 'node.hl', style: {
         'label': 'data(short)', 'z-index': 30, 'text-background-opacity': 0.95 } },

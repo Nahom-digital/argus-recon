@@ -120,6 +120,25 @@ svg.ic{width:1em;height:1em;flex:none;vertical-align:-.14em}
 .topbar .crumbs .cur{color:var(--ink);font-weight:500;font-family:var(--mono);font-size:var(--fs-sm);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* ---- top-bar session -------------------------------------------------------
+   Who is signed in, plus the admin link and sign-out. Present on every page,
+   and empty when the dashboard has no accounts configured. */
+.session{display:flex;align-items:center;gap:6px}
+.session .who{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;
+  font-size:var(--fs-xs);color:var(--ink-2);background:var(--surface-2);
+  border:1px solid var(--border);border-radius:var(--r-pill);white-space:nowrap}
+.session .who svg{width:13px;height:13px;color:var(--muted)}
+.session .who b{font-weight:600;color:var(--ink)}
+.session .who-role{color:var(--faint);font-size:11px}
+/* The top bar is one row and must never push the page sideways. As it gets
+   tight the session area sheds what is least load-bearing, in order: the role
+   word, then the button labels, then the account chip itself · the icons and
+   their tooltips still say what each control is. */
+@media (max-width:900px){.session .who-role{display:none}}
+@media (max-width:720px){.session .lbl{display:none}
+  .session .btn.sm{width:28px;padding:0;justify-content:center}}
+@media (max-width:560px){.session .who{display:none}}
+
 /* ---- buttons -------------------------------------------------------------- */
 .btn{
   display:inline-flex;align-items:center;gap:7px;height:33px;padding:0 13px;
@@ -221,6 +240,26 @@ svg.ic{width:1em;height:1em;flex:none;vertical-align:-.14em}
 .phead .count{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);
   background:var(--surface-2);padding:2px 7px;border-radius:var(--r-pill)}
 .phead svg{width:15px;height:15px;color:var(--muted)}
+
+/* ---- modal ----------------------------------------------------------------
+   One component, used by the home page's deep-DNS key dialog and the admin
+   page's account dialog. */
+.modal-scrim{position:fixed;inset:0;z-index:var(--z-modal);display:flex;align-items:center;justify-content:center;
+  padding:20px;background:color-mix(in srgb,var(--ink) 30%,transparent)}
+.modal-scrim[hidden]{display:none}
+.modal{width:100%;max-width:440px;max-height:calc(100vh - 40px);overflow-y:auto;
+  background:var(--surface);border:1px solid var(--border-strong);
+  border-radius:var(--r);padding:20px;display:flex;flex-direction:column;gap:12px;
+  transform-origin:center;animation:modalIn .18s var(--ease)}
+@keyframes modalIn{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
+.modal-head{display:flex;align-items:center;gap:9px}
+.modal-head svg{width:18px;height:18px;color:var(--accent)}
+.modal-head h3{font-size:var(--fs-lg)}
+.modal-body{font-size:var(--fs-sm);color:var(--muted);line-height:1.55}
+.modal-body code{background:var(--surface-2);padding:1px 5px;border-radius:var(--r-xs);font-size:.9em;color:var(--ink-2)}
+.modal .input{height:36px}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+@media (prefers-reduced-motion:reduce){.modal{animation:none}}
 
 /* ---- empty / skeleton ----------------------------------------------------- */
 .empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:52px 24px;text-align:center;color:var(--muted)}

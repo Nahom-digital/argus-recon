@@ -251,10 +251,13 @@
 
 /* ---- discovered files: expandable w/ source + request + response (item 10) - */
 /* type filter, built from the kinds actually discovered in the scan */
-.file-filter{display:flex;align-items:center;gap:6px;padding:2px 2px 8px}
-.file-filter svg{width:13px;height:13px;color:var(--faint);flex:none}
-.file-filter select.input{flex:1;min-width:0;height:28px;font-size:var(--fs-xs);font-family:var(--mono)}
-.file-filter[hidden]{display:none}
+/* Per-section filter row · subdomains (status), infrastructure (AS), tech
+   stack, secrets (severity) and discovered files (type + status). One or two
+   selects; the row hides itself when this scan has nothing to choose between. */
+.panel-filter{display:flex;align-items:center;gap:6px;padding:2px 2px 8px;flex-wrap:wrap}
+.panel-filter svg{width:13px;height:13px;color:var(--faint);flex:none}
+.panel-filter select.input{flex:1;min-width:96px;height:28px;font-size:var(--fs-xs);font-family:var(--mono)}
+.panel-filter[hidden]{display:none}
 .frow{border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);margin-bottom:5px;overflow:hidden}
 .frow .fsummary{display:flex;align-items:center;gap:7px;width:100%;padding:8px 9px;background:none;border:none;
   cursor:pointer;font:inherit;text-align:left;color:inherit;transition:background .12s var(--ease)}

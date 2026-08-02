@@ -21,7 +21,9 @@
         <label class="chk" title="Passive enumeration only · nothing is sent to the target"><input type="checkbox" id="optPassive"> passive</label>
         <label class="chk" id="torChk" title="Route the whole scan through Tor"><input type="checkbox" id="optTor"> via Tor</label>
         <label class="chk" id="portscanChk" title="Scan every discovered IP for open ports & services"><input type="checkbox" id="optPortscan"> port scan</label>
+        <label class="chk" id="waybackChk" title="Mine the web archive for URLs this domain used to serve"><input type="checkbox" id="optWayback"> web archive</label>
       </div>
+      <span class="quota-chip" id="quotaChip" hidden></span>
       <button class="btn" type="button" id="optsToggle" aria-expanded="false" aria-controls="scanOpts">
         <svg class="ic"><use href="#i-settings"></use></svg> Options<span class="ns-badge" id="optsCount" hidden></span>
       </button>
@@ -79,6 +81,8 @@
         records. Paste your API key to enable it, or skip to run without it (deep DNS stays locked).
         The key is stored locally in <code>.env</code> and never leaves this machine.</p>
       <input class="input" id="keyInput" type="password" placeholder="paste API key" spellcheck="false" autocomplete="off">
+      <label class="chk" style="font-size:13px"><input type="checkbox" id="keySession">
+        this session only · do not write it to <code>.env</code></label>
       <div class="modal-actions">
         <button class="btn ghost" id="keySkip">Skip for now</button>
         <button class="btn primary" id="keySave"><svg class="ic"><use href="#i-key"></use></svg> Save &amp; enable</button>

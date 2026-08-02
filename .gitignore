@@ -11,3 +11,8 @@ scans/.argus.db*
 scans/.kuzu*
 !scans/.gitkeep
 .env
+# account store: password hashes, per-account allowances and the token signing
+# secret. Machine-local by definition — committing it would publish the secret
+# that mints valid sessions for this dashboard.
+key.json
+key.json.tmp*

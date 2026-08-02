@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}Argus Recon · admin{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css', v=asset_v) }}">{% endblock %}
+
+{% block crumbs %}
+<nav class="crumbs">
+  <a href="{{ url_for('index') }}">scans</a>
+  <svg class="ic" style="width:13px;height:13px"><use href="#i-chevron-right"></use></svg>
+  <span class="cur">admin</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="admin-page">
+  <div class="admin-head">
+    <div class="lede">
+      <h1>Administration</h1>
+      <p>Accounts, what each one is allowed to scan, and who has been on this
+         dashboard. Everything here is stored in <code id="keyFilePath">key.json</code>
+         on this machine.</p>
+    </div>
+    <div class="admin-stats" id="adminStats"></div>
+  </div>
+
+  <nav class="admin-tabs" id="adminTabs" role="tablist">
+    <button class="atab on" data-tab="users" role="tab" aria-selected="true">
+      <svg class="ic"><use href="#i-forms"></use></svg> Accounts</button>
+    <button class="atab" data-tab="access" role="tab" aria-selected="false">
+      <svg class="ic"><use href="#i-list-details"></use></svg> Access history</button>
+    <button class="atab" data-tab="scans" role="tab" aria-selected="false">
+      <svg class="ic"><use href="#i-radar-2"></use></svg> Scans</button>
+    <button class="atab" data-tab="account" role="tab" aria-selected="false">
+      <svg class="ic"><use href="#i-key"></use></svg> My password</button>
+  </nav>
+
+  <!-- ACCOUNTS ------------------------------------------------------------ -->
+  <section class="atab-panel on" id="tab-users" role="tabpanel">
+    <div class="panel">
+      <div class="phead">
+        <svg class="ic"><use href="#i-forms"></use></svg>
+        <h3>Accounts</h3>
+        <span class="count" id="userCount">0</span>
+        <button class="btn primary sm" id="newUserBtn" style="margin-left:auto">
+          <svg class="ic"><use href="#i-plus"></use></svg> New account
+        </button>
+      </div>
+      <div id="userList"></div>
+    </div>
+  </section>
+
+  <!-- ACCESS HISTORY ------------------------------------------------------ -->
+  <section class="atab-panel" id="tab-access" role="tabpanel" hidden>
+    <div class="panel">
+      <div class="phead">
+        <svg class="ic"><use href="#i-list-details"></use></svg>
+        <h3>Access history</h3>
+        <span class="count" id="accessCount">0</span>
+        <div class="access-filters">
+          <select class="input" id="accessDay" aria-label="Day"></select>
+          <select class="input" id="accessUser" aria-label="Account"></select>
+          <input class="input" id="accessQ" placeholder="path, IP, agent…" spellcheck="false"
+                 aria-label="Search the access log">
+          <button class="btn sm" id="accessRefresh" title="Reload">
+            <svg class="ic"><use href="#i-refresh"></use></svg></button>
+        </div>
+      </div>
+      <div class="access-users" id="accessUsers"></div>
+      <div class="atable-wrap">
+        <table class="atable" id="accessTable">
+          <thead><tr>
+            <th>When</th><th>Account</th><th>IP</th><th>Method</th><th>Path</th>
+            <th>Status</th><th>Time</th><th>Agent</th>
+          </tr></thead>
+          <tbody id="accessBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCANS --------------------------------------------------------------- -->
+  <section class="atab-panel" id="tab-scans" role="tabpanel" hidden>
+    <div class="panel">
+      <div class="phead"><svg class="ic"><use href="#i-radar-2"></use></svg>
+        <h3>Scans by account</h3></div>
+      <div id="scanOwners"></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <div class="phead"><svg class="ic"><use href="#i-clock"></use></svg>
+        <h3>Running now</h3></div>
+      <div id="runningScans"></div>
+    </div>
+  </section>
+
+  <!-- MY PASSWORD --------------------------------------------------------- -->
+  <section class="atab-panel" id="tab-account" role="tabpanel" hidden>
+    <div class="panel">
+      <div class="phead"><svg class="ic"><use href="#i-key"></use></svg>
+        <h3>Change my password</h3></div>
+      <form class="pw-form" id="pwForm" autocomplete="off">
+        <label class="field"><span>Current password</span>
+          <input class="input" id="pwCurrent" type="password" autocomplete="current-password" required></label>
+        <label class="field"><span>New password</span>
+          <input class="input" id="pwNew" type="password" autocomplete="new-password" required
+                 minlength="8" placeholder="at least 8 characters"></label>
+        <label class="field"><span>Repeat new password</span>
+          <input class="input" id="pwRepeat" type="password" autocomplete="new-password" required></label>
+        <p class="form-msg" id="pwMsg" role="alert" hidden></p>
+        <button class="btn primary" type="submit" id="pwSave">
+          <svg class="ic"><use href="#i-key"></use></svg> Change password</button>
+        <p class="ns-help">Changing your password signs out every other session
+          using this account.</p>
+      </form>
+    </div>
+  </section>
+
+  <!-- NEW / EDIT ACCOUNT MODAL -------------------------------------------- -->
+  <div class="modal-scrim" id="userModal" hidden>
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="umTitle">
+      <div class="modal-head"><svg class="ic"><use href="#i-forms"></use></svg>
+        <h3 id="umTitle">New account</h3></div>
+      <form id="userForm" autocomplete="off">
+        <div class="um-grid">
+          <label class="field"><span>Username</span>
+            <input class="input" id="umUser" spellcheck="false" autocapitalize="none"
+                   placeholder="operator" required></label>
+          <label class="field"><span id="umPassLabel">Password</span>
+            <input class="input" id="umPass" type="password" autocomplete="new-password"
+                   placeholder="at least 8 characters"></label>
+          <label class="field"><span>Role</span>
+            <select class="input" id="umRole">
+              <option value="user">operator</option>
+              <option value="admin">administrator</option>
+            </select></label>
+          <label class="field"><span>Scans per day <small class="faint">(0 = unlimited)</small></span>
+            <input class="input" id="umDaily" type="number" min="0" max="10000" inputmode="numeric"></label>
+          <label class="field"><span>Scans at once <small class="faint">(0 = unlimited)</small></span>
+            <input class="input" id="umConcurrent" type="number" min="0" max="100" inputmode="numeric"></label>
+        </div>
+        <fieldset class="um-perms">
+          <legend>Allowed to</legend>
+          <label class="chk"><input type="checkbox" id="umSeeAll"> see every account's scans</label>
+          <label class="chk"><input type="checkbox" id="umDelete"> delete scans</label>
+          <label class="chk"><input type="checkbox" id="umPortscan"> run port scans</label>
+          <label class="chk"><input type="checkbox" id="umTor"> route scans over Tor</label>
+          <label class="chk"><input type="checkbox" id="umWayback"> mine the web archive</label>
+          <label class="chk"><input type="checkbox" id="umDeep"> use deep DNS</label>
+        </fieldset>
+        <p class="form-msg" id="umMsg" role="alert" hidden></p>
+        <div class="modal-actions">
+          <button class="btn ghost" type="button" id="umCancel">Cancel</button>
+          <button class="btn primary" type="submit" id="umSave">Create account</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='js/admin.js', v=asset_v) }}"></script>{% endblock %}

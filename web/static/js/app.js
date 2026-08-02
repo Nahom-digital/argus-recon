@@ -37,10 +37,101 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+/* ---- session --------------------------------------------------------------
+   The dashboard requires a sign-in the moment an account store exists (see
+   modules/auth.py). Two things follow for every page:
+
+     * a 401 from any API call means the session is gone · send the browser to
+       the login page rather than rendering an empty screen with a stack of
+       "could not load" panels,
+     * every state-changing call has to echo the CSRF value carried inside the
+       signed session token. AUTH.csrf holds it; apiFetch attaches it.
+
+   With no accounts configured, AUTH.required stays false and none of this is in
+   the way. */
+const AUTH = { required: false, user: null, csrf: '' };
+
+function goToLogin() {
+  if (/\/login(\?|$)/.test(location.pathname)) return;
+  const next = encodeURIComponent(location.pathname + location.search);
+  location.href = `${BASE}/login?next=${next}`;
+}
+
+/* One fetch for everything, so the session rules are applied in exactly one
+   place. `method`/`body` behave like fetch's; a plain object body is JSON. */
+async function apiFetch(url, opts) {
+  opts = opts || {};
+  const headers = Object.assign({ Accept: 'application/json' }, opts.headers || {});
+  let body = opts.body;
+  if (body && typeof body === 'object' && !(body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(body);
+  }
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && AUTH.csrf) headers['X-Argus-CSRF'] = AUTH.csrf;
+  const r = await fetch(url, { ...opts, method, headers, body, credentials: 'same-origin' });
+  if (r.status === 401) { goToLogin(); throw new Error('signed out'); }
+  return r;
+}
+
 async function getJSON(url) {
-  const r = await fetch(url, { headers: { Accept: 'application/json' } });
+  const r = await apiFetch(url);
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
+}
+
+/* POST/DELETE that returns the parsed body and throws the server's own message
+   (rather than a bare status) so callers can show something useful. */
+async function sendJSON(url, method, body) {
+  const r = await apiFetch(url, { method, body });
+  let data = null;
+  try { data = await r.json(); } catch (e) { data = null; }
+  if (!r.ok) {
+    const err = new Error((data && data.error) || `${r.status} ${r.statusText}`);
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+/* Read the session once per page load and paint the account chip in the top
+   bar. Never throws: a dashboard with no accounts simply has no chip. */
+async function loadSession() {
+  try {
+    const s = await (await fetch(withBase('/api/auth/state'),
+      { headers: { Accept: 'application/json' }, credentials: 'same-origin' })).json();
+    AUTH.required = !!s.required;
+    AUTH.user = s.user || null;
+    AUTH.csrf = (s.user && s.user.csrf) || '';
+    renderSession();
+    return s;
+  } catch (e) { return null; }
+}
+
+function renderSession() {
+  const box = document.getElementById('sessionBox');
+  if (!box) return;
+  if (!AUTH.required || !AUTH.user) { box.innerHTML = ''; return; }
+  const u = AUTH.user;
+  const q = u.quota || {};
+  const left = (q.daily_scans && q.remaining != null)
+    ? `${q.remaining} of ${q.daily_scans} scans left today` : 'unlimited scans';
+  // Labels collapse to their icons on a narrow screen (see .session in
+  // admin.css) · the top bar has to stay on one line at phone widths.
+  box.innerHTML = `
+    <span class="who" title="${esc(u.username)} · ${esc(u.role)} · ${esc(left)}">
+      ${icon(u.role === 'admin' ? 'shield-half-filled' : 'point-filled')}
+      <b>${esc(u.username)}</b><span class="who-role">${esc(u.role)}</span>
+    </span>
+    ${u.role === 'admin' ? `<a class="btn sm ghost" href="${withBase('/recon/admin')}"
+        title="Accounts, allowances and access history">${icon('settings')}<span class="lbl">Admin</span></a>` : ''}
+    <button class="btn sm ghost" id="signOutBtn" title="Sign out">${icon('x')}<span class="lbl">Sign out</span></button>`;
+  const out = document.getElementById('signOutBtn');
+  if (out) out.addEventListener('click', async () => {
+    try { await sendJSON(withBase('/api/auth/logout'), 'POST', {}); } catch (e) {}
+    goToLogin();
+  });
 }
 
 /* ---- formatting ----------------------------------------------------------- */
@@ -208,3 +299,7 @@ function wireDecode(root) {
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
+
+/* Session is read on every page. It resolves long before any state-changing
+   call can happen (those all need a click), so nothing waits on it. */
+document.addEventListener('DOMContentLoaded', () => { loadSession(); });

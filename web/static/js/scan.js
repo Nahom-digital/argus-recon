@@ -6,7 +6,12 @@
 const ROW_CAP = 1500;
 const GRAPH_LAZY = 500;              // above this, defer physics until activated
 let SCAN = null, GRAPH = null, detailMode = false;
-const F = { search: '', type: '', status: '', scope: 'in', classifiedOnly: false, host: null, ip: null, fileType: '' };
+const F = {
+  search: '', type: '', status: '', scope: 'in', classifiedOnly: false,
+  host: null, ip: null,
+  // left-panel filters · each narrows one section's list, nothing else
+  fileType: '', fileStatus: '', subStatus: '', asn: '', tech: '', secretSev: '',
+};
 
 /* IP <-> host index, built once per scan from both directions (a subdomain
    lists its IPs, an IP record lists the hosts that resolve to it). */
@@ -35,7 +40,7 @@ async function init() {
   // Each half now renders the moment its own response arrives, and one failing
   // no longer blanks the other.
   const viewP = getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/view`));
-  const graphP = getJSON(withBase(`/api/scan/${encodeURIComponent(id)}/graph`))
+  const graphP = fetchGraph(id)
     .then(g => ({ g }), e => ({ e }));       // settled either way; never unhandled
 
   try {
@@ -112,6 +117,82 @@ function failGraph(err) {
       <h4>Graph unavailable</h4><p>${esc(err && err.message ? err.message : 'The graph could not be built for this scan.')}</p></div></div>`);
 }
 
+/* ---- graph fetch ----------------------------------------------------------
+   Building the graph for a large scan takes longer than any proxy will hold a
+   connection open, which is exactly what "Graph unavailable 524" was: the
+   reverse proxy giving up while the server was still working. The server now
+   answers 202 "building" instead of holding the socket, and this waits it out.
+
+   A gateway status (502/504/524, and 408) is treated the same way · it means
+   something in front of us timed out, not that the graph failed, so the right
+   move is to keep asking rather than to paint an error over a build that is
+   still running.
+
+   Progress is reported into the loading overlay so a five-minute build looks
+   like work in progress instead of a hung tab. */
+const GRAPH_POLL_MS = 2500;
+const GRAPH_MAX_WAIT_MS = 15 * 60 * 1000;
+const GATEWAY_STATUS = new Set([408, 502, 503, 504, 522, 524]);
+
+async function fetchGraph(id, limit) {
+  const url = withBase(`/api/scan/${encodeURIComponent(id)}/graph`)
+    + (limit ? `?limit=${encodeURIComponent(limit)}` : '');
+  const deadline = Date.now() + GRAPH_MAX_WAIT_MS;
+
+  while (true) {
+    let r;
+    try {
+      r = await apiFetch(url);
+    } catch (e) {
+      // a dropped connection mid-build is the same story as a gateway timeout
+      if (Date.now() > deadline) throw e;
+      await graphWait();
+      continue;
+    }
+
+    if (r.status === 202) {
+      const body = await r.json().catch(() => ({}));
+      if (Date.now() > deadline)
+        throw new Error('the graph is still being built · reload the page to keep waiting');
+      noteGraphProgress(body.elapsed_sec);
+      await graphWait();
+      continue;
+    }
+    if (GATEWAY_STATUS.has(r.status)) {
+      if (Date.now() > deadline)
+        throw new Error(`the graph request kept timing out (${r.status})`);
+      noteGraphProgress(null);
+      await graphWait();
+      continue;
+    }
+    if (!r.ok) {
+      const body = await r.json().catch(() => null);
+      throw new Error((body && body.error) || `${r.status} ${r.statusText}`);
+    }
+    return r.json();
+  }
+}
+
+function graphWait() {
+  return new Promise(res => setTimeout(res, GRAPH_POLL_MS));
+}
+
+/* Update the "Building graph…" overlay in place · replacing it would restart
+   the spinner's animation on every poll. */
+function noteGraphProgress(elapsed) {
+  const box = document.querySelector('.graph-loading .empty h4');
+  if (!box) return;
+  box.textContent = elapsed
+    ? `Building graph… ${Math.round(elapsed)}s`
+    : 'Building graph…';
+  let sub = document.querySelector('.graph-loading .empty p');
+  if (!sub) {
+    const parent = document.querySelector('.graph-loading .empty');
+    if (parent) parent.insertAdjacentHTML('beforeend',
+      '<p>This scan is large. The rest of the page is ready below.</p>');
+  }
+}
+
 function buildIpIndex(s) {
   IP_HOSTS.clear(); HOST_IPS.clear();
   const link = (ip, host) => {
@@ -153,38 +234,179 @@ function renderPanel(s) {
     <div style="margin-top:6px">${mods}</div>
   </div>`;
 
-  // subdomains
+  // Each section below carries its own filter, built from what this scan
+  // actually contains · a status code nothing returned is never offered.
   const subs = s.subdomains || [];
   setCount('cSubs', subs.length);
-  document.getElementById('subList').innerHTML = subs.map(subItem).join('') ||
-    emptyMini('no subdomains');
+  F.subStatus = '';
+  buildSubFilter(subs);
+  renderSubList();
 
-  // infra
   const ips = (s.infra && s.infra.ips) || [];
   setCount('cIps', ips.length);
-  document.getElementById('ipList').innerHTML = ips.map(ipCard).join('') || emptyMini('no IPs');
+  F.asn = '';
+  buildAsnFilter(ips);
+  renderIpList();
 
   // DNS
   renderDns(s.dns || {});
 
   // tech (per fingerprint -> which subdomains, like secrets)
+  F.tech = '';
+  buildTechFilter(subs);
   renderTech(subs);
 
-  // secrets
   const secrets = s.secrets || [];
   setCount('cSecrets', secrets.length);
-  document.getElementById('secretList').innerHTML = secrets.map(secRow).join('') ||
-    emptyMini('none flagged');
+  F.secretSev = '';
+  buildSecretFilter(secrets);
+  renderSecretList();
   document.querySelector('.side-sec[data-sec="secrets"]').classList.toggle('collapsed', !secrets.length);
 
-  // files (with a type filter built from what was actually discovered)
   const files = s.files || [];
   setCount('cFiles', files.length);
-  F.fileType = '';
+  F.fileType = ''; F.fileStatus = '';
   buildFileFilter(files);
   renderFileList();
 
   wirePanelInteractions();
+}
+
+/* ---- left-panel filters ---------------------------------------------------
+   One shared builder for every section's filter row. `specs` are the selects to
+   draw; any select with nothing to choose between is dropped, and a row with no
+   selects left hides itself rather than showing an empty control. */
+function panelFilter(containerId, specs) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const useful = specs.filter(s => s.options.length > 1);
+  if (!useful.length) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = `<svg class="ic"><use href="#i-filter"></use></svg>`
+    + useful.map(s => `<select class="input" id="${esc(s.id)}" aria-label="${esc(s.aria)}">${
+      s.options.map(([v, label]) =>
+        `<option value="${esc(v)}"${v === s.value ? ' selected' : ''}>${esc(label)}</option>`
+      ).join('')}</select>`).join('');
+  useful.forEach(s => {
+    const sel = el.querySelector('#' + s.id);
+    if (sel) sel.addEventListener('change', () => s.onChange(sel.value));
+  });
+}
+
+/* Status options built from the codes actually seen: the classes present
+   (2xx/4xx/…), then each exact code, then "no response" when something did not
+   answer at all. Same vocabulary as the request table's status filter. */
+function statusOptions(items, getStatus, allLabel) {
+  const codes = new Map(), classes = new Map();
+  let none = 0;
+  items.forEach(x => {
+    const c = getStatus(x);
+    if (c) {
+      codes.set(c, (codes.get(c) || 0) + 1);
+      const k = Math.floor(c / 100) + 'xx';
+      classes.set(k, (classes.get(k) || 0) + 1);
+    } else none++;
+  });
+  const opts = [['', `${allLabel} (${items.length})`]];
+  [...classes.keys()].sort().forEach(k => opts.push([k, `${k} (${classes.get(k)})`]));
+  [...codes.keys()].sort((a, b) => a - b).forEach(c => opts.push([String(c), `${c} (${codes.get(c)})`]));
+  if (none) opts.push(['none', `no response (${none})`]);
+  return opts;
+}
+
+function matchesStatusFilter(value, code) {
+  if (!value) return true;
+  if (value === 'none') return !code;
+  if (/^\dxx$/.test(value)) return !!code && Math.floor(code / 100) === +value[0];
+  return String(code) === value;
+}
+
+/* Subdomains · by the status their host answered with. */
+function buildSubFilter(subs) {
+  panelFilter('subFilter', [{
+    id: 'subStatusFilter', aria: 'Filter subdomains by response code',
+    value: F.subStatus,
+    options: statusOptions(subs, sd => (sd.http || {}).status, 'all status'),
+    onChange: v => { F.subStatus = v; renderSubList(); },
+  }]);
+}
+
+function renderSubList() {
+  const subs = ((SCAN && SCAN.subdomains) || [])
+    .filter(sd => matchesStatusFilter(F.subStatus, (sd.http || {}).status));
+  document.getElementById('subList').innerHTML = subs.map(subItem).join('')
+    || emptyMini(F.subStatus ? 'no subdomains with that status' : 'no subdomains');
+  wirePanelInteractions();
+}
+
+/* Infrastructure · by announcing AS. Addresses with no ASN are their own group
+   rather than being silently unreachable through the filter. */
+function buildAsnFilter(ips) {
+  const seen = new Map();          // asn -> {n, org}
+  let none = 0;
+  ips.forEach(ip => {
+    if (!ip.asn) { none++; return; }
+    const rec = seen.get(ip.asn) || { n: 0, org: '' };
+    rec.n++;
+    if (!rec.org && ip.org) rec.org = String(ip.org).split(/[,(]/)[0].trim();
+    seen.set(ip.asn, rec);
+  });
+  const opts = [['', `all AS (${ips.length})`]];
+  [...seen.entries()]
+    .sort((a, b) => b[1].n - a[1].n || String(a[0]).localeCompare(String(b[0])))
+    .forEach(([asn, r]) => opts.push([asn, `${asn}${r.org ? ' · ' + r.org : ''} (${r.n})`]));
+  if (none) opts.push(['none', `no AS recorded (${none})`]);
+  panelFilter('asnFilter', [{
+    id: 'asnSelect', aria: 'Filter infrastructure by announcing AS',
+    value: F.asn, options: opts,
+    onChange: v => { F.asn = v; renderIpList(); },
+  }]);
+}
+
+function renderIpList() {
+  const ips = (((SCAN || {}).infra || {}).ips || []).filter(ip =>
+    !F.asn || (F.asn === 'none' ? !ip.asn : ip.asn === F.asn));
+  document.getElementById('ipList').innerHTML = ips.map(ipCard).join('')
+    || emptyMini(F.asn ? 'no addresses on that AS' : 'no IPs');
+  wirePanelInteractions();
+}
+
+/* Tech stack · by fingerprint. */
+function buildTechFilter(subs) {
+  const map = {};
+  subs.forEach(sd => (sd.tech || []).forEach(t => { map[t] = (map[t] || 0) + 1; }));
+  const entries = Object.entries(map)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const opts = [['', `all tech (${entries.length})`]];
+  entries.forEach(([t, n]) => opts.push([t, `${t} (${n})`]));
+  panelFilter('techFilter', [{
+    id: 'techSelect', aria: 'Filter the tech stack',
+    value: F.tech, options: opts,
+    onChange: v => { F.tech = v; renderTech((SCAN && SCAN.subdomains) || []); },
+  }]);
+}
+
+/* Secrets · by severity. */
+function buildSecretFilter(secrets) {
+  const order = ['high', 'medium', 'low'];
+  const counts = {};
+  secrets.forEach(x => { counts[x.severity] = (counts[x.severity] || 0) + 1; });
+  const opts = [['', `all severities (${secrets.length})`]];
+  order.filter(s => counts[s]).forEach(s => opts.push([s, `${s} (${counts[s]})`]));
+  Object.keys(counts).filter(s => !order.includes(s)).sort()
+    .forEach(s => opts.push([s, `${s} (${counts[s]})`]));
+  panelFilter('secretFilter', [{
+    id: 'secretSevSelect', aria: 'Filter secrets by severity',
+    value: F.secretSev, options: opts,
+    onChange: v => { F.secretSev = v; renderSecretList(); },
+  }]);
+}
+
+function renderSecretList() {
+  const secrets = ((SCAN && SCAN.secrets) || [])
+    .filter(x => !F.secretSev || x.severity === F.secretSev);
+  document.getElementById('secretList').innerHTML = secrets.map(secRow).join('')
+    || emptyMini(F.secretSev ? 'none at that severity' : 'none flagged');
 }
 
 function subItem(sd) {
@@ -279,8 +501,9 @@ function portRow(p) {
 function renderTech(subs) {
   const map = {};
   subs.forEach(sd => (sd.tech || []).forEach(t => { (map[t] = map[t] || []).push(sd.host); }));
-  const entries = Object.entries(map).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  let entries = Object.entries(map).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
   setCount('cTech', entries.length);
+  if (F.tech) entries = entries.filter(([t]) => t === F.tech);
   document.getElementById('techList').innerHTML = entries.map(([t, hosts]) => {
     const ips = ipsOfHosts(hosts);
     return `<div class="techrow">
@@ -401,30 +624,28 @@ const CODE_FILE_TYPES = new Set(['js', 'ts', 'jsx', 'tsx', 'json', 'config', 'en
 function fileTypeOf(f) { return (f.subtype || f.kind || 'other'); }
 
 function buildFileFilter(files) {
-  const el = document.getElementById('fileFilter');
-  if (!el) return;
   const types = [...new Set(files.map(fileTypeOf))].sort();
   const codeCount = files.filter(f => CODE_FILE_TYPES.has(fileTypeOf(f))).length;
-  // nothing worth filtering if there is a single kind and no distinct code group
-  if (types.length < 2 && !(codeCount && codeCount < files.length)) {
-    el.hidden = true; el.innerHTML = ''; return;
-  }
-  el.hidden = false;
-  const opts = [`<option value="">all types (${files.length})</option>`];
+  const typeOpts = [['', `all types (${files.length})`]];
   if (codeCount && codeCount < files.length)
-    opts.push(`<option value="__code">code (${codeCount})</option>`);
-  types.forEach(t => {
-    const n = files.filter(f => fileTypeOf(f) === t).length;
-    opts.push(`<option value="${esc(t)}">${esc(t)} (${n})</option>`);
-  });
-  el.innerHTML = `<svg class="ic"><use href="#i-filter"></use></svg>
-    <select class="input" id="fileTypeFilter" aria-label="Filter discovered files by type">${opts.join('')}</select>`;
-  const sel = el.querySelector('#fileTypeFilter');
-  sel.value = F.fileType || '';
-  sel.addEventListener('change', () => { F.fileType = sel.value; renderFileList(); });
+    typeOpts.push(['__code', `code (${codeCount})`]);
+  types.forEach(t => typeOpts.push(
+    [t, `${t} (${files.filter(f => fileTypeOf(f) === t).length})`]));
+
+  // Kind and status answer different questions ("what is it?" vs "did it
+  // actually serve?"), so both are offered and they combine.
+  panelFilter('fileFilter', [
+    { id: 'fileTypeFilter', aria: 'Filter discovered files by type',
+      value: F.fileType, options: typeOpts,
+      onChange: v => { F.fileType = v; renderFileList(); } },
+    { id: 'fileStatusFilter', aria: 'Filter discovered files by response code',
+      value: F.fileStatus, options: statusOptions(files, f => f.status, 'all status'),
+      onChange: v => { F.fileStatus = v; renderFileList(); } },
+  ]);
 }
 
 function fileMatches(f) {
+  if (!matchesStatusFilter(F.fileStatus, f.status)) return false;
   if (!F.fileType) return true;
   if (F.fileType === '__code') return CODE_FILE_TYPES.has(fileTypeOf(f));
   return fileTypeOf(f) === F.fileType;
@@ -439,7 +660,7 @@ function renderFileList() {
   const rows = [];
   files.forEach((f, i) => { if (fileMatches(f)) rows.push(fileRow(f, i)); });
   list.innerHTML = rows.join('') ||
-    emptyMini(F.fileType ? 'no files of this type' : 'none');
+    emptyMini(F.fileType || F.fileStatus ? 'no files match those filters' : 'none');
   list.querySelectorAll('.frow').forEach(r =>
     r.querySelector('.fsummary').addEventListener('click', () => toggleFile(r)));
 }

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Argus Recon · sign in{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css', v=asset_v) }}">{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <form class="auth-card" id="loginForm" autocomplete="on">
+    <div class="auth-mark"><svg class="ic"><use href="#i-radar-2"></use></svg></div>
+    <h1>Sign in</h1>
+    <p class="auth-lede">This dashboard runs authenticated. Use the account an
+      administrator created for you.</p>
+
+    <label class="field">
+      <span>Username</span>
+      <input class="input" id="loginUser" name="username" autocomplete="username"
+             spellcheck="false" autocapitalize="none" required>
+    </label>
+    <label class="field">
+      <span>Password</span>
+      <input class="input" id="loginPass" name="password" type="password"
+             autocomplete="current-password" required>
+    </label>
+
+    <p class="auth-error" id="loginError" role="alert" hidden></p>
+
+    <button class="btn primary auth-submit" type="submit" id="loginBtn">
+      <svg class="ic"><use href="#i-lock"></use></svg> Sign in
+    </button>
+    <p class="auth-foot">Scans you start are yours. An administrator can see every
+      scan and every access to this dashboard.</p>
+  </form>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='js/login.js', v=asset_v) }}"></script>{% endblock %}

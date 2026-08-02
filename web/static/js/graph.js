@@ -39,7 +39,85 @@ function createGraph(canvas, data, opts) {
   edges.forEach(e => { e.s.deg++; e.t.deg++; });
   nodes.forEach(n => { n.r = 3.5 + Math.min(8, Math.sqrt(n.deg) * 1.7) + (n.type === 'Domain' ? 4 : 0); });
 
-  // adjacency for hover highlight
+  /* ---- paged children ------------------------------------------------------
+     A host with 156 subdomains, or a subdomain with 4,000 endpoints, drew every
+     one of them at once: an unreadable ball of dots that also had to be laid out
+     before the first frame. So a parent only ever shows PAGE_SIZE children of
+     any one type. The rest sit behind a single "+N more" node · click it and the
+     next hundred appear, click again for the hundred after that, until the last
+     partial batch lands and the marker retires itself.
+
+     It is per (parent, child type), so opening the subdomains of a domain does
+     not also unpack its IPs, and each layer pages independently. */
+  const PAGE_SIZE = window.GRAPH_PAGE_SIZE || 100;
+  const pageGroups = [];
+
+  function labelMore(g) {
+    const left = g.children.length - g.shown;
+    const pages = Math.ceil(g.children.length / PAGE_SIZE);
+    const stage = Math.ceil(g.shown / PAGE_SIZE);
+    g.more.label = `+${left} more ${g.type}`;
+    g.more.props = {
+      showing: `${g.shown} of ${g.children.length}`,
+      stage: `${stage} of ${pages}`,
+      next: `click to add ${Math.min(PAGE_SIZE, left)} more`,
+    };
+  }
+
+  function buildPages() {
+    const byParent = new Map();               // parentId -> Map(childType -> [node])
+    for (const e of edges) {
+      let g = byParent.get(e.s.id);
+      if (!g) byParent.set(e.s.id, g = new Map());
+      const list = g.get(e.t.type);
+      if (list) list.push(e.t); else g.set(e.t.type, [e.t]);
+    }
+    const accent = cssVar('--accent') || '#bd5b3d';
+    for (const [pid, byType] of byParent) {
+      const parent = byId.get(pid);
+      if (!parent) continue;
+      for (const [type, children] of byType) {
+        if (children.length <= PAGE_SIZE) continue;
+        // stable order, so the same hundred come back on a reload
+        children.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+        for (let i = PAGE_SIZE; i < children.length; i++) children[i].pageHidden = true;
+        const more = {
+          id: `more:${pid}:${type}`, type: 'More', childType: type,
+          label: '', props: {}, x: 0, y: 0, vx: 0, vy: 0, deg: 1, r: 9,
+          color: accent,
+        };
+        const group = { parent, type, children, shown: PAGE_SIZE, more };
+        more.group = group;
+        labelMore(group);
+        nodes.push(more);
+        byId.set(more.id, more);
+        edges.push({ s: parent, t: more, type: 'MORE' });
+        pageGroups.push(group);
+      }
+    }
+  }
+
+  /* Reveal the next batch behind a "+N more" marker. */
+  function expandGroup(g) {
+    if (!g || g.shown >= g.children.length) return false;
+    const end = Math.min(g.children.length, g.shown + PAGE_SIZE);
+    for (let i = g.shown; i < end; i++) g.children[i].pageHidden = false;
+    g.shown = end;
+    if (g.shown >= g.children.length) g.more.exhausted = true;
+    else labelMore(g);
+    if (selected === g.more && g.more.exhausted) {
+      selected = null; locked = false; if (card) card.classList.remove('show');
+    }
+    seedNewlyVisible();
+    refreshVis();
+    if (legendEl) buildLegend(legendEl);
+    wake();
+    return true;
+  }
+
+  buildPages();
+
+  // adjacency for hover highlight (built after paging so the markers are in it)
   const adj = new Map(nodes.map(n => [n.id, new Set()]));
   edges.forEach(e => { adj.get(e.s.id).add(e.t.id); adj.get(e.t.id).add(e.s.id); });
 
@@ -71,6 +149,15 @@ function createGraph(canvas, data, opts) {
   }
 
   function visible(n) {
+    // A "+N more" marker follows the layer it belongs to: hidden while that
+    // layer is locked or toggled off, and gone once its batch is exhausted.
+    if (n.type === 'More') {
+      if (n.exhausted) return false;
+      if (DETAIL_TYPES.has(n.childType) && !detailUnlocked) return false;
+      if (hidden.has(n.childType)) return false;
+      return !(hostVisibleIds && !hostVisibleIds.has(n.id));
+    }
+    if (n.pageHidden) return false;              // still behind a "+N more"
     if (DETAIL_TYPES.has(n.type) && !detailUnlocked) return false;
     if (hidden.has(n.type)) return false;
     if (hostVisibleIds && !hostVisibleIds.has(n.id)) return false;
@@ -223,8 +310,11 @@ function createGraph(canvas, data, opts) {
       if (!b) buckets.set(key, b = { color: n.color, faded, list: [] });
       b.list.push(n);
       if (n === selected || n === hover) outlined.push(n);
-      else if (!faded && (n.type === 'Domain' || n.type === 'Subdomain')) outlined.push(n);
-      if (!faded && (n === dim || n.type === 'Domain'
+      else if (!faded && (n.type === 'Domain' || n.type === 'Subdomain' || n.type === 'More'))
+        outlined.push(n);
+      // A "+N more" marker is always labelled · an unlabelled dot is not an
+      // affordance, and the count is the whole message.
+      if (!faded && (n === dim || n.type === 'Domain' || n.type === 'More'
         || (n.type === 'Subdomain' && (labelZoom || n.deg > 6))
         || (isNear && labelZoom))) labelled.push(n);
     }
@@ -255,12 +345,13 @@ function createGraph(canvas, data, opts) {
     ctx.textBaseline = 'middle';
     for (const n of labelled) {
       const lbl = shortLabel(n);
-      ctx.font = (n.type === 'Domain' ? '600 12px ' : '500 11px ') + "'Libertinus Serif',Georgia,serif";
+      ctx.font = (n.type === 'Domain' ? '600 12px ' : n.type === 'More' ? '600 11px '
+        : '500 11px ') + "'Libertinus Serif',Georgia,serif";
       const tw = ctx.measureText(lbl).width;
       const lx = n.x * k + tx + n.r + 4, ly = n.y * k + ty;
       ctx.fillStyle = TH.labelBg;
       ctx.fillRect(lx - 2, ly - 7, tw + 4, 14);
-      ctx.fillStyle = TH.ink2;
+      ctx.fillStyle = n.type === 'More' ? n.color : TH.ink2;
       ctx.fillText(lbl, lx, ly);
     }
   }
@@ -330,6 +421,12 @@ function createGraph(canvas, data, opts) {
     const rect = canvas.getBoundingClientRect();
     const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
     const n = nodeAt(px, py);
+    if (n && n.type === 'More') {
+      // The marker is a control, not a finding: clicking it loads the next
+      // batch instead of opening a card or starting a drag.
+      expandGroup(n.group);
+      return;
+    }
     if (n) {
       dragging = n; n.fixed = true;
       // Lock selection on first click; while locked, clicking a different node
@@ -592,6 +689,18 @@ function createGraph(canvas, data, opts) {
     fit, reheat, buildLegend, activate, filterHost, setFilter,
     stats: data.stats,
     detailUnlocked: () => detailUnlocked,
+    /* What is currently paged and how far each group has been opened. */
+    pages: () => pageGroups.map(g => ({
+      parent: g.parent.label, type: g.type,
+      shown: g.shown, total: g.children.length,
+      visible: visible(g.more),
+    })),
+    /* Open the next batch for a group · the same thing clicking its marker
+       does, reachable without a pointer. */
+    expandPage(parentLabel, type) {
+      const g = pageGroups.find(x => x.parent.label === parentLabel && x.type === type);
+      return expandGroup(g);
+    },
     focusHost(host) {
       const n = nodes.find(x => x.type === 'Subdomain' && x.label === host);
       if (n) { selected = n; locked = true; showCard(n); k = 1.4; tx = W / 2 - n.x * k; ty = H / 2 - n.y * k; wake(); }

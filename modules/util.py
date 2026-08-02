@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse, urljoin, urldefrag, urlunparse
@@ -497,18 +498,24 @@ def pick_flag(flags: set[str], *candidates: str) -> str | None:
 
 
 def stream_cmd(cmd: list[str], timeout: int, on_line, log: logging.Logger | None = None,
-               cwd: str | None = None) -> int:
+               cwd: str | None = None, stdin_data: str | None = None) -> int:
     """Run a command and hand each stdout line to `on_line` as it arrives.
 
     The Go tools emit newline-delimited JSON and can run for minutes; reading the
     stream keeps the job log moving (and lets a stage report partial results)
     instead of blocking on a single capture that a timeout would throw away.
     Returns the number of lines consumed. Never raises for the usual failures.
+
+    `stdin_data` is for the tools whose input *is* stdin (a host per line). It is
+    written and the pipe closed before the read loop starts, which is safe only
+    because those payloads are a handful of lines · a large one would fill the
+    pipe buffer and deadlock against a process waiting for us to drain stdout.
     """
     lines = 0
     proc = None
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                stdin=subprocess.PIPE if stdin_data is not None else None,
                                 text=True, bufsize=1, errors="replace",
                                 env=tool_env(), cwd=cwd)
     except FileNotFoundError:
@@ -520,7 +527,22 @@ def stream_cmd(cmd: list[str], timeout: int, on_line, log: logging.Logger | None
             log.warning(f"command failed ({cmd[0]}): {exc}")
         return 0
 
+    if stdin_data is not None:
+        try:
+            proc.stdin.write(stdin_data)    # type: ignore[union-attr]
+            proc.stdin.close()              # type: ignore[union-attr]
+        except Exception:
+            pass
+
     deadline = time.time() + timeout
+    # The read loop below can only notice the deadline when a line arrives. A
+    # tool that hangs having printed nothing would block it forever · and a
+    # stalled stage stalls the whole scan · so a watchdog enforces the same
+    # deadline from outside. Killing the process ends the iterator, which is
+    # what lets the loop fall through to the cleanup.
+    watchdog = threading.Timer(timeout, lambda: _terminate(proc))
+    watchdog.daemon = True
+    watchdog.start()
     try:
         for line in proc.stdout:            # type: ignore[union-attr]
             line = line.strip()
@@ -536,6 +558,7 @@ def stream_cmd(cmd: list[str], timeout: int, on_line, log: logging.Logger | None
                                 f"(keeping {lines} results)")
                 break
     finally:
+        watchdog.cancel()
         _terminate(proc)
     return lines
 

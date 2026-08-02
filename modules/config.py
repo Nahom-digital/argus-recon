@@ -98,6 +98,7 @@ FEROX_BIN = os.environ.get("ARGUS_FEROX", "feroxbuster")
 TOR_BIN = os.environ.get("ARGUS_TOR", "tor")
 TORSOCKS_BIN = os.environ.get("ARGUS_TORSOCKS", "torsocks")
 PORTSCAN_BIN = os.environ.get("ARGUS_PORTSCAN", "nmap")
+WAYBACK_BIN = os.environ.get("ARGUS_WAYBACK", "waybackurls")
 
 # --------------------------------------------------------------------------- #
 # Go recon binaries. These run the wide, fan-out heavy passes (name enum, mass
@@ -166,6 +167,27 @@ KATANA_HEADLESS = os.environ.get("ARGUS_KATANA_HEADLESS", "0") == "1"
 # --- bulk resolver (dnsx) -------------------------------------------------- #
 DNSX_THREADS = _int_env("ARGUS_DNSX_THREADS", 200)
 DNSX_TIMEOUT = _int_env("ARGUS_DNSX_TIMEOUT", 300)
+
+# --------------------------------------------------------------------------- #
+# Wayback Machine archive mining (module 3b, source code "y")
+#
+# Opt-in, like the port scan and Tor: it is a different kind of pass. Nothing is
+# sent to the target at all · the URLs come from what the internet archive
+# recorded over the years, which is exactly where retired admin panels, old API
+# versions and published-then-deleted backups still show up.
+#
+# Two paths: the `waybackurls` binary when it is installed (it also folds in the
+# Common Crawl index), else the archive's CDX API over plain HTTP · so the stage
+# always contributes something.
+# --------------------------------------------------------------------------- #
+WAYBACK_CDX_URL = os.environ.get("ARGUS_WAYBACK_CDX",
+                                 "https://web.archive.org/cdx/search/cdx")
+WAYBACK_TIMEOUT = _int_env("ARGUS_WAYBACK_TIMEOUT", 300)
+# Ceiling on URLs ingested per run. The archive can hold hundreds of thousands
+# of rows for a large estate, and every one becomes an endpoint record.
+WAYBACK_MAX_URLS = _int_env("ARGUS_WAYBACK_MAX_URLS", 25000)
+# Rows requested per CDX query (the API's own `limit`).
+WAYBACK_CDX_LIMIT = _int_env("ARGUS_WAYBACK_CDX_LIMIT", 20000)
 
 # --- passive name enum (subfinder) ----------------------------------------- #
 SUBFINDER_TIMEOUT = _int_env("ARGUS_SUBFINDER_TIMEOUT", 180)
@@ -255,6 +277,7 @@ SOURCE_CODES = {
     "katana": "k",          # JS-aware deep crawl engine
     "dnsx": "r",            # bulk resolver
     "portscan": "p",        # port / service scan
+    "wayback": "y",         # web archive mining
 }
 # Human labels for the dashboard legend (still no real tool names).
 SOURCE_LABELS = {
@@ -269,6 +292,7 @@ SOURCE_LABELS = {
     "k": "deep crawl",
     "r": "bulk DNS",
     "p": "port scan",
+    "y": "web archive",
     "crawler": "crawler",
     "js": "JS analysis",
     "robots": "robots.txt",
@@ -339,6 +363,33 @@ STORE_ENABLED = os.environ.get("ARGUS_STORE", "1") != "0"
 # --------------------------------------------------------------------------- #
 WEB_HOST = os.environ.get("ARGUS_WEB_HOST", "127.0.0.1")
 WEB_PORT = _int_env("ARGUS_WEB_PORT", 7666)
+
+# --------------------------------------------------------------------------- #
+# Accounts / access control (modules.auth)
+#
+# The dashboard is no longer implicitly trusted just because it is bound to
+# loopback: once it is published behind a proxy, "anyone who can reach the port"
+# is the whole internet. `key.json` holds the account store · the admin created
+# at install time, any operators they add, each one's scan allowance, and the
+# signing secret for the session tokens.
+#
+# No file, no accounts: the dashboard runs open (a fresh checkout that has not
+# been through ./install.sh yet). The moment the file exists, every page and
+# every API route requires a signed token.
+# --------------------------------------------------------------------------- #
+KEY_FILE = Path(os.environ.get("ARGUS_KEY_FILE", str(ROOT / "key.json")))
+# How long a session token stays valid. Short enough that a leaked token expires,
+# long enough that a running scan does not log you out mid-way.
+AUTH_TOKEN_TTL = _int_env("ARGUS_TOKEN_TTL", 12 * 3600)
+# Failed sign-ins tolerated per account before it is locked out, and for how long.
+AUTH_MAX_FAILURES = _int_env("ARGUS_AUTH_MAX_FAILURES", 8)
+AUTH_LOCKOUT_SEC = _int_env("ARGUS_AUTH_LOCKOUT", 900)
+# PBKDF2 rounds for stored password hashes.
+AUTH_HASH_ROUNDS = _int_env("ARGUS_AUTH_ROUNDS", 240_000)
+# Default allowance for a newly created operator account (the admin can change
+# it per user). 0 = unlimited.
+AUTH_DEFAULT_DAILY_SCANS = _int_env("ARGUS_DEFAULT_DAILY_SCANS", 10)
+AUTH_DEFAULT_CONCURRENT = _int_env("ARGUS_DEFAULT_CONCURRENT", 1)
 
 # --------------------------------------------------------------------------- #
 # Bruteforce

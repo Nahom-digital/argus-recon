@@ -1,0 +1,153 @@
+/* ============================================================================
+   Argus Recon · sign-in + administration
+   Same tokens, type scale and flat surfaces as the rest of the dashboard
+   (app.css) · this file adds no colours and no new idioms of its own.
+   ========================================================================== */
+
+/* The top-bar session chip is in app.css · it appears on every page, not only
+   the two this stylesheet serves. */
+
+/* ---- sign in -------------------------------------------------------------- */
+.auth-page{min-height:calc(100vh - 56px);display:grid;place-items:center;padding:40px 20px}
+.auth-card{width:100%;max-width:380px;display:flex;flex-direction:column;gap:14px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:28px}
+.auth-mark{width:40px;height:40px;display:grid;place-items:center;color:var(--accent);
+  background:var(--accent-weak);border-radius:var(--r-sm)}
+.auth-mark svg{width:22px;height:22px}
+.auth-card h1{font-family:var(--display);font-weight:400;font-size:var(--fs-xl);letter-spacing:.005em}
+.auth-lede{color:var(--muted);font-size:var(--fs-sm);line-height:1.55;margin-top:-6px}
+.auth-card .field span{font-size:var(--fs-xs);font-weight:500;color:var(--ink-2)}
+.auth-submit{width:100%;justify-content:center;height:36px}
+.auth-error{display:flex;align-items:center;gap:7px;font-size:var(--fs-sm);color:var(--danger);
+  background:var(--sev-high-bg);border-radius:var(--r-sm);padding:8px 10px}
+.auth-foot{font-size:var(--fs-xs);color:var(--faint);line-height:1.5;text-align:center}
+
+/* ---- admin shell ----------------------------------------------------------
+   The wrapper is `.admin-page`, not `.admin`: a single generic word would also
+   match the `admin` role modifier on a chip inside it, and this rule's
+   `margin:0 auto` would then shove that chip into the middle of its row. */
+.admin-page{max-width:1180px;margin:0 auto;padding:26px 20px 64px}
+.admin-head{display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap;margin-bottom:22px}
+.admin-head .lede{flex:1;min-width:280px}
+.admin-head h1{font-family:var(--display);font-weight:400;font-size:var(--fs-2xl);
+  letter-spacing:.005em;margin-bottom:8px}
+.admin-head p{color:var(--muted);font-size:var(--fs-sm);line-height:1.6;max-width:62ch}
+/* An absolute path has no spaces to break at, so say so explicitly · otherwise
+   it sets the page's minimum width and the whole layout scrolls sideways. */
+.admin-head code{background:var(--surface-2);border:1px solid var(--border);
+  border-radius:var(--r-xs);padding:1px 5px;font-size:11.5px;color:var(--ink-2);
+  word-break:break-all;overflow-wrap:anywhere}
+.admin-stats{display:flex;gap:10px}
+.astat{min-width:84px;padding:11px 14px;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);text-align:center}
+.astat .n{font-family:var(--mono);font-size:var(--fs-lg);font-weight:500;color:var(--ink);line-height:1.2}
+.astat .l{font-size:11px;color:var(--muted);margin-top:3px}
+
+/* ---- tabs ----------------------------------------------------------------- */
+.admin-tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);
+  overflow-x:auto;scrollbar-width:none}
+.admin-tabs::-webkit-scrollbar{display:none}
+.atab{display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 13px;
+  font:inherit;font-size:var(--fs-sm);font-weight:500;color:var(--muted);
+  background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;
+  white-space:nowrap;transition:color .13s var(--ease),border-color .13s var(--ease)}
+.atab svg{width:15px;height:15px}
+.atab:hover{color:var(--ink-2)}
+.atab.on{color:var(--ink);border-bottom-color:var(--accent)}
+.atab-panel[hidden]{display:none}
+
+/* ---- accounts ------------------------------------------------------------- */
+.user-rows{display:flex;flex-direction:column}
+.user-row{display:flex;align-items:center;gap:16px;padding:14px;border-bottom:1px solid var(--border);
+  transition:background .13s var(--ease)}
+.user-row:last-child{border-bottom:none}
+.user-row:hover{background:var(--hover)}
+.user-row.off{opacity:.6}
+.user-row.confirm{background:var(--sev-high-bg)}
+.u-id{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.u-name{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:var(--fs-base)}
+.u-name svg{width:15px;height:15px;color:var(--muted)}
+.u-name b{font-weight:600;color:var(--ink)}
+.u-role{font-size:11px;font-weight:500;color:var(--muted);background:var(--surface-2);
+  border:1px solid var(--border);border-radius:var(--r-pill);padding:1px 8px}
+.u-role.admin{color:var(--accent-ink);background:var(--accent-weak);border-color:transparent}
+.u-off{color:var(--muted)}
+.u-locked{color:var(--sev-high-fg);background:var(--sev-high-bg);border-color:transparent}
+.u-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:var(--fs-xs);color:var(--muted)}
+.u-perms{display:flex;gap:4px;flex-wrap:wrap}
+.u-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.u-del svg{color:var(--muted)}
+.u-del:hover{color:var(--danger)}
+.u-del:hover svg{color:var(--danger)}
+@media (max-width:820px){
+  .user-row{flex-direction:column;align-items:stretch}
+  .u-actions{justify-content:flex-start}
+}
+
+/* ---- account modal -------------------------------------------------------- */
+.modal.wide{max-width:560px}
+.um-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.um-grid .field span{font-size:var(--fs-xs);font-weight:500;color:var(--ink-2)}
+.um-grid .field:first-child{grid-column:1/-1}
+@media (max-width:560px){.um-grid{grid-template-columns:1fr}}
+.um-perms{border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 13px;margin:0 0 14px;
+  display:grid;grid-template-columns:1fr 1fr;gap:7px 14px}
+.um-perms legend{font-size:var(--fs-xs);font-weight:600;color:var(--ink-2);padding:0 5px}
+.um-perms.na{opacity:.55}
+@media (max-width:560px){.um-perms{grid-template-columns:1fr}}
+.um-perms .chk{display:flex;align-items:center;gap:7px;font-size:var(--fs-sm);color:var(--ink-2);cursor:pointer}
+.um-perms.na .chk{cursor:not-allowed}
+
+/* ---- shared form bits ----------------------------------------------------- */
+.pw-form{display:flex;flex-direction:column;gap:12px;padding:16px;max-width:400px}
+.pw-form .field span{font-size:var(--fs-xs);font-weight:500;color:var(--ink-2)}
+.pw-form .ns-help{font-size:var(--fs-xs);color:var(--faint);line-height:1.5}
+.form-msg{font-size:var(--fs-sm);color:var(--danger);background:var(--sev-high-bg);
+  border-radius:var(--r-sm);padding:8px 10px}
+.form-msg.ok{color:var(--ok);background:rgba(63,125,82,.12)}
+
+/* ---- tables (access log, scans) ------------------------------------------- */
+.atable-wrap{overflow-x:auto}
+.atable{width:100%;border-collapse:collapse;font-size:var(--fs-xs)}
+.atable th{text-align:left;font-weight:600;color:var(--muted);font-size:11px;
+  text-transform:uppercase;letter-spacing:.04em;padding:9px 12px;
+  border-bottom:1px solid var(--border);background:var(--surface-2);
+  position:sticky;top:0;z-index:1;white-space:nowrap}
+.atable td{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--ink-2);
+  vertical-align:top}
+.atable tbody tr:hover{background:var(--hover)}
+.atable td.wrap{word-break:break-word;max-width:420px}
+.atable td.nowrap{white-space:nowrap}
+.atable .agent{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.access-filters{display:flex;align-items:center;gap:7px;margin-left:auto;flex-wrap:wrap}
+.access-filters .input{height:28px;font-size:var(--fs-xs);width:auto;min-width:120px}
+.access-users{display:flex;gap:5px;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid var(--border)}
+.au-chip{cursor:pointer;font:inherit;font-size:var(--fs-xs);height:22px}
+.au-chip b{font-family:var(--mono);color:var(--ink);margin-left:2px}
+.au-chip:hover{background:var(--hover)}
+.au-chip.on{color:var(--accent-ink);background:var(--accent-weak);border-color:transparent}
+
+/* ---- scans by owner ------------------------------------------------------- */
+.owner-rows{display:flex;flex-direction:column;gap:9px;padding:14px}
+.owner-row{display:grid;grid-template-columns:minmax(120px,190px) 1fr 48px;align-items:center;gap:12px;
+  font-size:var(--fs-sm)}
+.owner-row .who-name{display:flex;align-items:center;gap:6px;color:var(--ink-2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.owner-row .who-name svg{width:13px;height:13px;color:var(--muted)}
+.owner-bar{height:7px;background:var(--surface-2);border-radius:var(--r-pill);overflow:hidden}
+.owner-bar span{display:block;height:100%;background:var(--accent);border-radius:var(--r-pill)}
+.owner-row .mono{text-align:right;color:var(--muted);font-size:var(--fs-xs)}
+
+/* ---- toast ---------------------------------------------------------------- */
+.admin-toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);
+  display:flex;align-items:center;gap:8px;padding:10px 15px;font-size:var(--fs-sm);
+  color:var(--ink);background:var(--surface);border:1px solid var(--border-strong);
+  border-radius:var(--r-pill);opacity:0;pointer-events:none;z-index:var(--z-toast);
+  transition:opacity .18s var(--ease),transform .18s var(--ease)}
+.admin-toast.show{opacity:1;transform:translate(-50%,0)}
+.admin-toast svg{width:15px;height:15px;color:var(--ok)}
+.admin-toast.bad svg{color:var(--danger)}
+
+/* ---- modal scrim (shared with the home page's key dialog) ----------------- */
+.admin-page .modal-scrim,.auth-page .modal-scrim{z-index:var(--z-modal)}

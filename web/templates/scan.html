@@ -29,12 +29,18 @@
     <div class="side-sec" data-sec="subdomains">
       <button class="sh"><svg class="ic lead"><use href="#i-world"></use></svg>
         <h3>Subdomains</h3><span class="count" id="cSubs">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
-      <div class="sbody"><div class="slist" id="subList"></div></div>
+      <div class="sbody">
+        <div class="panel-filter" id="subFilter" hidden></div>
+        <div class="slist" id="subList"></div>
+      </div>
     </div>
     <div class="side-sec" data-sec="infra">
       <button class="sh"><svg class="ic lead"><use href="#i-server-2"></use></svg>
         <h3>Infrastructure</h3><span class="count" id="cIps">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
-      <div class="sbody" id="ipList"></div>
+      <div class="sbody">
+        <div class="panel-filter" id="asnFilter" hidden></div>
+        <div id="ipList"></div>
+      </div>
     </div>
     <div class="side-sec collapsed" data-sec="dns">
       <button class="sh"><svg class="ic lead"><use href="#i-network"></use></svg>
@@ -44,18 +50,24 @@
     <div class="side-sec" data-sec="tech">
       <button class="sh"><svg class="ic lead"><use href="#i-fingerprint"></use></svg>
         <h3>Tech stack</h3><span class="count" id="cTech">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
-      <div class="sbody"><div class="techwrap" id="techList"></div></div>
+      <div class="sbody">
+        <div class="panel-filter" id="techFilter" hidden></div>
+        <div class="techwrap" id="techList"></div>
+      </div>
     </div>
     <div class="side-sec" data-sec="secrets">
       <button class="sh"><svg class="ic lead"><use href="#i-key"></use></svg>
         <h3>Secrets</h3><span class="count" id="cSecrets">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
-      <div class="sbody" id="secretList"></div>
+      <div class="sbody">
+        <div class="panel-filter" id="secretFilter" hidden></div>
+        <div id="secretList"></div>
+      </div>
     </div>
     <div class="side-sec collapsed" data-sec="files">
       <button class="sh"><svg class="ic lead"><use href="#i-file-code"></use></svg>
         <h3>Discovered files</h3><span class="count" id="cFiles">0</span><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
       <div class="sbody">
-        <div class="file-filter" id="fileFilter" hidden></div>
+        <div class="panel-filter" id="fileFilter" hidden></div>
         <div id="fileList"></div>
       </div>
     </div>

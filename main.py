@@ -9,6 +9,8 @@ scan into ./scans:
     1. subdomain discovery + infra        (modules.subdomain: fast passive → BBOT,
                                            bulk resolver)
     2. mass HTTP probe                    (modules.probe · live hosts + scheme)
+   2a. port / service scan (optional)     (modules.portscan, nmap -A)
+   2b. web archive mining (optional)      (modules.wayback · archived URLs)
     3. tech-stack fingerprinting          (modules.fingerprint, WhatWeb -a 3)
     4. deep crawl pre-pass                (modules.deepcrawl · JS-aware discovery)
     5. crawl -> HTML parse -> JS parse    (modules.crawler, async transport)
@@ -45,7 +47,7 @@ from modules.util import (get_logger, registrable_root, registrable_domain,
                           is_subdomain_of, set_single_host)
 from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
                      classifier, graph_loader, securitytrails, tor, probe,
-                     deepcrawl, portscan)
+                     deepcrawl, portscan, wayback)
 
 log = get_logger("main")
 
@@ -112,6 +114,12 @@ def run_pipeline(args) -> ScanResult:
     result = ScanResult(domain)
     result.meta["scope"] = ("host" if args.single
                             else "exact" if args.exact_scope else "apex")
+    # Which account asked for this run. The dashboard sets it on the worker's
+    # environment; it is stamped into the document so the scan library can show
+    # an operator their own scans and nobody else's.
+    owner = (os.environ.get("ARGUS_OWNER") or "").strip()
+    if owner:
+        result.meta["owner"] = owner
     run = _selected(args)
     t0 = time.time()
 
@@ -123,6 +131,7 @@ def run_pipeline(args) -> ScanResult:
     log.info(f"modules: {', '.join(m for m in ALL_MODULES if m in run)}"
              + ("  · deep DNS" if deep else "")
              + ("  · port scan" if args.portscan else "")
+             + ("  · web archive" if args.wayback else "")
              + ("  · single target" if args.single else "")
              + ("  · over Tor" if tor.active() else ""))
     if args.single:
@@ -159,6 +168,14 @@ def run_pipeline(args) -> ScanResult:
         # "http" · WhatWeb against the exact port, tags folded onto the record.
         portscan.fingerprint_web_ports(result, timeout=args.tool_timeout)
 
+    # 2b. Web archive (opt-in). Nothing is sent to the target: these are URLs the
+    #     internet archive recorded over the years, which is where retired admin
+    #     panels, old API versions and published-then-deleted files still live.
+    #     Runs before the crawl so everything it recovers is re-checked today.
+    wayback_seeds: list[str] = []
+    if args.wayback:
+        wayback_seeds = wayback.run(result, timeout=args.wayback_timeout) or []
+
     # 3. Fingerprint
     if "fingerprint" in run:
         fingerprint.run(result, timeout=args.tool_timeout)
@@ -167,7 +184,7 @@ def run_pipeline(args) -> ScanResult:
     #      pre-pass discovers routes/endpoints the static crawler cannot see and
     #      seeds it with them; the crawler then does the body/form/secret work.
     if "crawl" in run:
-        seeds: list[str] = list(port_seeds)
+        seeds: list[str] = list(port_seeds) + list(wayback_seeds)
         if not args.no_deepcrawl:
             roots = probe.live_roots(result) or _fallback_roots(result)
             got = deepcrawl.run(result, roots=roots, timeout=args.tool_timeout)
@@ -278,6 +295,11 @@ def main(argv=None):
                         "(off by default: touches infrastructure directly, slow, loud)")
     p.add_argument("--portscan-timeout", type=int, default=config.PORTSCAN_TIMEOUT,
                    help="max seconds per address in the port scan")
+    p.add_argument("--wayback", action="store_true",
+                   help="mine the web archive for URLs this domain used to serve "
+                        "(off by default; sends nothing to the target)")
+    p.add_argument("--wayback-timeout", type=int, default=config.WAYBACK_TIMEOUT,
+                   help="max seconds for the web-archive pass")
     p.add_argument("--no-prompt", action="store_true",
                    help=argparse.SUPPRESS)   # accepted for compatibility; never prompts
     p.add_argument("--no-bbot", action="store_true",

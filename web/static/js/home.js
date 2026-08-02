@@ -6,6 +6,7 @@
 let DEEP_AVAILABLE = false;
 let TOR = { available: false };
 let PORTSCAN_AVAILABLE = false;
+let WAYBACK = { available: true, engine: false };
 const STAGES = [
   ['subdomain', 'subdomains'], ['fingerprint', 'fingerprint'], ['crawl', 'crawl'],
   ['bruteforce', 'bruteforce'], ['ip_enrich', 'IP enrich'], ['classify', 'classify'],
@@ -32,9 +33,11 @@ async function loadStatus() {
     DEEP_AVAILABLE = !!s.deep_available;
     TOR = s.tor || { available: false };
     PORTSCAN_AVAILABLE = !!s.portscan_available;
+    WAYBACK = { available: s.wayback_available !== false, engine: !!s.wayback_engine };
     reflectDeep();
     reflectTor();
     reflectPortscan();
+    reflectWayback();
     applyDefaults(s.defaults || {});
 
     // Service state first: the dashboard is the product now, so whether it is
@@ -62,6 +65,7 @@ async function loadStatus() {
     bar.innerHTML = chips.join('');
     const kb = document.getElementById('setKeyBtn');
     if (kb) kb.addEventListener('click', () => openKeyModal());
+    refreshQuotaChip(((s.auth || {}).user || {}).quota);
     maybePromptForKey();
   } catch (e) {
     bar.innerHTML = `<span class="st live unmanaged"><span class="dot off"></span><b>Offline</b> the dashboard service is not answering</span>`;
@@ -131,6 +135,29 @@ function reflectPortscan() {
   if (box) box.disabled = locked;
 }
 
+/* The archive pass always has a path that works · the index over plain HTTP
+   when the dedicated engine is not installed · so this toggle is never locked.
+   Say which of the two it will use, since the engine is meaningfully wider. */
+function reflectWayback() {
+  const chk = document.getElementById('waybackChk');
+  if (!chk) return;
+  chk.title = WAYBACK.engine
+    ? 'Mine the web archive for URLs this domain used to serve · nothing is sent to the target'
+    : 'Mine the web archive for URLs this domain used to serve (via the archive index · '
+      + 'run ./install.sh to add the faster engine). Nothing is sent to the target.';
+}
+
+/* The account's remaining allowance, shown next to the launcher so a limit is
+   visible before it is hit rather than as a refusal afterwards. */
+function refreshQuotaChip(q) {
+  const el = document.getElementById('quotaChip');
+  if (!el) return;
+  if (!q || !q.daily_scans) { el.hidden = true; return; }
+  el.hidden = false;
+  el.className = 'quota-chip' + (q.remaining === 0 ? ' out' : '');
+  el.innerHTML = `${icon('radar-2')} ${fmtNum(q.remaining)} of ${fmtNum(q.daily_scans)} scans left today`;
+}
+
 function scanRow(s) {
   const st = s.stats || {};
   const meta = [];
@@ -189,11 +216,14 @@ async function deleteScan(id, btn) {
   if (wrap.classList.contains('confirm')) {
     btn.innerHTML = '<span class="spin"></span>';
     try {
-      const r = await fetch(withBase(`/api/scan/${encodeURIComponent(id)}`), { method: 'DELETE' });
-      if (!r.ok) throw new Error(await r.text());
+      await sendJSON(withBase(`/api/scan/${encodeURIComponent(id)}`), 'DELETE');
       wrap.classList.add('removing');
       setTimeout(loadScans, 200);
-    } catch (e) { btn.innerHTML = icon('trash'); wrap.classList.remove('confirm'); }
+    } catch (e) {
+      btn.innerHTML = icon('trash');
+      wrap.classList.remove('confirm');
+      formError(null, e.message);
+    }
     return;
   }
   wrap.classList.add('confirm');
@@ -245,21 +275,117 @@ async function saveKey() {
   const input = document.getElementById('keyInput');
   const key = input.value.trim();
   const btn = document.getElementById('keySave');
+  const persist = !document.getElementById('keySession') ||
+    !document.getElementById('keySession').checked;
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span> saving';
   try {
-    const r = await fetch(withBase('/api/config/key'), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key }),
-    });
-    const d = await r.json();
+    const d = await sendJSON(withBase('/api/config/key'), 'POST', { key, persist });
     DEEP_AVAILABLE = !!d.deep_available;
     reflectDeep();
     try { localStorage.setItem('argus-key-dismissed', '1'); } catch (e) {}
+    // A key that is already spent is worth saying now rather than at the start
+    // of the next scan · the modal stays open with the reason on it.
+    const q = d.quota;
+    if (key && q && !q.ok) {
+      showKeyNote(q.message || 'this key cannot be used');
+      return;
+    }
     closeKeyModal();
     loadStatus();
+  } catch (e) {
+    showKeyNote(e.message);
   } finally {
     btn.disabled = false; btn.innerHTML = `${icon('key')} Save & enable`;
   }
+}
+
+function showKeyNote(text, ok) {
+  const modal = document.querySelector('#keyModal .modal');
+  if (!modal) return;
+  let el = modal.querySelector('.key-note');
+  if (!el) {
+    el = h('p', { class: 'key-note' });
+    modal.querySelector('#keyInput').insertAdjacentElement('afterend', el);
+  }
+  el.className = 'key-note' + (ok ? ' ok' : '');
+  el.innerHTML = `${icon(ok ? 'circle-check-filled' : 'alert-triangle')} ${esc(text)}`;
+}
+
+/* ---- deep-DNS allowance ---------------------------------------------------
+   A key whose monthly allowance is spent does not fail loudly · it answers 429
+   to everything, so the deep-DNS stage runs for minutes and contributes
+   nothing. The launcher therefore asks the server where the key stands *before*
+   committing to a run, and puts the choice in front of the operator: go on
+   without deep DNS, or paste a key that still has room (for this run only, or
+   saved for future ones). */
+function keyStateModal(quota) {
+  return new Promise(resolve => {
+    const scrim = h('div', { class: 'modal-scrim' });
+    scrim.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="qTitle">
+      <div class="modal-head">${icon('alert-triangle')}<h3 id="qTitle">Deep DNS is not usable</h3></div>
+      <p class="modal-body">${esc(quota.message || 'The deep-DNS key cannot be used.')}
+        ${quota.limit ? `<br><span class="faint">Used ${fmtNum(quota.used)} of ${fmtNum(quota.limit)} this month.</span>` : ''}
+      </p>
+      <label class="field"><span class="faint" style="font-size:12px">Use a different key</span>
+        <input class="input mono" id="qKey" type="password" placeholder="paste another API key"
+               spellcheck="false" autocomplete="off"></label>
+      <label class="chk" style="font-size:13px"><input type="checkbox" id="qSession" checked>
+        this session only · do not save it to disk</label>
+      <p class="key-note" id="qNote" hidden></p>
+      <div class="modal-actions">
+        <button class="btn ghost" id="qCancel">Cancel the scan</button>
+        <button class="btn" id="qWithout">Run without deep DNS</button>
+        <button class="btn primary" id="qUse">${icon('key')} Use this key</button>
+      </div>
+    </div>`;
+    document.body.appendChild(scrim);
+    const done = (value) => { scrim.remove(); resolve(value); };
+    const note = (msg) => {
+      const el = scrim.querySelector('#qNote');
+      el.innerHTML = `${icon('alert-triangle')} ${esc(msg)}`;
+      el.hidden = false;
+    };
+
+    scrim.querySelector('#qCancel').addEventListener('click', () => done('cancel'));
+    scrim.querySelector('#qWithout').addEventListener('click', () => done('without'));
+    scrim.addEventListener('click', e => { if (e.target === scrim) done('cancel'); });
+    scrim.querySelector('#qUse').addEventListener('click', async () => {
+      const key = scrim.querySelector('#qKey').value.trim();
+      if (!key) return note('paste a key, or choose one of the other two options');
+      const btn = scrim.querySelector('#qUse');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spin"></span> checking';
+      try {
+        const d = await sendJSON(withBase('/api/config/key'), 'POST',
+          { key, persist: !scrim.querySelector('#qSession').checked });
+        if (d.quota && !d.quota.ok) {
+          btn.disabled = false;
+          btn.innerHTML = `${icon('key')} Use this key`;
+          return note(d.quota.message || 'that key cannot be used either');
+        }
+        DEEP_AVAILABLE = !!d.deep_available;
+        reflectDeep();
+        done('deep');
+      } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = `${icon('key')} Use this key`;
+        note(e.message);
+      }
+    });
+    setTimeout(() => scrim.querySelector('#qKey').focus(), 40);
+  });
+}
+
+/* Returns 'deep' (go ahead with deep DNS), 'without' (drop it and scan anyway)
+   or 'cancel'. Anything other than a definite problem passes straight through
+   without a dialog. */
+async function resolveDeepDns() {
+  let q;
+  try { q = await getJSON(withBase('/api/config/key/check')); }
+  catch (e) { return 'deep'; }             // cannot tell · do not block the scan
+  if (!q || q.ok || q.state === 'unset') return 'deep';
+  if (q.state === 'unreachable') return 'deep';   // transient · let the run try
+  return keyStateModal(q);
 }
 
 /* ---- jobs (running scans) ------------------------------------------------- */
@@ -276,6 +402,7 @@ function jobOpts(j) {
   const tags = [];
   if (o.tor) tags.push('via Tor');
   if (o.portscan) tags.push('port scan');
+  if (o.wayback) tags.push('web archive');
   if (o.single) tags.push('single host');
   if (o.passive) tags.push('passive');
   if (o.deep) tags.push('deep DNS');
@@ -285,6 +412,44 @@ function jobOpts(j) {
     ? `<span class="jopts">${tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : '';
 }
 
+/* The job list is polled every 2.5s while something is running. It used to be
+   re-rendered wholesale on every poll, which threw away and rebuilt the open
+   terminal each time · the log blinked out and back, lost its scroll position,
+   and re-ran its open animation, four times a minute.
+
+   So the list is now reconciled instead of rebuilt: the container is only
+   regenerated when the *set* of jobs changes, and an existing row has just its
+   status, buttons and log text updated in place. The <div class="job-log">
+   element survives the whole run, which is what makes the terminal stable. */
+let jobsSignature = '';
+
+function jobIndicator(j) {
+  const running = JOB_ACTIVE.includes(j.status);
+  return running ? '<span class="spin"></span>'
+    : j.status === 'done' ? icon('circle-check-filled')
+    : j.status === 'stopped' ? icon('x')
+    : icon('alert-triangle');
+}
+
+function jobStatusHtml(j) {
+  const stop = j.status === 'running' || j.status === 'queued'
+    ? `<button class="btn sm ghost jstop" data-stop="${esc(j.id)}">${icon('x')} stop</button>` : '';
+  return `<span class="jstate ${esc(j.status)}">${jobIndicator(j)} ${esc(j.status)}</span>`
+    + (j.status === 'done' ? ' <a href="#" data-reload="1">view result</a>' : '')
+    + stop
+    + `<button class="btn sm ghost" data-toggle-log="${esc(j.id)}">${icon('terminal-2')} log</button>`;
+}
+
+function jobRowHtml(j) {
+  const running = JOB_ACTIVE.includes(j.status);
+  return `<div class="job ${running ? 'on' : ''}" data-job="${esc(j.id)}">
+    <span class="jdom">${esc(j.domain)}</span>
+    ${jobOpts(j)}
+    <span class="jstat">${jobStatusHtml(j)}</span>
+    <div class="job-log ${openLogs.has(j.id) ? 'open' : ''}" id="log-${esc(j.id)}"></div>
+  </div>`;
+}
+
 async function loadJobs() {
   const wrap = document.getElementById('jobsWrap');
   let jobs = [];
@@ -292,45 +457,72 @@ async function loadJobs() {
   const active = jobs.filter(j => JOB_ACTIVE.includes(j.status));
   const recent = jobs.filter(j => !JOB_ACTIVE.includes(j.status)).slice(0, 3);
   const show = [...active, ...recent];
-  if (!show.length) { wrap.innerHTML = ''; return; }
 
-  wrap.innerHTML = '<div class="section-label">Running &amp; recent jobs</div><div class="jobs">' +
-    show.map(j => {
-      const running = JOB_ACTIVE.includes(j.status);
-      const ind = running ? '<span class="spin"></span>'
-        : j.status === 'done' ? icon('circle-check-filled')
-        : j.status === 'stopped' ? icon('x')
-        : icon('alert-triangle');
-      const stop = j.status === 'running' || j.status === 'queued'
-        ? `<button class="btn sm ghost jstop" data-stop="${j.id}">${icon('x')} stop</button>` : '';
-      return `<div class="job ${running ? 'on' : ''}" data-job="${j.id}">
-        <span class="jdom">${esc(j.domain)}</span>
-        ${jobOpts(j)}
-        <span class="jstat"><span class="jstate ${esc(j.status)}">${ind} ${esc(j.status)}</span>${
-        j.status === 'done' ? ' <a href="#" data-reload="1">view result</a>' : ''}
-          ${stop}
-          <button class="btn sm ghost" data-toggle-log="${j.id}">${icon('terminal-2')} log</button></span>
-        <div class="job-log ${openLogs.has(j.id) ? 'open' : ''}" id="log-${j.id}"></div>
-      </div>`;
-    }).join('') + '</div>';
+  if (!show.length) {
+    if (wrap.innerHTML) { wrap.innerHTML = ''; jobsSignature = ''; }
+    stopPolling(false);
+    return;
+  }
+
+  // Rebuild only when the rows themselves change (a job appeared or dropped
+  // out of the window). Everything else is an in-place update.
+  const sig = show.map(j => j.id).join(',');
+  if (sig !== jobsSignature) {
+    jobsSignature = sig;
+    wrap.innerHTML = '<div class="section-label">Running &amp; recent jobs</div>'
+      + `<div class="jobs">${show.map(jobRowHtml).join('')}</div>`;
+    wireJobRow(wrap);
+  } else {
+    show.forEach(j => {
+      const row = wrap.querySelector(`.job[data-job="${CSS.escape(j.id)}"]`);
+      if (!row) return;
+      row.classList.toggle('on', JOB_ACTIVE.includes(j.status));
+      const stat = row.querySelector('.jstat');
+      const next = jobStatusHtml(j);
+      if (stat.dataset.html !== next) {      // only touch the DOM on a real change
+        stat.innerHTML = next;
+        stat.dataset.html = next;
+        wireJobRow(stat);
+      }
+    });
+  }
 
   openLogs.forEach(id => refreshLog(id));
 
-  wrap.querySelectorAll('[data-toggle-log]').forEach(b => b.addEventListener('click', () => {
-    const id = b.getAttribute('data-toggle-log');
-    const box = document.getElementById('log-' + id);
-    if (openLogs.has(id)) { openLogs.delete(id); box.classList.remove('open'); }
-    else { openLogs.add(id); box.classList.add('open'); refreshLog(id); }
-  }));
-  wrap.querySelectorAll('[data-stop]').forEach(b =>
-    b.addEventListener('click', () => stopJob(b.dataset.stop, b)));
-  wrap.querySelectorAll('[data-reload]').forEach(a => a.addEventListener('click', e => {
-    e.preventDefault(); loadScans();
-  }));
-
   if (active.length) {
     if (!jobTimer) jobTimer = setInterval(pollJobs, 2500);
-  } else if (jobTimer) { clearInterval(jobTimer); jobTimer = null; loadScans(); }
+  } else {
+    stopPolling(true);
+  }
+}
+
+function stopPolling(reloadLibrary) {
+  if (!jobTimer) return;
+  clearInterval(jobTimer);
+  jobTimer = null;
+  if (reloadLibrary) loadScans();
+}
+
+/* Delegate-free wiring for a row (or just its status cell after an update). */
+function wireJobRow(root) {
+  root.querySelectorAll('[data-toggle-log]').forEach(b => {
+    if (b._wired) return; b._wired = true;
+    b.addEventListener('click', () => {
+      const id = b.getAttribute('data-toggle-log');
+      const box = document.getElementById('log-' + id);
+      if (!box) return;
+      if (openLogs.has(id)) { openLogs.delete(id); box.classList.remove('open'); }
+      else { openLogs.add(id); box.classList.add('open'); refreshLog(id); }
+    });
+  });
+  root.querySelectorAll('[data-stop]').forEach(b => {
+    if (b._wired) return; b._wired = true;
+    b.addEventListener('click', () => stopJob(b.dataset.stop, b));
+  });
+  root.querySelectorAll('[data-reload]').forEach(a => {
+    if (a._wired) return; a._wired = true;
+    a.addEventListener('click', e => { e.preventDefault(); loadScans(); });
+  });
 }
 
 /* Cancel a run. With no terminal there is nothing else to interrupt, so this
@@ -339,17 +531,30 @@ async function stopJob(id, btn) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span> stopping';
   try {
-    await fetch(withBase(`/api/jobs/${encodeURIComponent(id)}/stop`), { method: 'POST' });
+    await sendJSON(withBase(`/api/jobs/${encodeURIComponent(id)}/stop`), 'POST', {});
   } catch (e) { /* the poll below reports the real state */ }
+  jobsSignature = '';            // force a rebuild so the row's buttons refresh
   loadJobs();
 }
 
+/* Refresh one open terminal.
+
+   Two things keep it steady rather than twitchy: the text is only written when
+   it actually changed, and the view is only pulled back to the bottom if it was
+   already there. Scrolling up to read something no longer yanks you back to the
+   tail two seconds later. */
 async function refreshLog(id) {
-  try {
-    const d = await getJSON(withBase(`/api/jobs/${id}/log`));
-    const box = document.getElementById('log-' + id);
-    if (box) { box.textContent = d.log || '(waiting for output…)'; box.scrollTop = box.scrollHeight; }
-  } catch (e) {}
+  const box = document.getElementById('log-' + id);
+  if (!box || !box.classList.contains('open')) return;
+  let d;
+  try { d = await getJSON(withBase(`/api/jobs/${encodeURIComponent(id)}/log`)); }
+  catch (e) { return; }
+  const text = d.log || '(waiting for output…)';
+  if (box.textContent === text) return;
+  // "pinned" = the reader is at the tail and wants to follow the output
+  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.textContent = text;
+  if (pinned) box.scrollTop = box.scrollHeight;
 }
 function pollJobs() { loadJobs(); }
 
@@ -407,6 +612,7 @@ function scanOptions() {
     deep: document.getElementById('optDeep').checked,
     tor: document.getElementById('optTor').checked,
     portscan: document.getElementById('optPortscan').checked,
+    wayback: document.getElementById('optWayback').checked,
     single: scope === 'single',
     exact_scope: scope === 'exact',
     no_bbot: document.getElementById('optNoBbot').checked,
@@ -475,20 +681,32 @@ function wireNewScan() {
     const opts = scanOptions();
     if (opts.deep && !DEEP_AVAILABLE) { openKeyModal(); return; }
     if (opts.tor && !TOR.available) return formError(null, torReason());
+
+    // Deep DNS asked for: make sure the key can actually answer before the run
+    // commits several minutes to a stage that would return nothing.
+    if (opts.deep) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spin"></span> checking key…';
+      const choice = await resolveDeepDns();
+      btn.disabled = false;
+      btn.innerHTML = `${icon('radar-2')} Run scan`;
+      if (choice === 'cancel') return;
+      if (choice === 'without') {
+        opts.deep = false;
+        const box = document.getElementById('optDeep');
+        if (box) box.checked = false;
+      }
+    }
+
     btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…';
     try {
-      const r = await fetch(withBase('/api/scan'), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain, ...opts }),
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        return formError(input, d.error || `could not start the scan (${r.status})`);
-      }
+      const d = await sendJSON(withBase('/api/scan'), 'POST', { domain, ...opts });
       input.value = '';
+      jobsSignature = '';                  // a new row · rebuild the job list
       await loadJobs();
+      if (d && d.quota) refreshQuotaChip(d.quota);
     } catch (err) {
-      formError(input, 'the dashboard service did not respond');
+      formError(input, err.message || 'the dashboard service did not respond');
     } finally {
       btn.disabled = false; btn.innerHTML = `${icon('radar-2')} Run scan`;
     }

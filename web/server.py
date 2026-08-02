@@ -17,6 +17,7 @@ so the view is identical whether or not the database is running.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -34,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from flask import (Flask, jsonify, render_template, send_from_directory,
-                   request, abort, g)
+                   request, abort, g, redirect, url_for, make_response)
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from modules import config
@@ -42,7 +43,10 @@ from modules import graph_loader
 from modules import store
 from modules import tor
 from modules import portscan
+from modules import wayback
+from modules import securitytrails
 from modules import access_log
+from modules import auth
 from modules.util import resolve_tool
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -164,16 +168,108 @@ def _cache_control(resp):
     return resp
 
 
+# --------------------------------------------------------------------------- #
+# Authentication
+#
+# The dashboard is only "safe because it is on loopback" until the day it is
+# published behind a proxy. So: once modules.auth reports an account store with
+# an administrator in it (created by ./install.sh), every page and every API
+# route needs a signed session token. With no store the dashboard runs open, so
+# a fresh checkout still works before the installer has been through it.
+#
+# The token travels in an httpOnly, SameSite=Lax cookie · unreadable to any
+# script, and not attached to a cross-site form post. State-changing API calls
+# additionally have to echo the CSRF value carried inside the signed token,
+# which only a page that could read /api/me can know.
+# --------------------------------------------------------------------------- #
+SESSION_COOKIE = "argus_session"
+CSRF_HEADER = "X-Argus-CSRF"
+
+# Reachable without a session: the login page and its endpoint, the static
+# assets a login page needs, and the build-token poll.
+_OPEN_PATHS = {"/login", "/api/auth/login", "/api/auth/state", "/api/version",
+               "/favicon.ico"}
+
+
+def _open_path(path: str) -> bool:
+    return path in _OPEN_PATHS or path.startswith("/static/")
+
+
+def _bearer() -> str:
+    header = request.headers.get("Authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return ""
+
+
+def _claims():
+    """Verified claims for this request, or None."""
+    token = request.cookies.get(SESSION_COOKIE) or _bearer()
+    return auth.verify_token(token) if token else None
+
+
+def _login_redirect():
+    nxt = request.full_path if request.query_string else request.path
+    return redirect(url_for("login_page", next=nxt))
+
+
 @app.before_request
-def _access_start():
+def _auth_gate():
     g._req_start = time.time()
+    g.user = None
+    if not auth.configured():
+        return None                       # no accounts yet · dashboard is open
+    path = request.path or "/"
+    if _open_path(path):
+        return None
+    claims = _claims()
+    if not claims:
+        if path.startswith("/api/"):
+            return jsonify({"error": "authentication required",
+                            "auth": "required"}), 401
+        return _login_redirect()
+    g.user = claims
+    # CSRF: a cross-site POST can ride the cookie but cannot read the token, so
+    # requiring the value from inside it is what makes the difference.
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        sent = request.headers.get(CSRF_HEADER, "")
+        if not (sent and hmac.compare_digest(sent, claims.get("csrf", ""))):
+            return jsonify({"error": "missing or stale CSRF token · reload the page"}), 403
+    return None
+
+
+def current_user() -> dict | None:
+    return getattr(g, "user", None)
+
+
+def _require_admin():
+    """abort(403) unless this request is an administrator. With no account store
+    configured the dashboard has no admin concept and the admin area is closed
+    rather than open to everyone."""
+    user = current_user()
+    if not auth.configured():
+        abort(404)
+    if not user or user.get("role") != "admin":
+        abort(403, "administrator access required")
+    return user
+
+
+def _may(permission: str) -> bool:
+    user = current_user()
+    if not user:
+        return True                       # auth not configured
+    if user.get("role") == "admin":
+        return True
+    return bool((user.get("limits") or {}).get(permission))
 
 
 @app.after_request
 def _access_log(resp):
     """Append a JSON line recording who accessed the dashboard and what for
     (modules.access_log · saved under scans/.access). Best-effort."""
-    access_log.record(request, resp, started=getattr(g, "_req_start", None))
+    user = current_user() or {}
+    access_log.record(request, resp, started=getattr(g, "_req_start", None),
+                      user=user.get("sub"))
     return resp
 
 SCAN_ID_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
@@ -316,7 +412,162 @@ def index():
 def scan_page(scan_id):
     if not SCAN_ID_RE.match(scan_id):
         abort(404)
+    _require_scan_access(scan_id)
     return render_template("scan.html", scan_id=scan_id)
+
+
+@app.route("/login")
+def login_page():
+    if not auth.configured():
+        return redirect(url_for("index"))
+    if _claims():                                   # already signed in
+        return redirect(url_for("index"))
+    return render_template("login.html")
+
+
+@app.route("/recon/admin")
+def admin_page():
+    _require_admin()
+    return render_template("admin.html")
+
+
+# --------------------------------------------------------------------------- #
+# Session endpoints
+# --------------------------------------------------------------------------- #
+def _set_session_cookie(resp, token: str, expires: int):
+    resp.set_cookie(
+        SESSION_COOKIE, token,
+        max_age=max(60, expires - int(time.time())),
+        httponly=True,                 # unreadable to any script on the page
+        samesite="Lax",                # not sent on a cross-site form post
+        secure=request.is_secure,      # https only when we are actually on https
+        path=request.script_root or "/",
+    )
+    return resp
+
+
+@app.route("/api/auth/state")
+def api_auth_state():
+    """Whether this dashboard requires a sign-in, and who is signed in. The one
+    endpoint reachable without a session, so the client can tell the difference
+    between 'open dashboard' and 'you are logged out'."""
+    claims = _claims() if auth.configured() else None
+    return jsonify({
+        "required": auth.configured(),
+        "authenticated": bool(claims) or not auth.configured(),
+        "user": _session_user(claims),
+    })
+
+
+def _session_user(claims) -> dict | None:
+    if not claims:
+        return None
+    return {"username": claims.get("sub"), "role": claims.get("role"),
+            "limits": claims.get("limits") or {}, "csrf": claims.get("csrf"),
+            "quota": auth.quota(claims.get("sub"))}
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_login():
+    if not auth.configured():
+        return jsonify({"error": "authentication is not configured"}), 400
+    body = request.get_json(silent=True) or {}
+    username = (body.get("username") or "").strip().lower()
+    password = body.get("password") or ""
+    # A brute-force guard that does not depend on the account existing: the
+    # per-account lockout in modules.auth cannot slow down a spray across many
+    # usernames from one address, so the address is rate-limited too.
+    if not _login_rate_ok(request.remote_addr or "?"):
+        return jsonify({"error": "too many sign-in attempts · wait a minute"}), 429
+    try:
+        user = auth.verify(username, password)
+    except auth.AuthError as exc:
+        return jsonify({"error": str(exc)}), 401
+    token, csrf, exp = auth.issue_token(username)
+    _login_rate_clear(request.remote_addr or "?")
+    resp = make_response(jsonify({"user": {**user, "csrf": csrf},
+                                  "expires_at": exp}))
+    return _set_session_cookie(resp, token, exp)
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_logout():
+    resp = make_response(jsonify({"ok": True}))
+    resp.delete_cookie(SESSION_COOKIE, path=request.script_root or "/")
+    return resp
+
+
+@app.route("/api/me")
+def api_me():
+    """The signed-in account, its permissions, its remaining allowance and the
+    CSRF value every state-changing call has to echo."""
+    claims = current_user()
+    if not auth.configured():
+        return jsonify({"required": False, "user": None})
+    return jsonify({"required": True, "user": _session_user(claims)})
+
+
+@app.route("/api/me/password", methods=["POST"])
+def api_change_own_password():
+    """Change your own password · the current one is required, and every session
+    token already issued for the account stops working."""
+    claims = current_user()
+    if not claims:
+        abort(401)
+    body = request.get_json(silent=True) or {}
+    try:
+        auth.set_password(claims["sub"], body.get("new_password") or "",
+                          current_password=body.get("current_password") or "")
+    except auth.AuthError as exc:
+        return jsonify({"error": str(exc)}), 400
+    token, csrf, exp = auth.issue_token(claims["sub"])
+    resp = make_response(jsonify({"ok": True, "csrf": csrf}))
+    return _set_session_cookie(resp, token, exp)
+
+
+# Per-address sign-in throttle. Small, in-memory, and deliberately not a
+# dependency: it only has to make a spray expensive.
+_LOGIN_HITS: dict[str, list] = {}
+_LOGIN_WINDOW = 60.0
+_LOGIN_MAX = 10
+
+
+def _login_rate_ok(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _LOGIN_HITS.get(ip, []) if now - t < _LOGIN_WINDOW]
+    hits.append(now)
+    _LOGIN_HITS[ip] = hits
+    if len(_LOGIN_HITS) > 2000:                      # bound the map
+        for key in [k for k, v in _LOGIN_HITS.items()
+                    if not v or now - v[-1] > _LOGIN_WINDOW]:
+            _LOGIN_HITS.pop(key, None)
+    return len(hits) <= _LOGIN_MAX
+
+
+def _login_rate_clear(ip: str) -> None:
+    _LOGIN_HITS.pop(ip, None)
+
+
+# --------------------------------------------------------------------------- #
+# Scan ownership
+#
+# A scan belongs to the account that started it (the engine stamps meta.owner).
+# An operator sees their own runs; an administrator, or an account granted
+# "see all", sees every one. Scans from before accounts existed have no owner
+# and are treated the same way · visible to whoever can see everything.
+# --------------------------------------------------------------------------- #
+def _owner_of(scan_id: str) -> str | None:
+    path = config.SCANS_DIR / f"{scan_id}.json"
+    if not path.exists():
+        return None
+    return (_summary(path) or {}).get("owner")
+
+
+def _require_scan_access(scan_id: str) -> None:
+    if not auth.configured():
+        return
+    if not auth.may_see(current_user(), _owner_of(scan_id)):
+        abort(403, "this scan belongs to another account")
 
 
 # --------------------------------------------------------------------------- #
@@ -324,13 +575,18 @@ def scan_page(scan_id):
 # --------------------------------------------------------------------------- #
 @app.route("/api/scans")
 def api_scans():
-    return jsonify([_summary(p) for p in _scan_files()])
+    rows = [_summary(p) for p in _scan_files()]
+    if auth.configured():
+        user = current_user()
+        rows = [r for r in rows if auth.may_see(user, r.get("owner"))]
+    return jsonify(rows)
 
 
 @app.route("/api/scan/<scan_id>")
 def api_scan(scan_id):
     # The full document (raw-JSON link, downloads, backward compatibility). The
     # scan UI uses /view instead so it never pulls the heavy per-endpoint fields.
+    _require_scan_access(scan_id)
     return jsonify(_load(scan_id))
 
 
@@ -341,6 +597,7 @@ def api_scan_view(scan_id):
     The endpoint list is served from the SQLite index when it is fresh."""
     if not SCAN_ID_RE.match(scan_id):
         abort(400, "bad scan id")
+    _require_scan_access(scan_id)
     return jsonify(_light_view(scan_id))
 
 
@@ -350,6 +607,7 @@ def api_scan_endpoint(scan_id, eid):
     fetched only when a row is expanded."""
     if not re.match(r"^[A-Fa-f0-9]{6,40}$", eid):
         abort(400, "bad endpoint id")
+    _require_scan_access(scan_id)
     for e in _load(scan_id).get("endpoints", []):
         if e.get("id") == eid:
             return jsonify(e)
@@ -361,6 +619,9 @@ def api_scan_delete(scan_id):
     """Delete a saved scan (from the home library). Path-traversal guarded."""
     if not SCAN_ID_RE.match(scan_id):
         abort(400, "bad scan id")
+    _require_scan_access(scan_id)
+    if not _may("delete"):
+        return jsonify({"error": "your account cannot delete scans"}), 403
     path = config.SCANS_DIR / f"{scan_id}.json"
     if path.parent != config.SCANS_DIR or not path.exists():
         abort(404, "scan not found")
@@ -381,6 +642,69 @@ def api_scan_delete(scan_id):
     return jsonify({"deleted": scan_id})
 
 
+# --------------------------------------------------------------------------- #
+# Graph
+#
+# Building a graph for a big scan is slow in a way no HTTP client will wait
+# through: with no graph DB loaded it means parsing a multi-hundred-megabyte
+# JSON document and walking every endpoint. Held open long enough, a proxy in
+# front gives up and answers 504/524 · which is what "Graph unavailable 524"
+# was: the dashboard faithfully reporting that the reverse proxy had timed out
+# on a request the server was still working on.
+#
+# So the build is not done inside the request any more. The first call starts it
+# on a worker and waits a few seconds in case it is quick; if it is not, the
+# request returns 202 "building" straight away and the client polls. The result
+# is cached against the file's mtime, so every later view of that scan is served
+# from memory instantly.
+# --------------------------------------------------------------------------- #
+_GRAPH_BUILDS: dict[tuple, dict] = {}
+_GRAPH_BUILD_LOCK = threading.Lock()
+_GRAPH_DONE: dict[tuple, dict] = {}        # key -> built payload (bounded)
+_GRAPH_DONE_MAX = 3
+# How long a request will wait for a fresh build before handing the client a
+# "building" answer to poll on. Comfortably under any proxy's read timeout.
+_GRAPH_SYNC_WAIT = 8.0
+
+
+def _graph_key(scan_id: str, max_nodes: int) -> tuple:
+    try:
+        mtime = (config.SCANS_DIR / f"{scan_id}.json").stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (scan_id, mtime, max_nodes)
+
+
+def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
+                         want_json: bool) -> dict:
+    """The actual work · graph DB first, else derived from the scan document."""
+    if not want_json:
+        g = graph_loader.fetch_graph(scan_id, max_nodes=max_nodes,
+                                     max_edges=max_edges)
+        if g:
+            return g
+    g = graph_loader.graph_from_scan(_load(scan_id), max_nodes=max_nodes,
+                                     max_edges=max_edges)
+    g["source"] = "json"
+    return g
+
+
+def _graph_worker(key: tuple, scan_id: str, max_nodes: int, max_edges: int,
+                  want_json: bool) -> None:
+    job = _GRAPH_BUILDS[key]
+    try:
+        payload = _build_graph_payload(scan_id, max_nodes, max_edges, want_json)
+        job.update(status="done", result=payload, finished=time.time())
+        with _GRAPH_BUILD_LOCK:
+            _GRAPH_DONE[key] = payload
+            while len(_GRAPH_DONE) > _GRAPH_DONE_MAX:
+                _GRAPH_DONE.pop(next(iter(_GRAPH_DONE)))
+    except Exception as exc:
+        job.update(status="error", error=str(exc)[:300], finished=time.time())
+    finally:
+        job["event"].set()
+
+
 @app.route("/api/scan/<scan_id>/graph")
 def api_graph(scan_id):
     """The scan's graph, bounded by a node/edge budget.
@@ -392,12 +716,16 @@ def api_graph(scan_id):
     stored graph: a large crawl is ~67k nodes / ~218k edges, which is a 30 MB
     response the browser cannot lay out, so the page renders nothing at all.
     ?limit=N raises the node budget for a caller that really wants more.
+
+    202 with {"status": "building"} means the build is under way · poll the same
+    URL. See the block comment above.
     """
     if not SCAN_ID_RE.match(scan_id):
         abort(400, "bad scan id")
     path = config.SCANS_DIR / f"{scan_id}.json"
     if not path.exists():
         abort(404, "scan not found")
+    _require_scan_access(scan_id)
 
     max_nodes = config.GRAPH_VIEW_NODES
     raw = request.args.get("limit")
@@ -407,17 +735,36 @@ def api_graph(scan_id):
         except ValueError:
             pass
     max_edges = max(config.GRAPH_VIEW_EDGES, max_nodes * 2)
+    want_json = request.args.get("source") == "json"
+    key = _graph_key(scan_id, max_nodes) + (want_json,)
 
-    # Prefer the live graph DB if one is up; fall back to JSON-derived.
-    if request.args.get("source") != "json":
-        g = graph_loader.fetch_graph(scan_id, max_nodes=max_nodes,
-                                     max_edges=max_edges)
-        if g:
-            return jsonify(g)
-    g = graph_loader.graph_from_scan(_load(scan_id), max_nodes=max_nodes,
-                                     max_edges=max_edges)
-    g["source"] = "json"
-    return jsonify(g)
+    with _GRAPH_BUILD_LOCK:
+        cached = _GRAPH_DONE.get(key)
+        if cached is not None:
+            return jsonify(cached)
+        job = _GRAPH_BUILDS.get(key)
+        if job is None or job["status"] == "error":
+            job = {"status": "building", "started": time.time(),
+                   "event": threading.Event(), "result": None, "error": None}
+            _GRAPH_BUILDS[key] = job
+            threading.Thread(target=_graph_worker,
+                             args=(key, scan_id, max_nodes, max_edges, want_json),
+                             daemon=True).start()
+
+    # Wait briefly: a small scan finishes here and the client never learns there
+    # was a queue at all.
+    job["event"].wait(_GRAPH_SYNC_WAIT)
+    if job["status"] == "done":
+        _GRAPH_BUILDS.pop(key, None)
+        return jsonify(job["result"])
+    if job["status"] == "error":
+        _GRAPH_BUILDS.pop(key, None)
+        return jsonify({"error": job["error"] or "graph build failed"}), 500
+    return jsonify({"status": "building",
+                    "elapsed_sec": round(time.time() - job["started"], 1),
+                    "scan_id": scan_id,
+                    "note": "This scan is large · the graph is being built. "
+                            "The page keeps checking."}), 202
 
 
 SERVICE_UNIT = "argus-recon"
@@ -483,13 +830,29 @@ def api_status():
         "tor": tor.availability(),
         # is the port-scan engine installed? (gates the "port scan" toggle)
         "portscan_available": portscan.available(),
+        # the web-archive pass always has a path that works (the index over HTTP
+        # when the engine is absent), so the toggle is never locked · but say
+        # which one it will use.
+        "wayback_available": wayback.available(),
+        "wayback_engine": bool(wayback.binary()),
         "service": {**svc, "uptime_sec": round(time.time() - STARTED_AT),
                     "url": f"http://{config.WEB_HOST}:{config.WEB_PORT}"},
+        # who is asking, and what they are allowed to do
+        "auth": {"required": auth.configured(),
+                 "user": _session_user(current_user())},
         # the launcher form shows these as the real defaults rather than inventing numbers
         "defaults": {"max_pages": config.CRAWL_MAX_PAGES,
                      "max_depth": config.CRAWL_MAX_DEPTH,
                      "modules": SCAN_MODULES},
     })
+
+
+@app.route("/api/config/key/check")
+def api_key_check():
+    """Where the deep-DNS key stands before a scan commits to using it · so an
+    exhausted allowance is a question asked up front rather than a stage that
+    quietly returns nothing after several minutes."""
+    return jsonify(securitytrails.check(force=request.args.get("force") == "1"))
 
 
 # Graph-backend state is also polled repeatedly (status + the graph view) and a
@@ -551,25 +914,45 @@ def _start_graph_worker():
 
 @app.route("/api/config/key", methods=["POST"])
 def api_set_key():
-    """First-run / settings: persist the deep-DNS key to .env. Blank clears it."""
+    """First-run / settings: set the deep-DNS key. Blank clears it.
+
+    `persist` (default true) writes it to .env so it survives a restart. Sending
+    false keeps it in this running dashboard only · which is what you want for a
+    borrowed key you are using to finish one job, and the reason the exhausted-
+    quota prompt can offer "use this key for now" without committing it to disk.
+    """
+    if not _may("deep"):
+        return jsonify({"error": "your account cannot change the deep-DNS key"}), 403
     body = request.get_json(silent=True) or {}
     key = (body.get("key") or "").strip()
-    config.save_env_key("SECURITYTRAILS_KEY", key)
+    if len(key) > 200:
+        return jsonify({"error": "that does not look like an API key"}), 400
+    persist = body.get("persist", True)
+    if persist:
+        config.save_env_key("SECURITYTRAILS_KEY", key)
     config.SECURITYTRAILS_KEY = key
-    return jsonify({"deep_available": bool(key)})
+    securitytrails.forget_usage()
+    out = {"deep_available": bool(key), "persisted": bool(persist)}
+    if key and body.get("check", True):
+        out["quota"] = securitytrails.check(force=True)
+    return jsonify(out)
 
 
 # --------------------------------------------------------------------------- #
 # Optional: launch a scan from the dashboard
 # --------------------------------------------------------------------------- #
-def _run_job(job_id: str, domain: str, extra: list[str]):
+def _run_job(job_id: str, domain: str, extra: list[str], owner: str | None = None):
     log_path = JOBS_DIR / f"{job_id}.log"
     py = sys.executable
     cmd = [py, str(ROOT / "main.py"), domain, *extra]
     _JOBS[job_id].update(status="running", cmd=" ".join(cmd))
     # The engine refuses to run from a terminal; this flag marks it as ours.
     # Its own process group lets "stop" take the whole tool subtree with it.
+    # ARGUS_OWNER is stamped into the scan document so the library can show an
+    # operator their own runs (see modules.auth.may_see).
     env = {**os.environ, "ARGUS_INTERNAL": "1", "PYTHONUNBUFFERED": "1"}
+    if owner:
+        env["ARGUS_OWNER"] = owner
     with open(log_path, "w", encoding="utf-8") as log:
         try:
             proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
@@ -616,6 +999,21 @@ def api_launch():
     if want_portscan and not portscan.available():
         return jsonify({"error": "the port-scan engine is not installed on this "
                                  "machine · run ./install.sh to add it"}), 400
+    want_wayback = bool(body.get("wayback"))
+
+    # Allowance: daily scans, how many at once, and which of the heavier options
+    # this account may reach for at all.
+    user = current_user()
+    owner = user.get("sub") if user else None
+    if auth.configured() and owner:
+        running = sum(1 for j in _JOBS.values()
+                      if j.get("owner") == owner and j["status"] in ("queued", "running"))
+        try:
+            auth.check_scan_allowed(owner, running=running, options={
+                "portscan": want_portscan, "tor": want_tor,
+                "wayback": want_wayback, "deep": bool(body.get("deep"))})
+        except auth.AuthError as exc:
+            return jsonify({"error": str(exc), "quota": auth.quota(owner)}), 429
 
     extra: list[str] = ["--no-prompt"]   # background job: never block on stdin
     if body.get("passive"):
@@ -630,6 +1028,8 @@ def api_launch():
         extra.append("--tor")
     if want_portscan:
         extra.append("--portscan")
+    if want_wayback:
+        extra.append("--wayback")
     if body.get("no_bbot"):
         extra.append("--no-bbot")
     if body.get("no_graph"):
@@ -649,18 +1049,22 @@ def api_launch():
 
     job_id = uuid.uuid4().hex[:12]
     _JOBS[job_id] = {"id": job_id, "domain": domain, "status": "queued",
-                     "started": time.time(), "options": {
+                     "started": time.time(), "owner": owner, "options": {
                          "passive": bool(body.get("passive")),
                          "deep": bool(body.get("deep") and config.SECURITYTRAILS_KEY),
                          "exact_scope": bool(body.get("exact_scope")) and not single,
                          "single": single,
                          "tor": want_tor,
                          "portscan": want_portscan,
+                         "wayback": want_wayback,
                          "skipped": skip + (["graph"] if body.get("no_graph") and "graph" not in skip else []),
                      }}
-    threading.Thread(target=_run_job, args=(job_id, domain, extra),
+    if auth.configured() and owner:
+        auth.record_scan(owner)
+    threading.Thread(target=_run_job, args=(job_id, domain, extra, owner),
                      daemon=True).start()
-    return jsonify({"job_id": job_id, "domain": domain})
+    return jsonify({"job_id": job_id, "domain": domain,
+                    "quota": auth.quota(owner) if (auth.configured() and owner) else None})
 
 
 @app.route("/api/jobs/<job_id>/stop", methods=["POST"])
@@ -673,6 +1077,8 @@ def api_job_stop(job_id):
     job = _JOBS.get(job_id)
     if not job:
         abort(404, "unknown job")
+    if not _may_see_job(job):
+        abort(403, "this scan belongs to another account")
     if job["status"] not in ("queued", "running"):
         return jsonify({"job": job, "note": "not running"})
     pid = job.get("pid")
@@ -697,16 +1103,26 @@ def api_job_stop(job_id):
     return jsonify({"job": job})
 
 
+def _may_see_job(job: dict) -> bool:
+    """A running scan is visible on the same terms as a finished one."""
+    if not auth.configured():
+        return True
+    return auth.may_see(current_user(), job.get("owner"))
+
+
 @app.route("/api/jobs")
 def api_jobs():
-    return jsonify(sorted(_JOBS.values(), key=lambda j: j.get("started", 0),
-                          reverse=True))
+    jobs = [j for j in _JOBS.values() if _may_see_job(j)]
+    return jsonify(sorted(jobs, key=lambda j: j.get("started", 0), reverse=True))
 
 
 @app.route("/api/jobs/<job_id>/log")
 def api_job_log(job_id):
     if not SCAN_ID_RE.match(job_id):
         abort(400)
+    job = _JOBS.get(job_id)
+    if job and not _may_see_job(job):
+        abort(403, "this scan belongs to another account")
     log_path = JOBS_DIR / f"{job_id}.log"
     text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
     # strip ANSI colour codes for the browser
@@ -720,6 +1136,131 @@ def api_version():
     changes under an open tab the client reloads once, pulling the new assets
     through their freshly-versioned URLs."""
     return jsonify({"version": asset_version()})
+
+
+# --------------------------------------------------------------------------- #
+# Admin API
+#
+# Every route here goes through _require_admin() first, so a non-admin session
+# gets 403 no matter which one it reaches for, and an unauthenticated one never
+# gets past the gate at all. Nothing in the responses carries a password hash or
+# the signing secret · modules.auth only ever hands out the public view.
+# --------------------------------------------------------------------------- #
+@app.route("/api/admin/users")
+def api_admin_users():
+    _require_admin()
+    return jsonify({"users": auth.list_users(),
+                    "defaults": auth.DEFAULT_LIMITS})
+
+
+@app.route("/api/admin/users", methods=["POST"])
+def api_admin_create_user():
+    me = _require_admin()
+    body = request.get_json(silent=True) or {}
+    try:
+        user = auth.create_user(
+            body.get("username") or "", body.get("password") or "",
+            role=(body.get("role") or "user"),
+            limits=body.get("limits") or {}, by=me.get("sub", "admin"))
+    except auth.AuthError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"user": user}), 201
+
+
+@app.route("/api/admin/users/<username>", methods=["POST"])
+def api_admin_update_user(username):
+    me = _require_admin()
+    body = request.get_json(silent=True) or {}
+    # An admin demoting or disabling themselves would lock the door with the key
+    # inside. The store also refuses to strip the last admin, but saying it here
+    # gives a message that names what actually happened.
+    if username == me.get("sub") and (body.get("role") == "user"
+                                      or body.get("enabled") is False):
+        return jsonify({"error": "you cannot demote or disable your own account"}), 400
+    try:
+        user = auth.update_user(
+            username,
+            role=body.get("role"),
+            enabled=body.get("enabled"),
+            limits=body.get("limits"),
+            unlock=bool(body.get("unlock")))
+    except auth.AuthError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"user": user})
+
+
+@app.route("/api/admin/users/<username>/password", methods=["POST"])
+def api_admin_set_password(username):
+    me = _require_admin()
+    body = request.get_json(silent=True) or {}
+    # Changing your own password still requires the current one, even as admin.
+    current = body.get("current_password") if username == me.get("sub") else None
+    try:
+        auth.set_password(username, body.get("new_password") or "",
+                          current_password=current)
+    except auth.AuthError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if username == me.get("sub"):
+        token, csrf, exp = auth.issue_token(username)
+        resp = make_response(jsonify({"ok": True, "csrf": csrf}))
+        return _set_session_cookie(resp, token, exp)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/users/<username>", methods=["DELETE"])
+def api_admin_delete_user(username):
+    me = _require_admin()
+    if username == me.get("sub"):
+        return jsonify({"error": "you cannot delete your own account"}), 400
+    try:
+        auth.delete_user(username)
+    except auth.AuthError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"deleted": username})
+
+
+@app.route("/api/admin/access")
+def api_admin_access():
+    _require_admin()
+    try:
+        limit = max(1, min(2000, int(request.args.get("limit", 300))))
+    except ValueError:
+        limit = 300
+    day = request.args.get("day") or None
+    if day and not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        abort(400, "bad day")
+    return jsonify({
+        "days": access_log.days(),
+        "records": access_log.read(day=day, limit=limit,
+                                   user=request.args.get("user") or None,
+                                   q=request.args.get("q") or None),
+        "summary": access_log.summary(),
+        "enabled": access_log.ENABLED,
+    })
+
+
+@app.route("/api/admin/overview")
+def api_admin_overview():
+    _require_admin()
+    scans = [_summary(p) for p in _scan_files()]
+    per_owner: dict[str, int] = {}
+    for s in scans:
+        per_owner[s.get("owner") or "unassigned"] = \
+            per_owner.get(s.get("owner") or "unassigned", 0) + 1
+    active = [j for j in _JOBS.values() if j["status"] in ("queued", "running")]
+    return jsonify({
+        "users": len(auth.list_users()),
+        "scans": len(scans),
+        "scans_by_owner": per_owner,
+        "running": [{"id": j["id"], "domain": j["domain"], "owner": j.get("owner"),
+                     "status": j["status"], "started": j.get("started")}
+                    for j in active],
+        "recent_scans": [{"scan_id": s["scan_id"], "domain": s["domain"],
+                          "owner": s.get("owner"), "started_at": s.get("started_at"),
+                          "size": s.get("size")} for s in scans[:12]],
+        "key_file": str(auth.store_path()),
+        "access_log": access_log.ENABLED,
+    })
 
 
 @app.route("/favicon.ico")

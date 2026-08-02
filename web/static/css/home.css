@@ -158,19 +158,25 @@
   padding:12px;max-height:220px;overflow:auto;white-space:pre-wrap;margin-top:8px;display:none}
 .job-log.open{display:block}
 
-/* deep-DNS key modal */
-.modal-scrim{position:fixed;inset:0;z-index:var(--z-modal);display:flex;align-items:center;justify-content:center;
-  padding:20px;background:color-mix(in srgb,var(--ink) 30%,transparent)}
-.modal-scrim[hidden]{display:none}
-.modal{width:100%;max-width:440px;background:var(--surface);border:1px solid var(--border-strong);
-  border-radius:var(--r);padding:20px;display:flex;flex-direction:column;gap:12px;
-  transform-origin:center;animation:modalIn .18s var(--ease)}
-@keyframes modalIn{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
-.modal-head{display:flex;align-items:center;gap:9px}
-.modal-head svg{width:18px;height:18px;color:var(--accent)}
-.modal-head h3{font-size:var(--fs-lg)}
-.modal-body{font-size:var(--fs-sm);color:var(--muted);line-height:1.55}
-.modal-body code{background:var(--surface-2);padding:1px 5px;border-radius:var(--r-xs);font-size:.9em;color:var(--ink-2)}
-.modal .input{height:36px;font-family:var(--mono)}
-.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
-@media (prefers-reduced-motion:reduce){.modal{animation:none}}
+/* The modal itself now lives in app.css · the home page's key dialog and the
+   admin page's account dialog are the same component. An API key is an opaque
+   token, so that one field stays monospaced. */
+#keyInput{font-family:var(--mono)}
+
+/* ---- launcher: remaining scan allowance -----------------------------------
+   Shown only when the account actually has a daily limit, so an unlimited
+   operator never sees a number that means nothing to them. */
+.quota-chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;
+  font-size:var(--fs-xs);color:var(--muted);background:var(--surface-2);
+  border:1px solid var(--border);border-radius:var(--r-pill);white-space:nowrap}
+.quota-chip svg{width:13px;height:13px;color:var(--faint)}
+.quota-chip.out{color:var(--sev-high-fg);background:var(--sev-high-bg);border-color:transparent}
+.quota-chip.out svg{color:var(--sev-high-fg)}
+.quota-chip[hidden]{display:none}
+
+/* ---- key dialog: inline result of a quota check --------------------------- */
+.key-note{display:flex;align-items:flex-start;gap:7px;font-size:var(--fs-sm);line-height:1.5;
+  color:var(--sev-high-fg);background:var(--sev-high-bg);border-radius:var(--r-sm);padding:8px 10px}
+.key-note svg{width:15px;height:15px;flex:none;margin-top:1px}
+.key-note.ok{color:var(--ok);background:rgba(63,125,82,.12)}
+.key-note[hidden]{display:none}

@@ -151,6 +151,10 @@ def build_summary(doc: dict, *, scan_id: str, mtime: float, size: int) -> dict:
         "stats": meta.get("stats", {}),
         "modules": meta.get("modules", {}),
         "scope": meta.get("scope", "apex"),
+        # Which account started this run · the scan library shows an operator
+        # their own scans only, so the owner has to survive into the summary
+        # (a scan from before accounts existed simply has none).
+        "owner": meta.get("owner"),
         "tor": {"exit_ip": tor_meta.get("exit_ip"),
                 "verified": bool(tor_meta.get("verified"))} if tor_meta else None,
         "size": size,
