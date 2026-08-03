@@ -57,7 +57,14 @@ def _command(bin_path: str, list_file: Path) -> list[str]:
     par = min(config.KATANA_PARALLEL, 3) if proxy else config.KATANA_PARALLEL
     rate = min(config.KATANA_RATE, 20) if proxy else config.KATANA_RATE
     flags = tool_flags(bin_path)
-    cmd = [bin_path, "-list", str(list_file), "-json", "-silent"]
+    # The JSONL output flag was renamed across releases: katana ≥ v1.x emits with
+    # -jsonl / -j, older builds used -json. Passing the wrong spelling makes
+    # katana exit immediately with "flag provided but not defined" and zero
+    # output · which silently turned the whole deep-crawl stage into a no-op (0
+    # records, 0 seeds). Resolve it from the binary's own help like every other
+    # flag instead of hard-coding one spelling.
+    json_flag = pick_flag(flags, "jsonl", "json", "j") or "-jsonl"
+    cmd = [bin_path, "-list", str(list_file), json_flag]
 
     def opt(*names, value=None):
         f = pick_flag(flags, *names)
@@ -66,6 +73,12 @@ def _command(bin_path: str, list_file: Path) -> list[str]:
             if value is not None:
                 cmd.append(str(value))
 
+    opt("silent", "s")
+    # We read request URL/method/tag and status/tech only · never the response
+    # body or the raw request/response dumps, which on a real crawl are the bulk
+    # of each JSONL line. Dropping them keeps the stream (and our parse) lean.
+    opt("omit-body", "ob")
+    opt("omit-raw", "or")
     opt("no-color", "nc")
     opt("js-crawl", "jc")               # parse JS files for endpoints
     opt("jsluice", "jsl")               # deeper JS extraction where supported
