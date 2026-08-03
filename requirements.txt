@@ -24,6 +24,13 @@ tldextract>=5.1
 # works over Tor.
 httpx[socks]>=0.27
 
+# Streaming JSON parser. A deep crawl can write a scan document of a gigabyte or
+# more, almost all of it the endpoints array; json.load()-ing that in the web
+# process builds several gigabytes of Python objects and OOMs the dashboard.
+# ijson reads only what a view needs straight off disk (modules.scan_stream), so
+# a huge scan stays viewable instead of taking the server down with 502s.
+ijson>=3.2
+
 # Graph storage. kuzu is an embedded graph DB (no server, like SQLite) and is the
 # default backend; neo4j is still supported when a server is running.
 kuzu>=0.4

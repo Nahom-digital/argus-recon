@@ -364,6 +364,15 @@ STORE_ENABLED = os.environ.get("ARGUS_STORE", "1") != "0"
 WEB_HOST = os.environ.get("ARGUS_WEB_HOST", "127.0.0.1")
 WEB_PORT = _int_env("ARGUS_WEB_PORT", 7666)
 
+# Above this on-disk size a scan document is never parsed whole into the web
+# process's heap. json.load() of a gigabyte of JSON builds several gigabytes of
+# Python objects, and doing that per request (raw view, home-page summary, an
+# expanded row, a graph build) is what let one huge scan exhaust memory and take
+# the dashboard down with 502s for everyone. At or above this size the server
+# reads only what a view needs straight off disk with a streaming parser
+# (modules.scan_stream). 0 disables the guard (always parse in memory).
+INMEM_MAX_BYTES = _int_env("ARGUS_INMEM_MAX_MB", 100) * 1024 * 1024
+
 # --------------------------------------------------------------------------- #
 # Accounts / access control (modules.auth)
 #

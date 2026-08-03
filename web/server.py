@@ -35,11 +35,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from flask import (Flask, jsonify, render_template, send_from_directory,
-                   request, abort, g, redirect, url_for, make_response)
+                   send_file, request, abort, g, redirect, url_for, make_response)
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from modules import config
 from modules import graph_loader
+from modules import scan_stream
 from modules import store
 from modules import tor
 from modules import portscan
@@ -294,20 +295,40 @@ def _scan_files() -> list[Path]:
 _DOC_CACHE: dict = {}
 
 
-def _load(scan_id: str) -> dict:
+def _scan_path(scan_id: str) -> Path:
+    """Validated path to a scan file, or abort. Shared by every reader so the
+    id check and the traversal guard live in one place."""
     if not SCAN_ID_RE.match(scan_id):
         abort(400, "bad scan id")
     path = config.SCANS_DIR / f"{scan_id}.json"
     if not path.exists() or path.parent != config.SCANS_DIR:
         abort(404, "scan not found")
+    return path
+
+
+def _is_large(path: Path) -> bool:
+    """A scan too big to parse whole into memory · read it off disk instead
+    (modules.scan_stream). See config.INMEM_MAX_BYTES."""
+    try:
+        return config.INMEM_MAX_BYTES > 0 and path.stat().st_size >= config.INMEM_MAX_BYTES
+    except OSError:
+        return False
+
+
+def _load(scan_id: str) -> dict:
+    path = _scan_path(scan_id)
     mtime = path.stat().st_mtime
     hit = _DOC_CACHE.get(scan_id)
     if hit and hit[0] == mtime:
         return hit[1]
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
+    # Never pin a huge document in the single-entry cache · one gigabyte-scale
+    # scan held in RAM is exactly the pressure this guard exists to avoid. Big
+    # scans are served from the streaming readers and the SQLite index instead.
     _DOC_CACHE.clear()          # hold only the most-recently-viewed scan
-    _DOC_CACHE[scan_id] = (mtime, doc)
+    if not _is_large(path):
+        _DOC_CACHE[scan_id] = (mtime, doc)
     return doc
 
 
@@ -348,8 +369,18 @@ def _light_view(scan_id: str) -> dict:
         cached = store.light_view(scan_id, mtime)
         if cached is not None:
             return cached
-    # Cache miss (first view of a new scan, or store disabled): parse once, strip
-    # inline, and backfill the index so every later view skips the file.
+    # Cache miss (first view of a new scan, or store disabled). A big scan is read
+    # off disk with the streaming reader · panel + table-ready endpoints, never the
+    # whole file in memory · and the already-light doc is what backfills the index.
+    if _is_large(path):
+        light = scan_stream.stream_light_doc(path)
+        try:
+            store.index_scan(scan_id, light, path)
+        except Exception:
+            pass
+        return light
+    # Small scan: parse once, strip inline, and backfill the index so every later
+    # view skips the file.
     doc = _load(scan_id)
     light = _light_scan(doc)
     try:
@@ -381,15 +412,28 @@ def _summary(path: Path) -> dict:
         _SUMMARY_CACHE[stem] = (mtime, cached)
         return cached
     try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    # The summary is built from meta alone. For a big scan, stream just that
+    # object off disk · the home page listing every scan must never parse a
+    # gigabyte-scale file (and every one of them) into memory to draw a card.
+    # A full index is deferred to the first time the scan is actually opened.
+    if _is_large(path):
+        try:
+            summary = store.build_summary({"meta": scan_stream.stream_meta(path)},
+                                          scan_id=stem, mtime=mtime, size=size)
+            _SUMMARY_CACHE[stem] = (mtime, summary)
+            return summary
+        except Exception:
+            return {"scan_id": stem, "domain": stem, "error": True,
+                    "stats": {}, "started_at": None}
+    try:
         with open(path, encoding="utf-8") as fh:
             d = json.load(fh)
     except Exception:
         return {"scan_id": stem, "domain": stem, "error": True,
                 "stats": {}, "started_at": None}
-    try:
-        size = path.stat().st_size
-    except OSError:
-        size = 0
     summary = store.build_summary(d, scan_id=stem, mtime=mtime, size=size)
     _SUMMARY_CACHE[stem] = (mtime, summary)
     # Backfill the store so the next process/request is served from it.
@@ -587,7 +631,15 @@ def api_scan(scan_id):
     # The full document (raw-JSON link, downloads, backward compatibility). The
     # scan UI uses /view instead so it never pulls the heavy per-endpoint fields.
     _require_scan_access(scan_id)
-    return jsonify(_load(scan_id))
+    path = _scan_path(scan_id)
+    # Stream the file straight off disk · the bytes are already valid JSON, so
+    # parsing a multi-hundred-megabyte document into the heap and re-serialising
+    # it just to hand it back is pure memory pressure (and, on a gigabyte scan,
+    # the 502 this whole change exists to stop). send_file streams in chunks and
+    # marks the response direct-passthrough, so _compress leaves it alone.
+    return send_file(path, mimetype="application/json", conditional=True,
+                     last_modified=path.stat().st_mtime,
+                     download_name=f"{scan_id}.json")
 
 
 @app.route("/api/scan/<scan_id>/view")
@@ -608,6 +660,14 @@ def api_scan_endpoint(scan_id, eid):
     if not re.match(r"^[A-Fa-f0-9]{6,40}$", eid):
         abort(400, "bad endpoint id")
     _require_scan_access(scan_id)
+    path = _scan_path(scan_id)
+    # A big scan holds tens of thousands of endpoints · stream the array to find
+    # the one row that was expanded rather than parsing the whole file for it.
+    if _is_large(path):
+        ep = scan_stream.find_endpoint(path, eid)
+        if ep is not None:
+            return jsonify(ep)
+        abort(404, "endpoint not found")
     for e in _load(scan_id).get("endpoints", []):
         if e.get("id") == eid:
             return jsonify(e)
@@ -683,7 +743,12 @@ def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
                                      max_edges=max_edges)
         if g:
             return g
-    g = graph_loader.graph_from_scan(_load(scan_id), max_nodes=max_nodes,
+    # Build from JSON. A big scan is read off disk with the graph streaming reader
+    # (endpoints minus bodies/headers/DOM, `found_on` kept) so the builder works
+    # from a fraction of the file instead of the whole document in memory.
+    path = config.SCANS_DIR / f"{scan_id}.json"
+    data = scan_stream.stream_graph_doc(path) if _is_large(path) else _load(scan_id)
+    g = graph_loader.graph_from_scan(data, max_nodes=max_nodes,
                                      max_edges=max_edges)
     g["source"] = "json"
     return g
@@ -893,8 +958,14 @@ def _drain_graph_queue():
                         store.dequeue_graph(sid)      # scan was deleted
                         continue
                     try:
-                        with open(path, encoding="utf-8") as fh:
-                            doc = json.load(fh)
+                        # Stream a big scan into the loader · this runs in a
+                        # background thread, but a gigabyte parsed here is the same
+                        # heap spike, so read it off disk like every other path.
+                        if _is_large(path):
+                            doc = scan_stream.stream_graph_doc(path)
+                        else:
+                            with open(path, encoding="utf-8") as fh:
+                                doc = json.load(fh)
                         if graph_loader.load(doc):
                             store.dequeue_graph(sid)
                             _GRAPH_CACHE["value"] = None
