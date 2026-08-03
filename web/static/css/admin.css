@@ -14,7 +14,7 @@
 .auth-mark{width:40px;height:40px;display:grid;place-items:center;color:var(--accent);
   background:var(--accent-weak);border-radius:var(--r-sm)}
 .auth-mark svg{width:22px;height:22px}
-.auth-card h1{font-family:var(--display);font-weight:400;font-size:var(--fs-xl);letter-spacing:.005em}
+.auth-card h1{font-family:var(--display);font-weight:500;font-size:var(--fs-xl);letter-spacing:.015em}
 .auth-lede{color:var(--muted);font-size:var(--fs-sm);line-height:1.55;margin-top:-6px}
 .auth-card .field span{font-size:var(--fs-xs);font-weight:500;color:var(--ink-2)}
 .auth-submit{width:100%;justify-content:center;height:36px}
@@ -29,8 +29,8 @@
 .admin-page{max-width:1180px;margin:0 auto;padding:26px 20px 64px}
 .admin-head{display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap;margin-bottom:22px}
 .admin-head .lede{flex:1;min-width:280px}
-.admin-head h1{font-family:var(--display);font-weight:400;font-size:var(--fs-2xl);
-  letter-spacing:.005em;margin-bottom:8px}
+.admin-head h1{font-family:var(--display);font-weight:500;font-size:var(--fs-2xl);
+  letter-spacing:.01em;margin-bottom:8px}
 .admin-head p{color:var(--muted);font-size:var(--fs-sm);line-height:1.6;max-width:62ch}
 /* An absolute path has no spaces to break at, so say so explicitly · otherwise
    it sets the page's minimum width and the whole layout scrolls sideways. */

@@ -56,7 +56,8 @@ async function loadStatus() {
       `<span class="st"><span class="dot ${dot ? 'on' : 'off'}"></span><b>${esc(label)}</b> ${esc(val)}</span>`;
     const chips = [
       live,
-      chip(s.deep_available, 'deep DNS', s.deep_available ? 'unlocked' : 'locked'),
+      `<span class="st" id="deepChip"><span class="dot ${s.deep_available ? 'on' : 'off'}"></span>
+        <b>deep DNS</b> ${s.deep_available ? 'unlocked' : 'locked'}</span>`,
       chip(s.graph_db, 'graph db', s.graph_db ? 'connected' : 'offline · renders from JSON'),
       chip(s.engines_ready, 'engines', s.engines_ready ? 'ready' : 'incomplete'),
     ];
@@ -66,10 +67,28 @@ async function loadStatus() {
     const kb = document.getElementById('setKeyBtn');
     if (kb) kb.addEventListener('click', () => openKeyModal());
     refreshQuotaChip(((s.auth || {}).user || {}).quota);
+    if (s.deep_available) showDeepAllowance();
     maybePromptForKey();
   } catch (e) {
     bar.innerHTML = `<span class="st live unmanaged"><span class="dot off"></span><b>Offline</b> the dashboard service is not answering</span>`;
   }
+}
+
+/* What is left of the deep-DNS allowance, on the status chip. The allowance is
+   small and monthly, so "how much is left" belongs next to the toggle that
+   spends it rather than in the dialog that appears once it is already gone. The
+   server caches this, so asking on every page load is cheap. */
+async function showDeepAllowance() {
+  const el = document.getElementById('deepChip');
+  if (!el) return;
+  let q;
+  try { q = await getJSON(withBase('/api/config/key/check')); }
+  catch (e) { return; }                       // chip keeps its plain "unlocked"
+  if (!q || q.remaining == null) return;
+  const dot = q.state === 'ok' ? 'on' : 'warn';
+  el.innerHTML = `<span class="dot ${dot}"></span><b>deep DNS</b> ${
+    fmtNum(q.remaining)} of ${fmtNum(q.limit)} queries left`;
+  el.title = q.message || '';
 }
 
 /* show the server's real crawl defaults as placeholders (never invented numbers) */
@@ -317,14 +336,21 @@ function showKeyNote(text, ok) {
    nothing. The launcher therefore asks the server where the key stands *before*
    committing to a run, and puts the choice in front of the operator: go on
    without deep DNS, or paste a key that still has room (for this run only, or
-   saved for future ones). */
+   saved for future ones).
+
+   The same dialog covers the allowance that is nearly gone ("low"): a pass costs
+   a known number of calls, so a run that would run dry part way through is worth
+   stopping on too · with the extra option of spending what is left anyway. */
 function keyStateModal(quota) {
   return new Promise(resolve => {
+    const low = quota.state === 'low';
     const scrim = h('div', { class: 'modal-scrim' });
     scrim.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="qTitle">
-      <div class="modal-head">${icon('alert-triangle')}<h3 id="qTitle">Deep DNS is not usable</h3></div>
+      <div class="modal-head">${icon('alert-triangle')}<h3 id="qTitle">${
+      low ? 'Deep DNS is nearly out of allowance' : 'Deep DNS is not usable'}</h3></div>
       <p class="modal-body">${esc(quota.message || 'The deep-DNS key cannot be used.')}
-        ${quota.limit ? `<br><span class="faint">Used ${fmtNum(quota.used)} of ${fmtNum(quota.limit)} this month.</span>` : ''}
+        ${quota.limit ? `<br><span class="faint">Used ${fmtNum(quota.used)} of ${fmtNum(quota.limit)} this month${
+      quota.needed ? `, and this run needs about ${fmtNum(quota.needed)}` : ''}.</span>` : ''}
       </p>
       <label class="field"><span class="faint" style="font-size:12px">Use a different key</span>
         <input class="input mono" id="qKey" type="password" placeholder="paste another API key"
@@ -335,6 +361,7 @@ function keyStateModal(quota) {
       <div class="modal-actions">
         <button class="btn ghost" id="qCancel">Cancel the scan</button>
         <button class="btn" id="qWithout">Run without deep DNS</button>
+        ${low ? `<button class="btn" id="qAnyway">Use what is left</button>` : ''}
         <button class="btn primary" id="qUse">${icon('key')} Use this key</button>
       </div>
     </div>`;
@@ -348,6 +375,8 @@ function keyStateModal(quota) {
 
     scrim.querySelector('#qCancel').addEventListener('click', () => done('cancel'));
     scrim.querySelector('#qWithout').addEventListener('click', () => done('without'));
+    const anyway = scrim.querySelector('#qAnyway');
+    if (anyway) anyway.addEventListener('click', () => done('deep'));
     scrim.addEventListener('click', e => { if (e.target === scrim) done('cancel'); });
     scrim.querySelector('#qUse').addEventListener('click', async () => {
       const key = scrim.querySelector('#qKey').value.trim();

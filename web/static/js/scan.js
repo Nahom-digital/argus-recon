@@ -9,14 +9,24 @@ let SCAN = null, GRAPH = null, detailMode = false;
 const F = {
   search: '', type: '', status: '', scope: 'in', classifiedOnly: false,
   host: null, ip: null,
-  // left-panel filters · each narrows one section's list, nothing else
-  fileType: '', fileStatus: '', subStatus: '', asn: '', tech: '', secretSev: '',
+  // Section filters · each narrows one section's list, nothing else. The left
+  // panel and the full-width detail view read the same state, so a filter set
+  // in one is still held when the other is opened.
+  subStatus: '', subIp: '', subTech: '',
+  asn: '', tech: '', secretSev: '',
+  fileType: '', fileStatus: '', fileHost: '', fileIp: '',
 };
 
 /* IP <-> host index, built once per scan from both directions (a subdomain
    lists its IPs, an IP record lists the hosts that resolve to it). */
 const IP_HOSTS = new Map();          // ip   -> Set(host)
 const HOST_IPS = new Map();          // host -> Set(ip)
+
+/* Deep-DNS address timeline · ip -> {first_seen,last_seen,organization,current}.
+   Historical A/AAAA records are the only place a scan learns when an address
+   started and stopped serving the domain, so the index is built once and read
+   by both the infrastructure panel and the detail tables. */
+const IP_SEEN = new Map();
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -47,6 +57,7 @@ async function init() {
     const scan = await viewP;
     SCAN = scan;
     buildIpIndex(scan);
+    buildIpSeenIndex(scan);
     renderPanel(scan);
     buildStatusFilter();
     buildHostFilter();
@@ -205,6 +216,40 @@ function buildIpIndex(s) {
   (s.subdomains || []).forEach(sd => (sd.ips || []).forEach(ip => link(ip, sd.host)));
   ((s.infra && s.infra.ips) || []).forEach(r => (r.subdomains || []).forEach(h => link(r.ip, h)));
 }
+/* Address timeline from deep DNS: every A/AAAA value ever recorded, with the
+   window it was seen in. Current records win over historical ones for the same
+   address, so an address still in service is marked as such rather than being
+   reported as "last seen" on the day the history snapshot was taken. */
+function buildIpSeenIndex(s) {
+  IP_SEEN.clear();
+  const dns = s.dns || {};
+  const put = (r, current) => {
+    if (!r || !r.value) return;
+    const prev = IP_SEEN.get(r.value);
+    if (prev && prev.current && !current) return;
+    IP_SEEN.set(r.value, {
+      first_seen: r.first_seen || (prev && prev.first_seen) || null,
+      last_seen: current ? null : r.last_seen || null,
+      organization: r.organization || (prev && prev.organization) || null,
+      current: current || (prev ? prev.current : false),
+    });
+  };
+  ['a', 'aaaa'].forEach(t => {
+    ((dns.history || {})[t] || []).forEach(r => put(r, false));
+    ((dns.records || {})[t] || []).forEach(r => put(r, true));
+  });
+}
+
+/* One line of provenance for an address: how long it has served, and whether it
+   still does. Empty when this scan has no deep DNS behind it. */
+function ipSeenText(ip) {
+  const s = IP_SEEN.get(ip);
+  if (!s || (!s.first_seen && !s.last_seen)) return '';
+  const dur = durationOf(s.first_seen, s.last_seen);
+  if (s.current) return `since ${s.first_seen ? (yearOf(s.first_seen) || s.first_seen) : '?'}${dur ? ' · ' + dur : ''} · current`;
+  return fmtRange(s.first_seen, s.last_seen);
+}
+
 const hostsOfIp = ip => [...(IP_HOSTS.get(ip) || [])].sort();
 /* every IP behind a set of hosts, de-duplicated (used by the tech stack) */
 function ipsOfHosts(hosts) {
@@ -238,14 +283,14 @@ function renderPanel(s) {
   // actually contains · a status code nothing returned is never offered.
   const subs = s.subdomains || [];
   setCount('cSubs', subs.length);
-  F.subStatus = '';
-  buildSubFilter(subs);
+  F.subStatus = ''; F.subIp = ''; F.subTech = '';
+  buildSubFilter('subFilter', 'sd');
   renderSubList();
 
   const ips = (s.infra && s.infra.ips) || [];
   setCount('cIps', ips.length);
   F.asn = '';
-  buildAsnFilter(ips);
+  buildAsnFilter('asnFilter', 'sd');
   renderIpList();
 
   // DNS
@@ -253,44 +298,102 @@ function renderPanel(s) {
 
   // tech (per fingerprint -> which subdomains, like secrets)
   F.tech = '';
-  buildTechFilter(subs);
-  renderTech(subs);
+  buildTechFilter('techFilter', 'sd');
+  renderTech();
 
   const secrets = s.secrets || [];
   setCount('cSecrets', secrets.length);
   F.secretSev = '';
-  buildSecretFilter(secrets);
+  buildSecretFilter('secretFilter', 'sd');
   renderSecretList();
   document.querySelector('.side-sec[data-sec="secrets"]').classList.toggle('collapsed', !secrets.length);
 
   const files = s.files || [];
   setCount('cFiles', files.length);
-  F.fileType = ''; F.fileStatus = '';
-  buildFileFilter(files);
+  F.fileType = ''; F.fileStatus = ''; F.fileHost = ''; F.fileIp = '';
+  buildFileFilter('fileFilter', 'sd');
   renderFileList();
 
   wirePanelInteractions();
 }
 
-/* ---- left-panel filters ---------------------------------------------------
-   One shared builder for every section's filter row. `specs` are the selects to
-   draw; any select with nothing to choose between is dropped, and a row with no
-   selects left hides itself rather than showing an empty control. */
-function panelFilter(containerId, specs) {
+/* ---- section filters ------------------------------------------------------
+   One shared builder for every section's filter row, used twice over: once in
+   the left panel and once in the full-width detail view. `specs` are the selects
+   to draw; any select with nothing to choose between is dropped, and a row with
+   no selects left hides itself rather than showing an empty control.
+
+   `prefix` keeps the two copies of a row from sharing element ids, and the
+   `data-fkey` on each select is what lets one copy follow the other without
+   being rebuilt (see syncPanelSelects). */
+function panelFilter(containerId, prefix, specs) {
   const el = document.getElementById(containerId);
   if (!el) return;
   const useful = specs.filter(s => s.options.length > 1);
   if (!useful.length) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
   el.innerHTML = `<svg class="ic"><use href="#i-filter"></use></svg>`
-    + useful.map(s => `<select class="input" id="${esc(s.id)}" aria-label="${esc(s.aria)}">${
+    + useful.map(s => `<select class="input" id="${esc(prefix + s.id)}" data-fkey="${esc(s.key)}"
+        aria-label="${esc(s.aria)}" title="${esc(s.aria)}">${
       s.options.map(([v, label]) =>
         `<option value="${esc(v)}"${v === s.value ? ' selected' : ''}>${esc(label)}</option>`
       ).join('')}</select>`).join('');
   useful.forEach(s => {
-    const sel = el.querySelector('#' + s.id);
-    if (sel) sel.addEventListener('change', () => s.onChange(sel.value));
+    const sel = el.querySelector('#' + CSS.escape(prefix + s.id));
+    if (sel) sel.addEventListener('change', () => { F[s.key] = sel.value; s.onChange(); });
   });
+}
+
+/* Both copies of a filter row read the same state, so after a change the other
+   copy is nudged to the new value instead of being re-rendered · re-rendering
+   would drop the open dropdown and the focus ring mid-interaction. */
+function syncPanelSelects() {
+  document.querySelectorAll('select[data-fkey]').forEach(sel => {
+    const want = F[sel.dataset.fkey] || '';
+    if (sel.value !== want) sel.value = want;
+  });
+}
+
+/* Count how many items fall under each value of one facet. `get` returns a
+   single value or a list of them (tech is many-per-subdomain). */
+function facetCounts(items, get) {
+  const counts = new Map();
+  items.forEach(x => {
+    const v = get(x);
+    (Array.isArray(v) ? v : [v]).forEach(one => {
+      if (one == null || one === '') return;
+      counts.set(one, (counts.get(one) || 0) + 1);
+    });
+  });
+  return counts;
+}
+
+/* Facet options, busiest first, each carrying its own count. `noneLabel` adds a
+   trailing group for the items the facet says nothing about, so nothing in the
+   list is unreachable through the filter. */
+function facetOptions(items, get, allLabel, noneLabel) {
+  const counts = facetCounts(items, get);
+  const opts = [['', `${allLabel} (${items.length})`]];
+  [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+    .forEach(([v, n]) => opts.push([String(v), `${v} (${n})`]));
+  if (noneLabel) {
+    const none = items.filter(x => {
+      const v = get(x);
+      return Array.isArray(v) ? !v.length : (v == null || v === '');
+    }).length;
+    if (none) opts.push(['none', `${noneLabel} (${none})`]);
+  }
+  return opts;
+}
+
+/* "none" is the escape hatch every facet shares: the items the facet has
+   nothing to say about. */
+function matchesFacet(value, got) {
+  if (!value) return true;
+  const list = Array.isArray(got) ? got : (got == null || got === '' ? [] : [got]);
+  if (value === 'none') return !list.length;
+  return list.map(String).includes(value);
 }
 
 /* Status options built from the codes actually seen: the classes present
@@ -321,91 +424,149 @@ function matchesStatusFilter(value, code) {
   return String(code) === value;
 }
 
-/* Subdomains · by the status their host answered with. */
-function buildSubFilter(subs) {
-  panelFilter('subFilter', [{
-    id: 'subStatusFilter', aria: 'Filter subdomains by response code',
-    value: F.subStatus,
-    options: statusOptions(subs, sd => (sd.http || {}).status, 'all status'),
-    onChange: v => { F.subStatus = v; renderSubList(); },
-  }]);
-}
+/* ---- what each section holds once its filter is applied ------------------- */
+const allSubs = () => (SCAN && SCAN.subdomains) || [];
+const allIps = () => ((SCAN || {}).infra || {}).ips || [];
+const allSecrets = () => (SCAN && SCAN.secrets) || [];
+const allFiles = () => (SCAN && SCAN.files) || [];
 
-function renderSubList() {
-  const subs = ((SCAN && SCAN.subdomains) || [])
-    .filter(sd => matchesStatusFilter(F.subStatus, (sd.http || {}).status));
-  document.getElementById('subList').innerHTML = subs.map(subItem).join('')
-    || emptyMini(F.subStatus ? 'no subdomains with that status' : 'no subdomains');
-  wirePanelInteractions();
+/* Subdomains answer three questions at once: what did it respond with, where is
+   it served from, and what is it running. The three filters combine. */
+function subMatches(sd) {
+  return matchesStatusFilter(F.subStatus, (sd.http || {}).status)
+    && matchesFacet(F.subIp, sd.ips || [])
+    && matchesFacet(F.subTech, sd.tech || []);
+}
+const filteredSubs = () => allSubs().filter(subMatches);
+
+function ipMatches(ip) { return matchesFacet(F.asn, ip.asn); }
+const filteredIps = () => allIps().filter(ipMatches);
+
+function secretMatches(x) { return !F.secretSev || x.severity === F.secretSev; }
+const filteredSecrets = () => allSecrets().filter(secretMatches);
+
+/* Tech is a derived list (fingerprint -> the hosts carrying it), so it is built
+   rather than filtered in place. */
+function techEntries() {
+  const map = {};
+  allSubs().forEach(sd => (sd.tech || []).forEach(t => { (map[t] = map[t] || []).push(sd.host); }));
+  return Object.entries(map).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+}
+const filteredTech = () => techEntries().filter(([t]) => !F.tech || t === F.tech);
+
+/* Subdomains · response code, serving address, fingerprint. */
+function buildSubFilter(containerId, prefix) {
+  const subs = allSubs();
+  panelFilter(containerId, prefix, [
+    { key: 'subStatus', id: 'SubStatus', aria: 'Filter subdomains by response code',
+      value: F.subStatus, options: statusOptions(subs, sd => (sd.http || {}).status, 'all status'),
+      onChange: refreshSubs },
+    { key: 'subIp', id: 'SubIp', aria: 'Filter subdomains by resolved IP',
+      value: F.subIp, options: facetOptions(subs, sd => sd.ips || [], 'all IPs', 'no IP'),
+      onChange: refreshSubs },
+    { key: 'subTech', id: 'SubTech', aria: 'Filter subdomains by tech stack',
+      value: F.subTech, options: facetOptions(subs, sd => sd.tech || [], 'all tech', 'no fingerprint'),
+      onChange: refreshSubs },
+  ]);
 }
 
 /* Infrastructure · by announcing AS. Addresses with no ASN are their own group
    rather than being silently unreachable through the filter. */
-function buildAsnFilter(ips) {
-  const seen = new Map();          // asn -> {n, org}
-  let none = 0;
+function buildAsnFilter(containerId, prefix) {
+  const ips = allIps();
+  const orgOf = new Map();
   ips.forEach(ip => {
-    if (!ip.asn) { none++; return; }
-    const rec = seen.get(ip.asn) || { n: 0, org: '' };
-    rec.n++;
-    if (!rec.org && ip.org) rec.org = String(ip.org).split(/[,(]/)[0].trim();
-    seen.set(ip.asn, rec);
+    if (ip.asn && ip.org && !orgOf.has(ip.asn))
+      orgOf.set(ip.asn, String(ip.org).split(/[,(]/)[0].trim());
   });
-  const opts = [['', `all AS (${ips.length})`]];
-  [...seen.entries()]
-    .sort((a, b) => b[1].n - a[1].n || String(a[0]).localeCompare(String(b[0])))
-    .forEach(([asn, r]) => opts.push([asn, `${asn}${r.org ? ' · ' + r.org : ''} (${r.n})`]));
-  if (none) opts.push(['none', `no AS recorded (${none})`]);
-  panelFilter('asnFilter', [{
-    id: 'asnSelect', aria: 'Filter infrastructure by announcing AS',
-    value: F.asn, options: opts,
-    onChange: v => { F.asn = v; renderIpList(); },
+  const opts = facetOptions(ips, ip => ip.asn, 'all AS', 'no AS recorded')
+    .map(([v, label]) => [v, orgOf.get(v) ? label.replace(v, `${v} · ${orgOf.get(v)}`) : label]);
+  panelFilter(containerId, prefix, [{
+    key: 'asn', id: 'Asn', aria: 'Filter infrastructure by announcing AS',
+    value: F.asn, options: opts, onChange: refreshIps,
   }]);
 }
 
+/* Tech stack · by fingerprint. */
+function buildTechFilter(containerId, prefix) {
+  const entries = techEntries();
+  const opts = [['', `all tech (${entries.length})`]];
+  entries.forEach(([t, hosts]) => opts.push([t, `${t} (${hosts.length})`]));
+  panelFilter(containerId, prefix, [{
+    key: 'tech', id: 'Tech', aria: 'Filter the tech stack',
+    value: F.tech, options: opts, onChange: refreshTech,
+  }]);
+}
+
+/* Secrets · by severity, worst first. */
+function buildSecretFilter(containerId, prefix) {
+  const secrets = allSecrets();
+  const order = ['high', 'medium', 'low'];
+  const counts = facetCounts(secrets, x => x.severity);
+  const opts = [['', `all severities (${secrets.length})`]];
+  order.filter(s => counts.get(s)).forEach(s => opts.push([s, `${s} (${counts.get(s)})`]));
+  [...counts.keys()].filter(s => !order.includes(s)).sort()
+    .forEach(s => opts.push([s, `${s} (${counts.get(s)})`]));
+  panelFilter(containerId, prefix, [{
+    key: 'secretSev', id: 'SecretSev', aria: 'Filter secrets by severity',
+    value: F.secretSev, options: opts, onChange: refreshSecrets,
+  }]);
+}
+
+/* ---- one refresh per section ----------------------------------------------
+   A filter can be moved from the left panel or from the detail view, and both
+   are on screen in their own mode, so each refresh redraws whichever of the two
+   exists and re-points the other copy of the control at the new value. */
+function refreshSubs() {
+  renderSubList();
+  renderDvBody('subdomains');
+  syncPanelSelects();
+}
+function refreshIps() {
+  renderIpList();
+  renderDvBody('infra');
+  syncPanelSelects();
+}
+function refreshTech() {
+  renderTech();
+  renderDvBody('tech');
+  syncPanelSelects();
+}
+function refreshSecrets() {
+  renderSecretList();
+  renderDvBody('secrets');
+  syncPanelSelects();
+}
+function refreshFiles() {
+  renderFileList();
+  renderDvBody('files');
+  syncPanelSelects();
+}
+
+function renderSubList() {
+  const el = document.getElementById('subList');
+  if (!el) return;
+  const subs = filteredSubs();
+  el.innerHTML = subs.map(subItem).join('')
+    || emptyMini(subFiltered() ? 'no subdomains match those filters' : 'no subdomains');
+  wirePanelInteractions();
+}
+const subFiltered = () => !!(F.subStatus || F.subIp || F.subTech);
+
 function renderIpList() {
-  const ips = (((SCAN || {}).infra || {}).ips || []).filter(ip =>
-    !F.asn || (F.asn === 'none' ? !ip.asn : ip.asn === F.asn));
-  document.getElementById('ipList').innerHTML = ips.map(ipCard).join('')
+  const el = document.getElementById('ipList');
+  if (!el) return;
+  const ips = filteredIps();
+  el.innerHTML = ips.map(ipCard).join('')
     || emptyMini(F.asn ? 'no addresses on that AS' : 'no IPs');
   wirePanelInteractions();
 }
 
-/* Tech stack · by fingerprint. */
-function buildTechFilter(subs) {
-  const map = {};
-  subs.forEach(sd => (sd.tech || []).forEach(t => { map[t] = (map[t] || 0) + 1; }));
-  const entries = Object.entries(map)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  const opts = [['', `all tech (${entries.length})`]];
-  entries.forEach(([t, n]) => opts.push([t, `${t} (${n})`]));
-  panelFilter('techFilter', [{
-    id: 'techSelect', aria: 'Filter the tech stack',
-    value: F.tech, options: opts,
-    onChange: v => { F.tech = v; renderTech((SCAN && SCAN.subdomains) || []); },
-  }]);
-}
-
-/* Secrets · by severity. */
-function buildSecretFilter(secrets) {
-  const order = ['high', 'medium', 'low'];
-  const counts = {};
-  secrets.forEach(x => { counts[x.severity] = (counts[x.severity] || 0) + 1; });
-  const opts = [['', `all severities (${secrets.length})`]];
-  order.filter(s => counts[s]).forEach(s => opts.push([s, `${s} (${counts[s]})`]));
-  Object.keys(counts).filter(s => !order.includes(s)).sort()
-    .forEach(s => opts.push([s, `${s} (${counts[s]})`]));
-  panelFilter('secretFilter', [{
-    id: 'secretSevSelect', aria: 'Filter secrets by severity',
-    value: F.secretSev, options: opts,
-    onChange: v => { F.secretSev = v; renderSecretList(); },
-  }]);
-}
-
 function renderSecretList() {
-  const secrets = ((SCAN && SCAN.secrets) || [])
-    .filter(x => !F.secretSev || x.severity === F.secretSev);
-  document.getElementById('secretList').innerHTML = secrets.map(secRow).join('')
+  const el = document.getElementById('secretList');
+  if (!el) return;
+  const secrets = filteredSecrets();
+  el.innerHTML = secrets.map(secRow).join('')
     || emptyMini(F.secretSev ? 'none at that severity' : 'none flagged');
 }
 
@@ -424,13 +585,24 @@ function subItem(sd) {
   </button>`;
 }
 
+/* Where an address sits, as one line: city, region, country. Empty when the
+   enrichment pass had nothing to say about it. */
+function ipPlace(ip) {
+  return [ip.city, ip.region, ip.country].filter(Boolean).join(', ');
+}
+
 /* Infra: each IP lists which subdomains resolve to it + discovery source (item 4) */
 function ipCard(ip) {
   const dc = ip.datacenter === true ? 'hosting' : ip.type || 'unknown';
   const meta = [];
   if (ip.asn) meta.push(esc(ip.asn));
-  if (ip.country) meta.push(esc(ip.country));
   meta.push(esc(dc));
+  const place = ipPlace(ip);
+  const seen = ipSeenText(ip.ip);
+  const placeLine = place
+    ? `<div class="ip-place">${icon('map-2')}<span>${esc(place)}</span></div>` : '';
+  const seenLine = seen
+    ? `<div class="ip-seen" title="from historical DNS · when this address served the domain">${icon('history')}<span>${esc(seen)}</span></div>` : '';
   const hosts = ip.subdomains || [];
   const hostList = hosts.length ? `<div class="ip-hosts">${hosts.slice(0, 10).map(h =>
     `<span class="chip-host" data-host="${esc(h)}" title="${esc(h)}">${esc(h)}</span>`).join('')}${hosts.length > 10 ? `<span class="faint" style="font-size:11px;align-self:center">+${hosts.length - 10}</span>` : ''}</div>` : '';
@@ -441,6 +613,7 @@ function ipCard(ip) {
     ${ip.org ? `<div class="iporg">${esc(ip.org)}</div>` : ''}
     <div class="ipmeta">${meta.map(x => `<span>${x}</span>`).join('<span class="faint">·</span>')}
       <span class="faint">·</span><span>${hosts.length} host${hosts.length === 1 ? '' : 's'}</span></div>
+    ${placeLine}${seenLine}
     ${hostList}
     ${portsBlock(ip)}
   </div>`;
@@ -498,13 +671,12 @@ function portRow(p) {
 /* Tech: each fingerprint -> the subdomains it was seen on AND the IPs those
    hosts resolve to, so a stack can be traced to the box serving it. Chips are
    click-to-filter (host chip -> host filter, IP chip -> IP filter). */
-function renderTech(subs) {
-  const map = {};
-  subs.forEach(sd => (sd.tech || []).forEach(t => { (map[t] = map[t] || []).push(sd.host); }));
-  let entries = Object.entries(map).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-  setCount('cTech', entries.length);
-  if (F.tech) entries = entries.filter(([t]) => t === F.tech);
-  document.getElementById('techList').innerHTML = entries.map(([t, hosts]) => {
+function renderTech() {
+  const el = document.getElementById('techList');
+  setCount('cTech', techEntries().length);
+  if (!el) return;
+  const entries = filteredTech();
+  el.innerHTML = entries.map(([t, hosts]) => {
     const ips = ipsOfHosts(hosts);
     return `<div class="techrow">
       <div class="th"><span class="tag mono">${esc(t)}</span>
@@ -623,7 +795,13 @@ const CODE_FILE_TYPES = new Set(['js', 'ts', 'jsx', 'tsx', 'json', 'config', 'en
   'backup', 'angular', 'sql']);
 function fileTypeOf(f) { return (f.subtype || f.kind || 'other'); }
 
-function buildFileFilter(files) {
+/* The host a file was served from, and the addresses behind that host. Both are
+   derived · a file record carries a URL, not a resolved address. */
+const fileHostOf = f => splitUrl(f.url).host;
+const fileIpsOf = f => [...(HOST_IPS.get(fileHostOf(f)) || [])];
+
+function buildFileFilter(containerId, prefix) {
+  const files = allFiles();
   const types = [...new Set(files.map(fileTypeOf))].sort();
   const codeCount = files.filter(f => CODE_FILE_TYPES.has(fileTypeOf(f))).length;
   const typeOpts = [['', `all types (${files.length})`]];
@@ -632,35 +810,44 @@ function buildFileFilter(files) {
   types.forEach(t => typeOpts.push(
     [t, `${t} (${files.filter(f => fileTypeOf(f) === t).length})`]));
 
-  // Kind and status answer different questions ("what is it?" vs "did it
-  // actually serve?"), so both are offered and they combine.
-  panelFilter('fileFilter', [
-    { id: 'fileTypeFilter', aria: 'Filter discovered files by type',
-      value: F.fileType, options: typeOpts,
-      onChange: v => { F.fileType = v; renderFileList(); } },
-    { id: 'fileStatusFilter', aria: 'Filter discovered files by response code',
+  // Kind, status, host and address answer four different questions ("what is
+  // it?", "did it actually serve?", "who served it?", "off which box?"), so all
+  // four are offered and they combine.
+  panelFilter(containerId, prefix, [
+    { key: 'fileType', id: 'FileType', aria: 'Filter discovered files by type',
+      value: F.fileType, options: typeOpts, onChange: refreshFiles },
+    { key: 'fileStatus', id: 'FileStatus', aria: 'Filter discovered files by response code',
       value: F.fileStatus, options: statusOptions(files, f => f.status, 'all status'),
-      onChange: v => { F.fileStatus = v; renderFileList(); } },
+      onChange: refreshFiles },
+    { key: 'fileHost', id: 'FileHost', aria: 'Filter discovered files by host',
+      value: F.fileHost, options: facetOptions(files, fileHostOf, 'all hosts'),
+      onChange: refreshFiles },
+    { key: 'fileIp', id: 'FileIp', aria: 'Filter discovered files by serving IP',
+      value: F.fileIp, options: facetOptions(files, fileIpsOf, 'all IPs', 'no IP'),
+      onChange: refreshFiles },
   ]);
 }
 
 function fileMatches(f) {
   if (!matchesStatusFilter(F.fileStatus, f.status)) return false;
+  if (!matchesFacet(F.fileHost, fileHostOf(f))) return false;
+  if (!matchesFacet(F.fileIp, fileIpsOf(f))) return false;
   if (!F.fileType) return true;
   if (F.fileType === '__code') return CODE_FILE_TYPES.has(fileTypeOf(f));
   return fileTypeOf(f) === F.fileType;
 }
+const fileFiltered = () => !!(F.fileType || F.fileStatus || F.fileHost || F.fileIp);
+const filteredFiles = () => allFiles().filter(fileMatches);
 
-/* Render (or re-render) the file rows for the active type filter. Each row keeps
+/* Render (or re-render) the file rows for the active filters. Each row keeps
    its original index into SCAN.files, so expanding still finds the record. */
 function renderFileList() {
   const list = document.getElementById('fileList');
   if (!list) return;
-  const files = (SCAN && SCAN.files) || [];
   const rows = [];
-  files.forEach((f, i) => { if (fileMatches(f)) rows.push(fileRow(f, i)); });
+  allFiles().forEach((f, i) => { if (fileMatches(f)) rows.push(fileRow(f, i)); });
   list.innerHTML = rows.join('') ||
-    emptyMini(F.fileType || F.fileStatus ? 'no files match those filters' : 'none');
+    emptyMini(fileFiltered() ? 'no files match those filters' : 'none');
   list.querySelectorAll('.frow').forEach(r =>
     r.querySelector('.fsummary').addEventListener('click', () => toggleFile(r)));
 }
@@ -696,18 +883,33 @@ function short(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + 
 function emptyMini(t) { return `<div class="muted" style="padding:8px 10px;font-size:12px">${esc(t)}</div>`; }
 function setCount(id, n) { const e = document.getElementById(id); if (e) e.textContent = fmtNum(n); }
 
-/* wire clickable host / IP chips + file rows after each panel render */
+/* Wire clickable host / IP chips + port rows after each panel render.
+   Scoped to the left panel on purpose: the detail view renders the same chip
+   classes and binds its own handler (which leaves detail mode first), so a
+   document-wide query here would bind both and the two would cancel each other
+   out · the filter would toggle on and straight back off in one click.
+
+   One delegated listener rather than a binding pass per node: a section
+   re-renders on every filter change, and re-binding every chip in the panel each
+   time used to stack a second handler on the chips that had *not* been redrawn,
+   so their next click set a filter and immediately cleared it again. */
+let _sideWired = false;
 function wirePanelInteractions() {
-  document.querySelectorAll('.sitem[data-host]').forEach(el =>
-    el.addEventListener('click', () => setHostFilter(el.dataset.host)));
-  document.querySelectorAll('.chip-host[data-host]').forEach(el =>
-    el.addEventListener('click', (e) => { e.stopPropagation(); setHostFilter(el.dataset.host); }));
-  document.querySelectorAll('.chip-ip[data-ip], .ipaddr[data-ip]').forEach(el =>
-    el.addEventListener('click', (e) => { e.stopPropagation(); setIpFilter(el.dataset.ip); }));
-  // file rows are wired by renderFileList (they re-render when the type filter changes)
-  // port rows: expand to reveal version / CPE / script output
-  document.querySelectorAll('.prow.has-detail .psummary').forEach(btn =>
-    btn.addEventListener('click', () => btn.closest('.prow').classList.toggle('open')));
+  const side = document.getElementById('side');
+  if (!side || _sideWired) return;
+  _sideWired = true;
+  side.addEventListener('click', (e) => {
+    const ip = e.target.closest('.chip-ip[data-ip], .ipaddr[data-ip]');
+    if (ip) { e.stopPropagation(); setIpFilter(ip.dataset.ip); return; }
+    const host = e.target.closest('.chip-host[data-host]');
+    if (host) { e.stopPropagation(); setHostFilter(host.dataset.host); return; }
+    // port rows: expand to reveal version / CPE / script output
+    const port = e.target.closest('.prow.has-detail .psummary');
+    if (port) { port.closest('.prow').classList.toggle('open'); return; }
+    const item = e.target.closest('.sitem[data-host]');
+    if (item) setHostFilter(item.dataset.host);
+    // file rows are wired by renderFileList, which owns their expanded detail
+  });
 }
 function toggleFile(row) {
   const open = row.classList.toggle('open');
@@ -1109,73 +1311,186 @@ function toggleDetailMode() {
 }
 
 /* Every table gets the full width of the page and its own row · nothing sits
-   side by side, so no data set has to be read through a horizontal scrollbar. */
+   side by side, so no data set has to be read through a horizontal scrollbar.
+
+   Each section here is the same thing the left panel shows, at full size: it
+   collapses from its own header, and it carries the same filter row, reading the
+   same state. Collapsing one section is how the others get the screen. */
+const DV_SECTIONS = [
+  { id: 'dns', title: 'DNS records & history', short: 'DNS', icon: 'network' },
+  { id: 'subdomains', title: 'Subdomains', short: 'subdomains', icon: 'world', filter: buildSubFilter },
+  { id: 'infra', title: 'Infrastructure', short: 'IPs', icon: 'server-2', filter: buildAsnFilter },
+  { id: 'tech', title: 'Tech stack', short: 'tech', icon: 'fingerprint', filter: buildTechFilter },
+  { id: 'secrets', title: 'Secrets', short: 'secrets', icon: 'key', filter: buildSecretFilter },
+  { id: 'files', title: 'Discovered files', short: 'files', icon: 'file-code', filter: buildFileFilter },
+];
+/* which sections the operator has folded away · kept for the session so leaving
+   and re-entering the detail view does not undo the arrangement */
+const DV_COLLAPSED = new Set();
+
 function renderDetail() {
   const dv = document.getElementById('detailView');
-  const s = SCAN, m = s.meta || {}, st = m.stats || {};
-  const techCount = new Set((s.subdomains || []).flatMap(sd => sd.tech || [])).size;
-  const jumps = [
-    ['dns', 'DNS', (st.dns_records || 0) + (st.dns_history || 0)],
-    ['subdomains', 'subdomains', st.subdomains],
-    ['infra', 'IPs', st.ips],
-    ['tech', 'tech', techCount],
-    ['secrets', 'secrets', st.secrets],
-    ['files', 'files', st.files],
-  ].filter(j => j[2] == null || j[2]).map(([id, label, n]) =>
-    `<button class="dv-stat" data-jump="dv-${id}">${n != null ? `<b>${fmtNum(n)}</b> ` : ''}${label}</button>`).join('');
+  const m = (SCAN || {}).meta || {};
+  const jumps = DV_SECTIONS.map(sec => {
+    const n = dvCounts(sec.id).total;
+    return n ? `<button class="dv-stat" data-jump="dv-${sec.id}"><b>${fmtNum(n)}</b> ${esc(sec.short)}</button>` : '';
+  }).join('');
   dv.innerHTML = `
     <div class="dv-head">
       <div><h2>${esc(m.domain || '')}</h2><div class="dv-substats">${jumps}</div></div>
-      <button class="btn" id="dvCollapse">${icon('arrows-minimize')} Back to graph</button>
+      <div class="dv-head-actions">
+        <button class="btn sm ghost" id="dvFoldAll">${icon('chevron-down')} Collapse all</button>
+        <button class="btn sm ghost" id="dvUnfoldAll">${icon('arrows-maximize')} Expand all</button>
+        <button class="btn" id="dvCollapse">${icon('arrows-minimize')} Back to graph</button>
+      </div>
     </div>
-    <div class="dv-grid">
-      ${dvDnsCard(s.dns || {})}
-      ${dvSubdomainsCard(s.subdomains || [])}
-      ${dvInfraCard((s.infra && s.infra.ips) || [])}
-      ${dvTechCard(s.subdomains || [])}
-      ${dvSecretsCard(s.secrets || [])}
-      ${dvFilesCard(s.files || [])}
-    </div>`;
+    <div class="dv-grid">${DV_SECTIONS.map(dvShell).join('')}</div>`;
+
+  DV_SECTIONS.forEach(sec => {
+    if (sec.filter) sec.filter(`dvFilter-${sec.id}`, 'dv');
+    renderDvBody(sec.id);
+  });
+  syncPanelSelects();
+
   dv.querySelector('#dvCollapse').addEventListener('click', toggleDetailMode);
+  dv.querySelector('#dvFoldAll').addEventListener('click', () => dvFoldAll(true));
+  dv.querySelector('#dvUnfoldAll').addEventListener('click', () => dvFoldAll(false));
+  dv.querySelectorAll('.dv-ch').forEach(btn =>
+    btn.addEventListener('click', () => dvToggleSection(btn.dataset.sec)));
   dv.querySelectorAll('[data-jump]').forEach(b => b.addEventListener('click', () => {
     const el = document.getElementById(b.dataset.jump);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!el) return;
+    if (el.classList.contains('collapsed')) dvToggleSection(el.dataset.sec);
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }));
-  dv.querySelectorAll('.chip-host[data-host]').forEach(el =>
+}
+
+/* The empty shell of one section · header, filter row, body. The body is filled
+   by renderDvBody so a filter change redraws only what it changed. */
+function dvShell(sec) {
+  const folded = DV_COLLAPSED.has(sec.id);
+  return `<section class="dv-card${folded ? ' collapsed' : ''}" id="dv-${sec.id}" data-sec="${sec.id}">
+    <button class="dv-ch" data-sec="${sec.id}" aria-expanded="${folded ? 'false' : 'true'}"
+            aria-controls="dvWrap-${sec.id}">
+      ${icon(sec.icon)}<h3>${esc(sec.title)}</h3>
+      <span class="count" id="dvCount-${sec.id}"></span>
+      <svg class="ic chev"><use href="#i-chevron-down"></use></svg>
+    </button>
+    <div class="dv-cwrap" id="dvWrap-${sec.id}">
+      ${sec.filter ? `<div class="panel-filter dv-filter" id="dvFilter-${sec.id}" hidden></div>` : ''}
+      <div class="dv-slot" id="dvBody-${sec.id}"></div>
+    </div>
+  </section>`;
+}
+
+function dvToggleSection(id) {
+  const card = document.getElementById('dv-' + id);
+  if (!card) return;
+  const folded = card.classList.toggle('collapsed');
+  if (folded) DV_COLLAPSED.add(id); else DV_COLLAPSED.delete(id);
+  const head = card.querySelector('.dv-ch');
+  if (head) head.setAttribute('aria-expanded', folded ? 'false' : 'true');
+}
+
+function dvFoldAll(folded) {
+  DV_SECTIONS.forEach(sec => {
+    const card = document.getElementById('dv-' + sec.id);
+    if (!card) return;
+    card.classList.toggle('collapsed', folded);
+    if (folded) DV_COLLAPSED.add(sec.id); else DV_COLLAPSED.delete(sec.id);
+    const head = card.querySelector('.dv-ch');
+    if (head) head.setAttribute('aria-expanded', folded ? 'false' : 'true');
+  });
+}
+
+/* How many rows a section holds, and how many survive its filter · the header
+   says "12 of 480" rather than pretending the filtered view is everything. */
+function dvCounts(id) {
+  switch (id) {
+    case 'dns': {
+      const dns = (SCAN && SCAN.dns) || {};
+      const n = o => Object.values(o || {}).reduce((a, v) => a + v.length, 0);
+      const total = n(dns.records) + n(dns.history);
+      return { shown: total, total };
+    }
+    case 'subdomains': return { shown: filteredSubs().length, total: allSubs().length };
+    case 'infra': return { shown: filteredIps().length, total: allIps().length };
+    case 'tech': return { shown: filteredTech().length, total: techEntries().length };
+    case 'secrets': return { shown: filteredSecrets().length, total: allSecrets().length };
+    case 'files': return { shown: filteredFiles().length, total: allFiles().length };
+    default: return { shown: 0, total: 0 };
+  }
+}
+
+/* Redraw one section of the detail view, if it is currently built. Called both
+   on first render and on every filter change, from either copy of the row. */
+function renderDvBody(id) {
+  const slot = document.getElementById('dvBody-' + id);
+  if (!slot || !SCAN) return;
+  const body = {
+    dns: () => dvDnsBody(SCAN.dns || {}),
+    subdomains: () => dvSubdomainsBody(filteredSubs()),
+    infra: () => dvInfraBody(filteredIps()),
+    tech: () => dvTechBody(filteredTech()),
+    secrets: () => dvSecretsBody(filteredSecrets()),
+    files: () => dvFilesBody(filteredFiles()),
+  }[id];
+  slot.innerHTML = body ? body() : '';
+
+  const { shown, total } = dvCounts(id);
+  const badge = document.getElementById('dvCount-' + id);
+  if (badge) {
+    badge.textContent = shown === total ? fmtNum(total) : `${fmtNum(shown)} of ${fmtNum(total)}`;
+    badge.classList.toggle('filtered', shown !== total);
+  }
+  wireDvInteractions(slot);
+}
+
+/* chips, expandable port rows and decode widgets inside one redrawn section */
+function wireDvInteractions(root) {
+  root.querySelectorAll('.chip-host[data-host]').forEach(el =>
     el.addEventListener('click', () => { toggleDetailMode(); setHostFilter(el.dataset.host); }));
-  dv.querySelectorAll('.chip-ip[data-ip]').forEach(el =>
+  root.querySelectorAll('.chip-ip[data-ip]').forEach(el =>
     el.addEventListener('click', () => { toggleDetailMode(); setIpFilter(el.dataset.ip); }));
-  // port rows inside the infra card expand to their service / version / script detail
-  dv.querySelectorAll('.prow.has-detail .psummary').forEach(btn =>
+  root.querySelectorAll('.prow.has-detail .psummary').forEach(btn =>
     btn.addEventListener('click', () => btn.closest('.prow').classList.toggle('open')));
-  wireDecode(dv);
+  wireDecode(root);
 }
 
-function dvCard(title, ic, count, body, id) {
-  return `<section class="dv-card"${id ? ` id="dv-${id}"` : ''}><div class="dv-ch">${icon(ic)}<h3>${esc(title)}</h3>
-    ${count != null ? `<span class="count">${fmtNum(count)}</span>` : ''}</div>${body}</section>`;
+function dvEmpty(text, sub) {
+  return `<div class="dv-body"><div class="empty" style="padding:26px">${icon('file-search')}
+    <h4>${esc(text)}</h4>${sub ? `<p>${esc(sub)}</p>` : ''}</div></div>`;
 }
 
-function dvDnsCard(dns) {
+/* DNS · current records, then the deep-DNS address timeline (which address
+   served the domain, for how long, and out of whose network), then the full
+   per-type history. The timeline is the part a deep scan pays for, so it is
+   spelled out here rather than left implicit in a history table. */
+function dvDnsBody(dns) {
   const recs = dns.records || {}, hist = dns.history || {};
   const nRec = Object.values(recs).reduce((a, v) => a + v.length, 0);
   const nHist = Object.values(hist).reduce((a, v) => a + v.length, 0);
-  if (!nRec && !nHist) return dvCard('DNS', 'network', 0,
-    `<div class="empty" style="padding:24px">${icon('network')}<h4>No DNS data</h4><p>Run a Deep scan for full records and historical DNS.</p></div>`, 'dns');
+  if (!nRec && !nHist)
+    return dvEmpty('No DNS data', 'Run a Deep scan for full records and historical DNS.');
   let body = '';
   const curTypes = DNS_ORDER.filter(t => recs[t] && recs[t].length);
   if (curTypes.length) {
-    body += `<h4 class="dv-sub">Current records</h4><table class="dv-table"><thead><tr><th>Type</th><th>Value</th><th>Detail</th><th>Since</th></tr></thead><tbody>`;
+    body += `<h4 class="dv-sub">Current records</h4><table class="dv-table"><thead><tr>
+      <th>Type</th><th>Value</th><th>Detail</th><th>Since</th><th>Held for</th></tr></thead><tbody>`;
     for (const t of curTypes) for (const r of recs[t]) {
       const detail = [r.priority != null ? 'pri ' + r.priority : '', r.ttl != null ? 'ttl ' + r.ttl : '', r.organization || ''].filter(Boolean).join(' · ');
-      body += `<tr><td class="dv-rt">${DNS_LABEL[t]}</td><td class="mono">${esc(r.value)}</td><td class="faint">${esc(detail)}</td><td class="mono">${esc(r.first_seen ? yearOf(r.first_seen) || r.first_seen : '')}</td></tr>`;
+      body += `<tr><td class="dv-rt">${DNS_LABEL[t]}</td><td class="mono">${esc(r.value)}</td>
+        <td class="faint">${esc(detail)}</td>
+        <td class="mono">${esc(r.first_seen ? yearOf(r.first_seen) || r.first_seen : '')}</td>
+        <td class="mono">${esc(durationOf(r.first_seen, null))}</td></tr>`;
     }
     body += `</tbody></table>`;
   }
+  body += dvAddressTimeline();
   const histTypes = DNS_ORDER.filter(t => hist[t] && hist[t].length);
   if (histTypes.length) {
     body += `<h4 class="dv-sub">${icon('history')} Historical DNS</h4>
-      <p class="faint" style="font-size:12px;margin-bottom:8px">Previous IPs, name servers and MX with when each change happened. Click a type to open the full table.</p>`;
+      <p class="faint" style="font-size:12px;margin-bottom:8px">Previous IPs, name servers and MX with when each change happened, and how long each one stood. Click a type to open the full table.</p>`;
     for (const t of histTypes) {
       const rows = hist[t];
       const list = rows.slice(0, 4).map(r => `${esc(r.value)} <span class="faint">(${esc(fmtRange(r.first_seen, r.last_seen))})</span>`).join(' · ');
@@ -1183,26 +1498,62 @@ function dvDnsCard(dns) {
         <span class="faint">${rows.length} record${rows.length === 1 ? '' : 's'}</span>
         <span class="dv-sum-list">${list}${rows.length > 4 ? ' …' : ''}</span></summary>
         <table class="dv-table"><thead><tr><th>Value</th><th>First seen</th><th>Last seen</th><th>Duration</th><th>Organization</th></tr></thead><tbody>
-        ${rows.map(r => `<tr><td class="mono">${esc(r.value)}</td><td>${esc(r.first_seen || '')}</td><td>${esc(r.last_seen || '')}</td><td>${esc(durationOf(r.first_seen, r.last_seen))}</td><td class="faint">${esc(r.organization || '')}</td></tr>`).join('')}
+        ${rows.map(r => `<tr><td class="mono">${esc(r.value)}</td><td>${esc(r.first_seen || '')}</td><td>${esc(r.last_seen || '')}</td><td class="mono">${esc(durationOf(r.first_seen, r.last_seen))}</td><td class="faint">${esc(r.organization || '')}</td></tr>`).join('')}
         </tbody></table></details>`;
     }
   }
-  return dvCard('DNS records & history', 'network', nRec + nHist, `<div class="dv-body">${body}</div>`, 'dns');
+  return `<div class="dv-body">${body}</div>`;
 }
 
-function dvInfraCard(ips) {
-  if (!ips.length) return dvCard('Infrastructure', 'server-2', 0, `<div class="dv-body faint" style="padding:16px">No IPs.</div>`, 'infra');
+/* Every address the domain has ever pointed at, newest window first: where it
+   is, who announces it, how long it served, and whether it still does. */
+function dvAddressTimeline() {
+  if (!IP_SEEN.size) return '';
+  const infra = new Map(allIps().map(r => [r.ip, r]));
+  const rows = [...IP_SEEN.entries()]
+    .sort((a, b) => (b[1].current ? 1 : 0) - (a[1].current ? 1 : 0)
+      || String(b[1].first_seen || '').localeCompare(String(a[1].first_seen || '')))
+    .map(([ip, s]) => {
+      const rec = infra.get(ip) || {};
+      const place = ipPlace(rec);
+      return `<tr>
+        <td class="mono"><span class="chip-ip" data-ip="${esc(ip)}">${icon('server-2')}${esc(ip)}</span></td>
+        <td>${s.current ? '<span class="tag accent">current</span>' : '<span class="faint">retired</span>'}</td>
+        <td>${esc(s.first_seen || '')}</td>
+        <td>${esc(s.current ? '' : s.last_seen || '')}</td>
+        <td class="mono">${esc(durationOf(s.first_seen, s.current ? null : s.last_seen))}</td>
+        <td>${esc(place || '')}</td>
+        <td class="faint">${esc(s.organization || rec.org || '')}</td>
+        <td class="mono faint">${esc(rec.asn || '')}</td>
+      </tr>`;
+    }).join('');
+  return `<h4 class="dv-sub">${icon('map-2')} Address timeline</h4>
+    <p class="faint" style="font-size:12px;margin-bottom:8px">Where this domain has been hosted over time, from deep DNS: each address, the window it served in, how long that lasted, and the network it sat on.</p>
+    <table class="dv-table"><thead><tr><th>IP</th><th>State</th><th>First seen</th><th>Last seen</th>
+      <th>Duration</th><th>Location</th><th>Organization</th><th>ASN</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+}
+
+function dvInfraBody(ips) {
+  if (!ips.length)
+    return dvEmpty(F.asn ? 'No addresses on that AS' : 'No IPs',
+      F.asn ? 'Clear the AS filter to see the rest.' : '');
   const rows = ips.map(ip => {
     const hosts = ip.subdomains || [];
     const nports = (ip.ports || []).length;
     const portsCell = nports
       ? `<span class="tag mono" title="open ports · expand the row for services, versions and OS">${nports} open</span>`
       : (ip.scanned ? '<span class="faint">0 open</span>' : '<span class="faint">·</span>');
+    const place = ipPlace(ip);
+    const kind = ip.datacenter ? 'hosting' : ip.type || '';
+    const seen = ipSeenText(ip.ip);
     const main = `<tr>
       <td class="mono"><span class="chip-ip" data-ip="${esc(ip.ip)}">${icon('server-2')}${esc(ip.ip)}</span></td>
       <td>${esc(ip.org || '')}</td>
       <td class="mono">${esc(ip.asn || '')}</td>
-      <td>${esc(ip.country || '')} ${ip.datacenter ? '· hosting' : ip.type ? '· ' + esc(ip.type) : ''}</td>
+      <td>${place ? esc(place) : '<span class="faint">·</span>'}</td>
+      <td>${esc(kind)}</td>
+      <td class="mono">${seen ? esc(seen) : '<span class="faint">·</span>'}</td>
       <td>${esc((ip.os || {}).name || '')}${(ip.os || {}).accuracy ? ` <span class="faint">${ip.os.accuracy}%</span>` : ''}</td>
       <td>${portsCell}</td>
       <td>${(ip.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
@@ -1213,35 +1564,43 @@ function dvInfraCard(ips) {
     // renderer the left Infrastructure panel uses, so the ports, service versions,
     // WhatWeb tech and default-script output are all "seen" here too.
     const pb = (nports || ip.os || (ip.traceroute || []).length) ? portsBlock(ip) : '';
-    const detailRow = pb ? `<tr class="dv-ports-row"><td colspan="9"><div class="dv-ports">${pb}</div></td></tr>` : '';
+    const detailRow = pb ? `<tr class="dv-ports-row"><td colspan="11"><div class="dv-ports">${pb}</div></td></tr>` : '';
     return main + detailRow;
   }).join('');
-  return dvCard('Infrastructure', 'server-2', ips.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>IP</th><th>Org</th><th>ASN</th><th>Type</th><th>OS</th><th>Ports</th><th>Src</th><th>Hosts</th><th>Resolves for</th></tr></thead><tbody>${rows}</tbody></table></div>`,
-    'infra');
+  return `<div class="dv-body"><table class="dv-table"><thead><tr>
+    <th>IP</th><th>Org</th><th>ASN</th><th>Location</th><th>Type</th><th>Seen</th><th>OS</th>
+    <th>Ports</th><th>Src</th><th>Hosts</th><th>Resolves for</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
 }
 
-function dvSubdomainsCard(subs) {
-  if (!subs.length) return dvCard('Subdomains', 'world', 0, `<div class="dv-body faint" style="padding:16px">None.</div>`, 'subdomains');
-  const rows = subs.map(sd => `<tr>
+function dvSubdomainsBody(subs) {
+  if (!subs.length)
+    return dvEmpty(subFiltered() ? 'No subdomains match those filters' : 'No subdomains',
+      subFiltered() ? 'Widen the status, IP or tech filter above.' : '');
+  // Where each host's addresses sit, so a subdomain row answers "served from
+  // where" without a trip to the infrastructure table.
+  const infra = new Map(allIps().map(r => [r.ip, r]));
+  const rows = subs.map(sd => {
+    const places = [...new Set((sd.ips || []).map(ip => ipPlace(infra.get(ip) || {})).filter(Boolean))];
+    return `<tr>
     <td class="mono"><span class="chip-host" data-host="${esc(sd.host)}">${esc(sd.host)}</span></td>
     <td class="${statusClass((sd.http || {}).status)} mono">${(sd.http || {}).status || (sd.resolved ? '·' : 'dns')}</td>
     <td>${(sd.ips || []).map(ip => `<span class="chip-ip" data-ip="${esc(ip)}">${icon('server-2')}${esc(ip)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
+    <td>${places.length ? esc(places.join(' · ')) : '<span class="faint">·</span>'}</td>
     <td>${(sd.tech || []).map(x => `<span class="tag mono">${esc(x)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
     <td>${(sd.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
-  </tr>`).join('');
-  return dvCard('Subdomains', 'world', subs.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Host</th><th>Status</th><th>IPs</th><th>Tech</th><th>Src</th></tr></thead><tbody>${rows}</tbody></table></div>`,
-    'subdomains');
+  </tr>`;
+  }).join('');
+  return `<div class="dv-body"><table class="dv-table"><thead><tr>
+    <th>Host</th><th>Status</th><th>IPs</th><th>Location</th><th>Tech</th><th>Src</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
 }
 
 /* Tech stack: what was detected, on which subdomains, and on which IPs those
    subdomains resolve to · not just a bare list of fingerprints. */
-function dvTechCard(subs) {
-  const map = {};
-  subs.forEach(sd => (sd.tech || []).forEach(t => { (map[t] = map[t] || []).push(sd.host); }));
-  const entries = Object.entries(map).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-  if (!entries.length) return dvCard('Tech stack', 'fingerprint', 0, `<div class="dv-body faint" style="padding:16px">No fingerprints.</div>`, 'tech');
+function dvTechBody(entries) {
+  if (!entries.length)
+    return dvEmpty(F.tech ? 'That fingerprint is not in this scan' : 'No fingerprints');
   const rows = entries.map(([t, hosts]) => {
     const ips = ipsOfHosts(hosts);
     return `<tr>
@@ -1252,31 +1611,36 @@ function dvTechCard(subs) {
       <td>${ips.map(ip => `<span class="chip-ip" data-ip="${esc(ip)}">${icon('server-2')}${esc(ip)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
     </tr>`;
   }).join('');
-  return dvCard('Tech stack', 'fingerprint', entries.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Technology</th><th>Hosts</th><th>Detected on</th><th>IPs</th><th>Served from</th></tr></thead><tbody>${rows}</tbody></table></div>`,
-    'tech');
+  return `<div class="dv-body"><table class="dv-table"><thead><tr>
+    <th>Technology</th><th>Hosts</th><th>Detected on</th><th>IPs</th><th>Served from</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
 }
 
-function dvSecretsCard(secrets) {
-  if (!secrets.length) return dvCard('Secrets', 'key', 0, `<div class="dv-body faint" style="padding:16px">None flagged.</div>`, 'secrets');
+function dvSecretsBody(secrets) {
+  if (!secrets.length)
+    return dvEmpty(F.secretSev ? 'None at that severity' : 'None flagged');
   const rows = secrets.map(x => `<tr>
     <td><span class="sev ${sevClass(x.severity)}">${esc(x.severity)}</span></td>
     <td>${esc(x.type)}</td><td class="mono wrap">${esc(x.match)}</td>
     <td>${(x.found_by || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
     <td class="mono faint wrap">${esc(splitUrl(x.source).host + splitUrl(x.source).path)}</td>
   </tr>`).join('');
-  return dvCard('Secrets', 'key', secrets.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Sev</th><th>Type</th><th>Match</th><th>Src</th><th>Location</th></tr></thead><tbody>${rows}</tbody></table></div>`,
-    'secrets');
+  return `<div class="dv-body"><table class="dv-table"><thead><tr>
+    <th>Sev</th><th>Type</th><th>Match</th><th>Src</th><th>Location</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
 }
 
-function dvFilesCard(files) {
-  if (!files.length) return dvCard('Discovered files', 'file-code', 0, `<div class="dv-body faint" style="padding:16px">None.</div>`, 'files');
+function dvFilesBody(files) {
+  if (!files.length)
+    return dvEmpty(fileFiltered() ? 'No files match those filters' : 'No files',
+      fileFiltered() ? 'Widen the type, status, host or IP filter above.' : '');
   const rows = files.map(f => {
     const u = splitUrl(f.url);
+    const ips = fileIpsOf(f);
     return `<tr>
       <td><span class="tag mono">${esc(f.subtype || f.kind)}</span></td>
       <td class="mono"><span class="chip-host" data-host="${esc(u.host)}">${esc(u.host)}</span></td>
+      <td>${ips.map(ip => `<span class="chip-ip" data-ip="${esc(ip)}">${icon('server-2')}${esc(ip)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
       <td class="mono wrap">${esc(u.path)}</td>
       <td class="${statusClass(f.status)} mono">${f.status || '·'}</td>
       <td class="mono faint">${esc(f.size != null ? fmtBytes(f.size) : '')}</td>
@@ -1284,9 +1648,9 @@ function dvFilesCard(files) {
       <td>${(f.sources || []).map(sc => `<span class="src-chip mini">${esc(sc)}</span>`).join('')}</td>
     </tr>`;
   }).join('');
-  return dvCard('Discovered files', 'file-code', files.length,
-    `<div class="dv-body"><table class="dv-table"><thead><tr><th>Kind</th><th>Host</th><th>Path</th><th>Status</th><th>Size</th><th>Type</th><th>Src</th></tr></thead><tbody>${rows}</tbody></table></div>`,
-    'files');
+  return `<div class="dv-body"><table class="dv-table"><thead><tr>
+    <th>Kind</th><th>Host</th><th>IPs</th><th>Path</th><th>Status</th><th>Size</th><th>Type</th><th>Src</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 /* ---- graph / table split -------------------------------------------------- */

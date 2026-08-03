@@ -47,12 +47,23 @@ _USAGE_CACHE: dict = {"at": 0.0, "key": None, "value": None}
 _USAGE_TTL = 120.0
 
 
+def run_cost(*, subdomains: bool = True, history: bool = True) -> int:
+    """How many API calls one deep-DNS pass spends.
+
+    A monthly allowance on the free tier is small enough that a single run can
+    finish it, so the dashboard is told the price before it commits: the host
+    list, the domain record set, WHOIS, and one call per history record type."""
+    return ((1 if subdomains else 0) + 2
+            + (len(config.DNS_HISTORY_TYPES) if history else 0))
+
+
 def check(*, force: bool = False) -> dict:
     """Where the configured key stands. Never raises.
 
     state is one of:
       unset       · no key configured (deep DNS simply unavailable)
       ok          · the key works and has allowance left
+      low         · what is left will not cover a full deep pass
       exhausted   · the monthly quota is spent
       invalid     · the key was rejected (401/403)
       unreachable · the API did not answer (network, outage)
@@ -100,14 +111,24 @@ def check(*, force: bool = False) -> dict:
     used = _as_int(data.get("current_monthly_usage"))
     limit = _as_int(data.get("allowed_monthly_usage"))
     remaining = (max(0, limit - used) if limit and used is not None else None)
+    needed = run_cost()
     if limit and used is not None and used >= limit:
         out = {"state": "exhausted", "ok": False, "available": True,
-               "used": used, "limit": limit, "remaining": 0,
+               "used": used, "limit": limit, "remaining": 0, "needed": needed,
                "message": f"The deep-DNS key has used its full monthly allowance "
                           f"({used}/{limit}). Enter another key, or run without it."}
+    elif remaining is not None and remaining < needed:
+        # Enough allowance to start, not enough to finish: the pass would stop
+        # part way through and the scan would carry half a DNS history without
+        # ever saying so. Better to ask now.
+        out = {"state": "low", "ok": False, "available": True,
+               "used": used, "limit": limit, "remaining": remaining, "needed": needed,
+               "message": f"Only {remaining} deep-DNS queries are left this month and a "
+                          f"deep pass needs about {needed}. It would run out part way "
+                          f"through and return incomplete history."}
     else:
         out = {"state": "ok", "ok": True, "available": True,
-               "used": used, "limit": limit, "remaining": remaining,
+               "used": used, "limit": limit, "remaining": remaining, "needed": needed,
                "message": (f"{remaining} of {limit} deep-DNS queries left this month"
                            if remaining is not None else "Deep DNS is ready.")}
     return _cache_usage(key, out, now)

@@ -15,7 +15,14 @@
 @font-face{font-family:'Libertinus Serif';font-style:italic;font-weight:400;font-display:swap;src:url(../fonts/libertinus-400i.woff2) format('woff2')}
 @font-face{font-family:'Libertinus Serif';font-style:normal;font-weight:600;font-display:swap;src:url(../fonts/libertinus-600.woff2) format('woff2')}
 @font-face{font-family:'Libertinus Serif';font-style:normal;font-weight:700;font-display:swap;src:url(../fonts/libertinus-700.woff2) format('woff2')}
-@font-face{font-family:'Acme';font-style:normal;font-weight:400;font-display:swap;src:url(../fonts/acme-400.woff2) format('woff2')}
+/* Display face · Oswald, self hosted as the variable latin cuts (one file per
+   subset covers every weight in the 200..700 range). */
+@font-face{font-family:'Oswald';font-style:normal;font-weight:200 700;font-display:swap;
+  src:url(../fonts/oswald-latin.woff2) format('woff2');
+  unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'Oswald';font-style:normal;font-weight:200 700;font-display:swap;
+  src:url(../fonts/oswald-latin-ext.woff2) format('woff2');
+  unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
 
 /* ---- tokens --------------------------------------------------------------- */
 :root{
@@ -37,7 +44,7 @@
   --r:10px; --r-sm:7px; --r-xs:5px; --r-pill:999px;
   --sans:'Libertinus Serif',Georgia,'Times New Roman',serif;
   --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
-  --display:'Acme','Libertinus Serif',Georgia,sans-serif;
+  --display:'Oswald','Hanken Grotesk',system-ui,sans-serif;
   --fs-xs:12.5px; --fs-sm:13.5px; --fs-base:14.5px; --fs-md:16px;
   --fs-lg:20px; --fs-xl:25px; --fs-2xl:34px;
   --ease:cubic-bezier(.23,1,.32,1); --ease-io:cubic-bezier(.77,0,.175,1);
@@ -108,8 +115,10 @@ svg.ic{width:1em;height:1em;flex:none;vertical-align:-.14em}
   background:var(--surface);border-bottom:1px solid var(--border);
   position:sticky;top:0;z-index:var(--z-sticky);
 }
-.brand{display:flex;align-items:center;gap:9px;font-family:var(--display);font-weight:400;
-  font-size:var(--fs-lg);color:var(--ink);letter-spacing:.005em}
+/* Oswald is condensed, so the display text carries a touch more weight and
+   tracking than a grotesque would need at the same size. */
+.brand{display:flex;align-items:center;gap:9px;font-family:var(--display);font-weight:500;
+  font-size:var(--fs-lg);color:var(--ink);letter-spacing:.015em}
 .brand .mark{width:28px;height:28px;display:grid;place-items:center;color:var(--accent);
   background:var(--accent-weak);border-radius:var(--r-sm)}
 .brand .mark svg{width:18px;height:18px}

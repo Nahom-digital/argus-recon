@@ -11,6 +11,9 @@
 {% endblock %}
 
 {% block topbar_actions %}
+<button class="btn sm ghost" id="pdfBtn" title="Full scan report · print or save as PDF">
+  <svg class="ic"><use href="#i-printer"></use></svg> PDF
+</button>
 <a class="btn sm ghost" id="rawLink" href="{{ url_for('api_scan', scan_id=scan_id) }}" target="_blank" rel="noopener">
   <svg class="ic"><use href="#i-braces"></use></svg> JSON
 </a>
@@ -163,4 +166,5 @@
 <script src="{{ url_for('static', filename='js/graph.js', v=asset_v) }}"></script>
 <script src="{{ url_for('static', filename='js/cygraph.js', v=asset_v) }}"></script>
 <script src="{{ url_for('static', filename='js/scan.js', v=asset_v) }}"></script>
+<script src="{{ url_for('static', filename='js/report.js', v=asset_v) }}"></script>
 {% endblock %}

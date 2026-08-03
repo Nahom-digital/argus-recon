@@ -4,7 +4,7 @@
 .home{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
 .home-head{display:flex;align-items:flex-end;gap:20px;margin-bottom:8px}
 .home-head .lede{flex:1;min-width:0}
-.home-head h1{font-family:var(--display);font-weight:400;font-size:var(--fs-2xl);letter-spacing:0;margin-bottom:8px}
+.home-head h1{font-family:var(--display);font-weight:500;font-size:var(--fs-2xl);letter-spacing:.01em;margin-bottom:8px}
 .home-head p{color:var(--muted);font-size:var(--fs-md);max-width:60ch}
 
 /* new-scan bar */
