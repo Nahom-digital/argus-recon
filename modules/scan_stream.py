@@ -98,6 +98,41 @@ def stream_graph_doc(path: Path | str) -> dict:
     return _stream_doc(path, GRAPH_DROP)
 
 
+def panel_only(path: Path | str) -> dict:
+    """Every top-level field of the scan except `endpoints`, built in one pass.
+
+    This is the graph "shell": meta, subdomains, infra, secrets, files · the
+    small layers the graph hangs endpoints off. Kept separate from the endpoints
+    so the caller can stream those one at a time (iter_graph_endpoints) and keep
+    only the few thousand it will actually render, instead of holding the whole
+    array in memory the way stream_graph_doc does."""
+    panel = _Builder()
+    with open(path, "rb") as fh:
+        for prefix, event, value in ijson.parse(fh, use_float=True):
+            if prefix == "endpoints" and event in ("start_array", "end_array"):
+                continue
+            if prefix == "" and event == "map_key" and value == "endpoints":
+                continue
+            if prefix == "endpoints.item" or prefix.startswith("endpoints.item"):
+                continue
+            panel.event(event, value)
+    return panel.value or {}
+
+
+def iter_graph_endpoints(path: Path | str):
+    """Yield each endpoint, one at a time, with the graph-drop fields removed
+    (bodies/headers/DOM/notes/js_origin gone, `found_on` kept).
+
+    ijson.items builds each object with the parser's C backend · roughly twice
+    the throughput of feeding events to a Python ObjectBuilder · and because it
+    is a generator, peak memory is a single endpoint, not the whole array. The
+    caller decides what to retain, so a gigabyte scan never materialises its
+    endpoints list in the web process at all."""
+    with open(path, "rb") as fh:
+        for ep in ijson.items(fh, "endpoints.item", use_float=True):
+            yield {k: v for k, v in ep.items() if k not in GRAPH_DROP}
+
+
 def find_endpoint(path: Path | str, eid: str) -> dict | None:
     """The full record for one endpoint (bodies, headers, found-on, JS origin),
     located by streaming the array so the other tens of thousands never load."""

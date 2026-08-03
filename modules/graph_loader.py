@@ -49,6 +49,35 @@ def _ep_node_id(method: str, url: str) -> str:
     return "ep:" + short_hash(method, url)
 
 
+# Endpoint priority + node type live at module level so the streaming builder
+# (graph_from_scan_streaming) and the in-memory builder rank and classify an
+# endpoint identically · one source of truth, no drift between the two paths.
+def _ep_priority(ep) -> int:
+    """Lower sorts first · the most interesting endpoints survive the node cap."""
+    p = 0
+    if ep.get("classifications"):
+        p += 4
+    if ep["type"] in ("form", "xhr", "fetch"):
+        p += 3
+    if ep["type"] == "js":
+        p += 2
+    if ep["fields"]:
+        p += 1
+    if not ep["in_scope"]:
+        p -= 2
+    return -p
+
+
+def _ep_node_type(ep) -> str:
+    if not ep["in_scope"]:
+        return "External"
+    if ep["type"] in ("form", "xhr", "fetch"):
+        return "Request"
+    if ep["type"] == "js":
+        return "JS"
+    return "Endpoint"
+
+
 def graph_from_scan(data: dict, *, max_nodes: int = 4000,
                     max_edges: int | None = None) -> dict:
     """Build {nodes, edges, stats} from a scan dict.
@@ -156,28 +185,8 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000,
             get_index[ep["url"]] = _ep_node_id("GET", ep["url"])
 
     # Prioritise which endpoints to include if we bump into the node cap.
-    def priority(ep):
-        p = 0
-        if ep.get("classifications"):
-            p += 4
-        if ep["type"] in ("form", "xhr", "fetch"):
-            p += 3
-        if ep["type"] == "js":
-            p += 2
-        if ep["fields"]:
-            p += 1
-        if not ep["in_scope"]:
-            p -= 2
-        return -p
-
-    def ep_node_type(ep) -> str:
-        if not ep["in_scope"]:
-            return "External"
-        if ep["type"] in ("form", "xhr", "fetch"):
-            return "Request"
-        if ep["type"] == "js":
-            return "JS"
-        return "Endpoint"
+    priority = _ep_priority
+    ep_node_type = _ep_node_type
 
     # Keep room for the small, high-value layers built after the endpoints, so a
     # 46k-page crawl cannot starve secrets and files out of the view entirely.
@@ -280,6 +289,70 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000,
                       "total_nodes": sum(totals.values())}}
 
 
+def graph_from_scan_streaming(path, *, max_nodes: int = 4000,
+                              max_edges: int | None = None) -> dict:
+    """Bounded-memory equivalent of graph_from_scan for a scan too large to load.
+
+    graph_from_scan needs the whole endpoints list in memory · for a gigabyte
+    crawl that is what OOM-killed the build worker, so the graph "never loaded":
+    the process died, the proxy answered 502, and the page polled a build that
+    was never coming back. This walks the endpoints off disk one at a time and
+    keeps only the `max_nodes` highest-priority ones (a bounded heap), so peak
+    memory is the view budget no matter how big the file is · while still
+    counting every endpoint so stats.totals reports the true size of the scan.
+
+    The kept subset is then handed to graph_from_scan, which does the identical
+    node/edge construction. For a scan that fits under the budget the kept set is
+    every endpoint and the result is byte-for-byte what graph_from_scan(full_doc)
+    would have produced; only when the cap actually bites do the two differ, and
+    then only in which lowest-priority endpoints were dropped.
+    """
+    import heapq
+    from . import scan_stream
+
+    shell = scan_stream.panel_only(path)
+
+    # Bounded top-`max_nodes` selection by priority, plus true per-type totals
+    # over the whole array (kept or not). The heap holds at most max_nodes items:
+    # keyed by (-priority, seq) it is a max-heap on priority, so the lowest
+    # priority endpoint is evicted first once the cap is reached.
+    heap: list = []
+    seq = 0
+    ep_totals: dict[str, int] = {}
+    for ep in scan_stream.iter_graph_endpoints(path):
+        ep_totals[_ep_node_type(ep)] = ep_totals.get(_ep_node_type(ep), 0) + 1
+        nf = sum(1 for f in ep.get("fields", []) if f.get("name"))
+        if nf:
+            ep_totals["Field"] = ep_totals.get("Field", 0) + nf
+        item = (-_ep_priority(ep), seq, ep)
+        seq += 1
+        if len(heap) < max_nodes:
+            heapq.heappush(heap, item)
+        elif item < heap[0]:
+            heapq.heapreplace(heap, item)
+    truncated_eps = seq > len(heap)
+
+    # Build order does not affect correctness (nodes de-dupe by id), but feeding
+    # the survivors highest-priority-first matches graph_from_scan's sort so the
+    # node budget is spent the same way when structural nodes eat into it.
+    shell["endpoints"] = [ep for _p, _s, ep in
+                          sorted(heap, key=lambda t: (t[0], t[1]))]
+
+    g = graph_from_scan(shell, max_nodes=max_nodes, max_edges=max_edges)
+
+    # graph_from_scan only saw the survivors, so its endpoint-derived totals count
+    # the subset · replace them with the true counts gathered over the full stream
+    # so the legend reports the real surface. Spine/secret/file totals it computed
+    # from `shell` are already whole and are left alone.
+    stats = g["stats"]
+    for t, c in ep_totals.items():
+        stats["totals"][t] = max(stats["totals"].get(t, 0), c)
+    if truncated_eps:
+        stats["truncated"] = True
+    stats["total_nodes"] = sum(stats["totals"].values())
+    return g
+
+
 # --------------------------------------------------------------------------- #
 # Backend selection
 # --------------------------------------------------------------------------- #
@@ -344,11 +417,19 @@ def ping(**conn) -> bool:
     return active_backend() != "none"
 
 
-def _prepare(data: dict) -> tuple[dict, str, str]:
-    """graph_from_scan + scan metadata stamped onto every node's props."""
-    graph = graph_from_scan(data, max_nodes=10_000_000)   # no cap for the DB
-    scan_id = data["meta"]["scan_id"]
-    domain = data["meta"]["domain"]
+def _prepare(data: dict | None = None, *, graph: dict | None = None,
+             scan_id: str | None = None, domain: str | None = None
+             ) -> tuple[dict, str, str]:
+    """Stamp scan metadata onto every node's props, ready for a backend write.
+
+    Either build the graph from a full scan `data` dict (small scans · no node
+    cap, the DB holds everything), or accept a `graph` already built off disk
+    with a bounded pass (a gigabyte scan · so preparing the DB load does not have
+    to hold the whole document in memory the way graph_from_scan(data) would)."""
+    if graph is None:
+        graph = graph_from_scan(data, max_nodes=10_000_000)   # no cap for the DB
+        scan_id = data["meta"]["scan_id"]
+        domain = data["meta"]["domain"]
     for n in graph["nodes"]:
         n["props"] = {k: v for k, v in n["props"].items() if v is not None}
         n["props"]["scan_id"] = scan_id
@@ -357,14 +438,21 @@ def _prepare(data: dict) -> tuple[dict, str, str]:
     return graph, scan_id, domain
 
 
-def load(data: dict, *, wipe_scan: bool = True, backend: str | None = None, **conn) -> bool:
+def load(data: dict | None = None, *, graph: dict | None = None,
+         scan_id: str | None = None, domain: str | None = None,
+         wipe_scan: bool = True, backend: str | None = None, **conn) -> bool:
     """Push the scan graph into the selected backend. Returns True on success,
-    False if no backend is available or the write errors (never raises)."""
+    False if no backend is available or the write errors (never raises).
+
+    Pass a full `data` dict for a normal scan, or a prebuilt `graph` (plus its
+    `scan_id`/`domain`) for a scan too large to hold in memory · see _prepare."""
     b = backend or active_backend()
     if b == "neo4j":
-        return _neo4j_load(data, wipe_scan=wipe_scan, **conn)
+        return _neo4j_load(data, graph=graph, scan_id=scan_id, domain=domain,
+                           wipe_scan=wipe_scan, **conn)
     if b == "kuzu":
-        return _kuzu_load(data, wipe_scan=wipe_scan)
+        return _kuzu_load(data, graph=graph, scan_id=scan_id, domain=domain,
+                          wipe_scan=wipe_scan)
     log.info("no graph backend available · graph renders from JSON; "
              "scan queued for a later load")
     return False
@@ -413,9 +501,12 @@ def _neo4j_ping(uri=None, user=None, password=None) -> bool:
         return False
 
 
-def _neo4j_load(data: dict, *, wipe_scan: bool = True, **conn) -> bool:
+def _neo4j_load(data: dict | None = None, *, graph: dict | None = None,
+                scan_id: str | None = None, domain: str | None = None,
+                wipe_scan: bool = True, **conn) -> bool:
     t0 = time.time()
-    graph, scan_id, _domain = _prepare(data)
+    graph, scan_id, _domain = _prepare(data, graph=graph, scan_id=scan_id,
+                                       domain=domain)
     try:
         drv = _driver(conn.get("uri"), conn.get("user"), conn.get("password"))
         drv.verify_connectivity()
@@ -571,10 +662,13 @@ def _kuzu_conn():
 _KUZU_BATCH = 2000
 
 
-def _kuzu_load(data: dict, *, wipe_scan: bool = True) -> bool:
+def _kuzu_load(data: dict | None = None, *, graph: dict | None = None,
+               scan_id: str | None = None, domain: str | None = None,
+               wipe_scan: bool = True) -> bool:
     t0 = time.time()
     try:
-        graph, scan_id, _domain = _prepare(data)
+        graph, scan_id, _domain = _prepare(data, graph=graph, scan_id=scan_id,
+                                           domain=domain)
         node_rows = [{"id": n["id"], "sid": scan_id, "t": n["type"], "lbl": n["label"],
                       "p": _json.dumps({k: v for k, v in n["props"].items()
                                         if k not in ("scan_id", "domain")})}

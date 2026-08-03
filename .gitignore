@@ -9,6 +9,8 @@ scans/.access/
 # runtime cache / job-queue store and the embedded graph DB (derived from scans)
 scans/.argus.db*
 scans/.kuzu*
+# built graph payloads, cached per scan-file mtime (derived from scans)
+scans/.graphcache/
 !scans/.gitkeep
 .env
 # account store: password hashes, per-account allowances and the token signing

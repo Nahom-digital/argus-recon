@@ -779,6 +779,44 @@ def _graph_key(scan_id: str, max_nodes: int) -> tuple:
     return (scan_id, mtime, max_nodes)
 
 
+# Built graph payloads are also cached on disk (keyed by the scan file's mtime)
+# so the one-off cost of building a huge scan's graph · tens of seconds of
+# streaming · is paid once and survives a restart. The in-memory _GRAPH_DONE
+# above serves repeat views inside one process; this serves the first view after
+# a restart, and the JSON-built graph for a scan with no graph DB behind it.
+def _graph_cache_file(scan_id: str, max_nodes: int) -> Path:
+    try:
+        mtime = int((config.SCANS_DIR / f"{scan_id}.json").stat().st_mtime)
+    except OSError:
+        mtime = 0
+    return config.GRAPHCACHE_DIR / f"{scan_id}.{mtime}.{max_nodes}.json.gz"
+
+
+def _graph_cache_read(scan_id: str, max_nodes: int) -> dict | None:
+    f = _graph_cache_file(scan_id, max_nodes)
+    try:
+        with _gzip.open(f, "rt", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _graph_cache_write(scan_id: str, max_nodes: int, payload: dict) -> None:
+    try:
+        config.GRAPHCACHE_DIR.mkdir(parents=True, exist_ok=True)
+        f = _graph_cache_file(scan_id, max_nodes)
+        tmp = f.with_suffix(".tmp")
+        with _gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        tmp.replace(f)
+        # Drop stale builds for this scan (older mtimes / other budgets).
+        for old in config.GRAPHCACHE_DIR.glob(f"{scan_id}.*.json.gz"):
+            if old != f:
+                old.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
                          want_json: bool) -> dict:
     """The actual work · graph DB first, else derived from the scan document."""
@@ -787,14 +825,23 @@ def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
                                      max_edges=max_edges)
         if g:
             return g
-    # Build from JSON. A big scan is read off disk with the graph streaming reader
-    # (endpoints minus bodies/headers/DOM, `found_on` kept) so the builder works
-    # from a fraction of the file instead of the whole document in memory.
+    # A JSON-built graph depends only on the file and the node budget, so a build
+    # from a previous request/boot is reusable · check the on-disk cache first.
+    cached = _graph_cache_read(scan_id, max_nodes)
+    if cached is not None:
+        return cached
+    # Build from JSON. A big scan is walked off disk one endpoint at a time and
+    # only the highest-priority `max_nodes` are ever held in memory, so building
+    # the graph for a gigabyte scan costs the view budget in RAM, not the file.
     path = config.SCANS_DIR / f"{scan_id}.json"
-    data = scan_stream.stream_graph_doc(path) if _is_large(path) else _load(scan_id)
-    g = graph_loader.graph_from_scan(data, max_nodes=max_nodes,
-                                     max_edges=max_edges)
+    if _is_large(path):
+        g = graph_loader.graph_from_scan_streaming(path, max_nodes=max_nodes,
+                                                   max_edges=max_edges)
+    else:
+        g = graph_loader.graph_from_scan(_load(scan_id), max_nodes=max_nodes,
+                                         max_edges=max_edges)
     g["source"] = "json"
+    _graph_cache_write(scan_id, max_nodes, g)
     return g
 
 
@@ -1002,15 +1049,24 @@ def _drain_graph_queue():
                         store.dequeue_graph(sid)      # scan was deleted
                         continue
                     try:
-                        # Stream a big scan into the loader · this runs in a
-                        # background thread, but a gigabyte parsed here is the same
-                        # heap spike, so read it off disk like every other path.
+                        # A big scan is built into a bounded graph off disk and
+                        # loaded prebuilt · this runs in a background thread, but
+                        # holding a gigabyte document (or an uncapped graph of it)
+                        # here is the same heap spike that takes the box down, so
+                        # cap it to the view ceiling like every other path.
                         if _is_large(path):
-                            doc = scan_stream.stream_graph_doc(path)
+                            meta = scan_stream.stream_meta(path)
+                            graph = graph_loader.graph_from_scan_streaming(
+                                path, max_nodes=config.GRAPH_VIEW_MAX,
+                                max_edges=config.GRAPH_VIEW_MAX * 4)
+                            ok = graph_loader.load(
+                                graph=graph, scan_id=sid,
+                                domain=meta.get("domain", ""))
                         else:
                             with open(path, encoding="utf-8") as fh:
                                 doc = json.load(fh)
-                        if graph_loader.load(doc):
+                            ok = graph_loader.load(doc)
+                        if ok:
                             store.dequeue_graph(sid)
                             _GRAPH_CACHE["value"] = None
                         else:

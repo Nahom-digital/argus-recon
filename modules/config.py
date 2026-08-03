@@ -40,6 +40,11 @@ ENV_FILE = ROOT / ".env"
 SCANS_DIR.mkdir(exist_ok=True)
 WORDLISTS_DIR.mkdir(exist_ok=True)
 
+# Built graph payloads are cached here (keyed by the scan file's mtime) so the
+# one-off cost of building a huge scan's graph is paid once and survives a
+# restart · a later view of the same scan is served straight from disk.
+GRAPHCACHE_DIR = SCANS_DIR / ".graphcache"
+
 
 # --------------------------------------------------------------------------- #
 # .env · minimal loader (no external dependency). Keys already present in the
