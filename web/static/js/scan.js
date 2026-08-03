@@ -847,8 +847,24 @@ function renderTable() {
   const body = document.getElementById('tBody');
   const rows = filtered();
   const shown = rows.slice(0, ROW_CAP);
-  document.getElementById('tCount').textContent =
-    rows.length > ROW_CAP ? `showing ${ROW_CAP} of ${fmtNum(rows.length)}` : `${fmtNum(rows.length)} request${rows.length === 1 ? '' : 's'}`;
+  // On a huge crawl the page holds only the top slice the server sent (see
+  // endpoints_capped), not every endpoint · say so, and report the real total
+  // from meta so the count never pretends the table is the whole surface.
+  const capped = !!(SCAN && SCAN.endpoints_capped);
+  const loaded = (SCAN && SCAN.endpoints_shown) || (SCAN.endpoints || []).length;
+  const total = (SCAN && SCAN.endpoints_total) || rows.length;
+  const tc = document.getElementById('tCount');
+  const base = rows.length > ROW_CAP
+    ? `showing ${ROW_CAP} of ${fmtNum(rows.length)}`
+    : `${fmtNum(rows.length)} request${rows.length === 1 ? '' : 's'}`;
+  tc.textContent = capped
+    ? `${base} · top ${fmtNum(loaded)} of ${fmtNum(total)} loaded`
+    : base;
+  tc.title = capped
+    ? `This scan has ${fmtNum(total)} endpoints. The highest-priority `
+      + `${fmtNum(loaded)} are loaded here (classified requests, forms, JS and `
+      + `fielded endpoints first); filters and search apply to those.`
+    : '';
 
   if (!rows.length) {
     body.innerHTML = `<div class="empty" style="padding:40px">${icon('file-search')}

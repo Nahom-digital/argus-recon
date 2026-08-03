@@ -119,7 +119,7 @@ def panel_only(path: Path | str) -> dict:
     return panel.value or {}
 
 
-def iter_graph_endpoints(path: Path | str):
+def iter_graph_endpoints(path: Path | str, cap: int | None = None):
     """Yield each endpoint, one at a time, with the graph-drop fields removed
     (bodies/headers/DOM/notes/js_origin gone, `found_on` kept).
 
@@ -127,10 +127,56 @@ def iter_graph_endpoints(path: Path | str):
     the throughput of feeding events to a Python ObjectBuilder · and because it
     is a generator, peak memory is a single endpoint, not the whole array. The
     caller decides what to retain, so a gigabyte scan never materialises its
-    endpoints list in the web process at all."""
+    endpoints list in the web process at all.
+
+    `cap` stops after that many endpoints. The graph only renders a few thousand
+    nodes, so reading a million to choose them is wasted I/O · a bounded prefix
+    keeps a from-scratch graph build off a gigabyte file down to a few seconds."""
+    n = 0
     with open(path, "rb") as fh:
         for ep in ijson.items(fh, "endpoints.item", use_float=True):
             yield {k: v for k, v in ep.items() if k not in GRAPH_DROP}
+            n += 1
+            if cap is not None and n >= cap:
+                return
+
+
+def graph_shell(path: Path | str) -> dict:
+    """The scan "shell" · every top-level layer except `endpoints` · read by
+    stopping the parse the instant the endpoints array begins.
+
+    panel_only() reaches the same result but keeps parsing to end-of-file: even
+    skipping the endpoint events, ijson still tokenises every byte of the array,
+    so on a gigabyte scan it costs ~20s. This walks the top-level object and
+    breaks at the `endpoints` key, so its cost is the size of the shell, not the
+    file. With endpoints written last (schema.to_dict) the shell is complete;
+    on an older file that put endpoints in the middle the trailing layers
+    (files/js_files/secrets) are simply absent here and come from the store
+    panel instead."""
+    shell: dict = {}
+    cur_key: str | None = None
+    builder = None
+    depth = 0
+    with open(path, "rb") as fh:
+        for prefix, event, value in ijson.parse(fh, use_float=True):
+            if prefix == "" and event == "map_key":
+                if value == "endpoints":
+                    break
+                cur_key, builder, depth = value, None, 0
+                continue
+            if cur_key is None:
+                continue  # the root object's own start_map / end_map
+            if builder is None:
+                builder = _Builder()
+            builder.event(event, value)
+            if event in ("start_map", "start_array"):
+                depth += 1
+            elif event in ("end_map", "end_array"):
+                depth -= 1
+                if depth == 0:
+                    shell[cur_key] = builder.value
+                    cur_key, builder = None, None
+    return shell
 
 
 def find_endpoint(path: Path | str, eid: str) -> dict | None:

@@ -395,24 +395,47 @@ def _light_scan(d: dict) -> dict:
     return out
 
 
+def _annotate_view(doc: dict, cap: int | None) -> dict:
+    """Tell the scan page how much of the endpoint surface it is actually holding.
+
+    The table renders whatever endpoints are in this document; on a huge scan
+    that is a capped, highest-priority slice, not the whole crawl. `endpoints_
+    total` (the real count, from meta.stats) and `endpoints_capped` let the page
+    show "top N of TOTAL" instead of silently implying it has everything."""
+    stats = (doc.get("meta") or {}).get("stats") or {}
+    shown = len(doc.get("endpoints") or [])
+    total = stats.get("endpoints")
+    total = int(total) if total is not None else shown
+    doc["endpoints_shown"] = shown
+    doc["endpoints_total"] = total
+    doc["endpoints_capped"] = bool(cap and total > shown)
+    return doc
+
+
 def _light_view(scan_id: str) -> dict:
     """Light document for the scan page, served whole from the SQLite index when
-    it is fresh · panel data *and* the endpoint list.
+    it is fresh · panel data *and* a table-ready endpoint slice.
 
     Serving only the endpoints from the store was pointless: the panel came from
     `_load()`, which was called unconditionally, so every view of a 141 MB scan
     still parsed 141 MB of JSON (~20 s and a gigabyte of interpreter heap) before
     it could answer. The store now holds the panel document too, so a hit here
-    never opens the file at all."""
+    never opens the file at all.
+
+    The endpoint list is capped to config.VIEW_ENDPOINT_CAP (highest-priority
+    first): a deep crawl holds over a million endpoints · ~400 MB of JSON no
+    browser can lay out · so the page is served the slice worth showing and told
+    the true total, instead of a response that never finishes rendering."""
     path = config.SCANS_DIR / f"{scan_id}.json"
+    cap = config.VIEW_ENDPOINT_CAP or None
     try:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = 0
     if mtime:
-        cached = store.light_view(scan_id, mtime)
+        cached = store.light_view(scan_id, mtime, limit=cap)
         if cached is not None:
-            return cached
+            return _annotate_view(cached, cap)
     # Cache miss (first view of a new scan, or store disabled). A big scan is read
     # off disk with the streaming reader · panel + table-ready endpoints, never the
     # whole file in memory · and the already-light doc is what backfills the index.
@@ -422,7 +445,10 @@ def _light_view(scan_id: str) -> dict:
             store.index_scan(scan_id, light, path)
         except Exception:
             pass
-        return light
+        if cap and len(light.get("endpoints") or []) > cap:
+            light = dict(light)
+            light["endpoints"] = light["endpoints"][:cap]
+        return _annotate_view(light, cap)
     # Small scan: parse once, strip inline, and backfill the index so every later
     # view skips the file.
     doc = _load(scan_id)
@@ -431,7 +457,10 @@ def _light_view(scan_id: str) -> dict:
         store.index_scan(scan_id, doc, path)
     except Exception:
         pass
-    return light
+    if cap and len(light.get("endpoints") or []) > cap:
+        light = dict(light)
+        light["endpoints"] = light["endpoints"][:cap]
+    return _annotate_view(light, cap)
 
 
 # Summaries are read for every scan on the home page. Parsing a multi-MB file
@@ -817,9 +846,33 @@ def _graph_cache_write(scan_id: str, max_nodes: int, payload: dict) -> None:
         pass
 
 
+def _graph_from_store(scan_id: str, path: Path, max_nodes: int,
+                      max_edges: int) -> dict | None:
+    """Build the graph entirely from the SQLite index · the complete shell
+    (panel) plus the top-`max_nodes` endpoints by rank · so even a gigabyte scan
+    is served without opening the file. None if the store has not indexed it.
+
+    This is the whole reason a huge scan's graph now loads: the store already
+    holds a light, ranked copy of every endpoint, so choosing the few thousand
+    the view renders is an indexed `LIMIT`, not a walk over a million-record,
+    gigabyte JSON array."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    panel = store.get_panel(scan_id, mtime)
+    if panel is None:
+        return None
+    eps = store.light_endpoints(scan_id, mtime, limit=max_nodes)
+    if eps is None:
+        return None
+    return graph_loader.graph_from_endpoints(panel, eps, max_nodes=max_nodes,
+                                             max_edges=max_edges)
+
+
 def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
                          want_json: bool) -> dict:
-    """The actual work · graph DB first, else derived from the scan document."""
+    """The actual work · graph DB first, then the store, then the file."""
     if not want_json:
         g = graph_loader.fetch_graph(scan_id, max_nodes=max_nodes,
                                      max_edges=max_edges)
@@ -830,14 +883,25 @@ def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
     cached = _graph_cache_read(scan_id, max_nodes)
     if cached is not None:
         return cached
-    # Build from JSON. A big scan is walked off disk one endpoint at a time and
-    # only the highest-priority `max_nodes` are ever held in memory, so building
-    # the graph for a gigabyte scan costs the view budget in RAM, not the file.
     path = config.SCANS_DIR / f"{scan_id}.json"
     if _is_large(path):
-        g = graph_loader.graph_from_scan_streaming(path, max_nodes=max_nodes,
-                                                   max_edges=max_edges)
+        # Big scan · never load it whole. The store holds a ranked, light copy of
+        # every endpoint, so the graph is the complete shell plus the top-max_nodes
+        # endpoints by rank · an indexed LIMIT, not a walk over a gigabyte. (The
+        # light copy drops per-endpoint `found_on`, so the page→endpoint edges are
+        # not drawn; at a 6k-node budget over a million endpoints almost none of
+        # those pages are in view anyway.) Store miss falls back to a bounded read.
+        g = _graph_from_store(scan_id, path, max_nodes, max_edges)
+        if g is None:
+            try:
+                panel = store.get_panel(scan_id, path.stat().st_mtime)
+            except Exception:
+                panel = None
+            g = graph_loader.graph_from_scan_streaming(
+                path, max_nodes=max_nodes, max_edges=max_edges, panel=panel)
     else:
+        # Small scan · build from the whole document so the graph keeps every edge
+        # (found_on page links included). This is unchanged from before and fast.
         g = graph_loader.graph_from_scan(_load(scan_id), max_nodes=max_nodes,
                                          max_edges=max_edges)
     g["source"] = "json"

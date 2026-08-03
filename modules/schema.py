@@ -380,6 +380,13 @@ class ScanResult:
             "in_scope_endpoints": sum(1 for e in eps if e["in_scope"]),
             "out_of_scope_endpoints": sum(1 for e in eps if not e["in_scope"]),
             "forms": sum(1 for e in eps if e["type"] == "form"),
+            # The graph groups form/xhr/fetch endpoints under one "Request" node
+            # type and counts each named input as a "Field". Recording both here
+            # means the graph legend can report the true surface of a huge scan
+            # from `meta` alone · without re-walking a million endpoints to count.
+            "requests": sum(1 for e in eps if e["type"] in ("form", "xhr", "fetch")),
+            "fields": sum(sum(1 for f in (e.get("fields") or []) if f.get("name"))
+                          for e in eps),
             "js_files": len(self._js_files),
             "files": len(self._files),
             "secrets": len(self._secrets),
@@ -392,16 +399,22 @@ class ScanResult:
         self.meta["finished_at"] = _now_iso()
         self.meta["duration_sec"] = round(time.time() - self.started, 1)
         self.meta["stats"] = self._stats()
+        # `endpoints` is written LAST on purpose. It is the only array that scales
+        # without bound (a deep crawl is a million records / a gigabyte); every
+        # other layer stays small. Keeping it last means a reader that needs only
+        # the "shell" · meta, dns, subdomains, infra, files, js_files, secrets ·
+        # can stream forward and stop the moment the endpoints array begins,
+        # instead of parsing past a gigabyte to reach a trailing key.
         return {
             "meta": self.meta,
             "dns": self.dns,
             "subdomains": sorted(self._subdomains.values(), key=lambda r: r["host"]),
             "infra": {"ips": sorted(self._ips.values(), key=lambda r: r["ip"])},
-            "endpoints": sorted(self._endpoints.values(),
-                                key=lambda r: (not r["in_scope"], r["host"], r["url"])),
             "files": sorted(self._files.values(), key=lambda r: r["url"]),
             "js_files": sorted(self._js_files.values(), key=lambda r: r["url"]),
             "secrets": list(self._secrets.values()),
+            "endpoints": sorted(self._endpoints.values(),
+                                key=lambda r: (not r["in_scope"], r["host"], r["url"])),
         }
 
     def save(self, scans_dir: Path | None = None) -> Path:

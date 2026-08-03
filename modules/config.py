@@ -351,6 +351,14 @@ GRAPH_VIEW_EDGES = _int_env("ARGUS_GRAPH_VIEW_EDGES", 14000)
 # what the caller asked for.
 GRAPH_VIEW_MAX = _int_env("ARGUS_GRAPH_VIEW_MAX", 40000)
 
+# When a graph must be built from the scan file itself (no graph DB, no cached
+# rows in the store), stop reading the endpoints array after this many records.
+# The graph only ever renders GRAPH_VIEW_NODES of them, so reading a million to
+# pick a few thousand is pure latency · a bounded prefix keeps the first view of
+# a gigabyte scan under a few seconds. stats.totals still reports the real size
+# (it comes from meta), and the cut is flagged truncated.
+GRAPH_SCAN_CAP = _int_env("ARGUS_GRAPH_SCAN_CAP", 120000)
+
 # --------------------------------------------------------------------------- #
 # SQLite job/cache store (modules.store)
 #
@@ -377,6 +385,15 @@ WEB_PORT = _int_env("ARGUS_WEB_PORT", 7666)
 # reads only what a view needs straight off disk with a streaming parser
 # (modules.scan_stream). 0 disables the guard (always parse in memory).
 INMEM_MAX_BYTES = _int_env("ARGUS_INMEM_MAX_MB", 100) * 1024 * 1024
+
+# The scan page renders its request table from the endpoints the /view response
+# carries. A deep crawl holds over a million · serialising them all is a ~400 MB
+# response no browser can lay out, and is why a big scan's page "never loaded".
+# The page is served the highest-priority slice up to this cap (classified
+# requests, forms, JS and fielded endpoints first); the response still reports
+# the true endpoint total so the header shows the real surface, and the table
+# says it is a top-N view. 0 means no cap (old behaviour).
+VIEW_ENDPOINT_CAP = _int_env("ARGUS_VIEW_ENDPOINT_CAP", 8000)
 
 # --------------------------------------------------------------------------- #
 # Accounts / access control (modules.auth)

@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     scan_id  TEXT,
     eid      TEXT,
     light    TEXT,             -- json: the endpoint with heavy fields stripped
+    rank     INTEGER,          -- lower = more worth showing (see _ep_rank)
     PRIMARY KEY (scan_id, eid)
 );
 CREATE INDEX IF NOT EXISTS idx_endpoints_scan ON endpoints(scan_id);
@@ -110,7 +111,7 @@ def _connect() -> sqlite3.Connection | None:
 # shape and every query naming a new column fails · which, because every read
 # here is wrapped in `except: return None`, degrades silently into "the cache
 # never hits" rather than into an error anyone would see. Add them explicitly.
-_ADDED_COLUMNS = {"scans": {"panel": "TEXT"}}
+_ADDED_COLUMNS = {"scans": {"panel": "TEXT"}, "endpoints": {"rank": "INTEGER"}}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -126,6 +127,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     log.debug(f"store: added {table}.{col}")
                 except Exception as exc:
                     log.debug(f"store: could not add {table}.{col}: {exc}")
+    # The rank index has to be created after the column is guaranteed to exist
+    # (an old database gets `rank` from the ALTER above, not from _SCHEMA).
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_endpoints_rank "
+                     "ON endpoints(scan_id, rank)")
+    except Exception as exc:
+        log.debug(f"store: could not add idx_endpoints_rank: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -137,6 +145,25 @@ _HEAVY = ("resp_body", "req_body", "dom", "found_on",
 
 def _light_endpoint(e: dict) -> dict:
     return {k: v for k, v in e.items() if k not in _HEAVY}
+
+
+def _ep_rank(e: dict) -> int:
+    """Lower sorts first · the endpoints most worth putting in a capped view or
+    graph (classified requests, forms/xhr/fetch, JS, fielded, in-scope) get the
+    smallest rank. Mirrors modules.graph_loader._ep_priority so the scan page's
+    top-N table and the graph's node budget agree on what "interesting" means."""
+    p = 0
+    if e.get("classifications"):
+        p += 4
+    if e.get("type") in ("form", "xhr", "fetch"):
+        p += 3
+    if e.get("type") == "js":
+        p += 2
+    if e.get("fields"):
+        p += 1
+    if not e.get("in_scope"):
+        p -= 2
+    return -p
 
 
 def build_summary(doc: dict, *, scan_id: str, mtime: float, size: int) -> dict:
@@ -199,12 +226,13 @@ def index_scan(scan_id: str, doc: dict, path: Path) -> None:
                 (scan_id, meta.get("domain"), mtime, size, meta.get("started_at"),
                  meta.get("finished_at"), json.dumps(summary), panel, time.time()))
             conn.execute("DELETE FROM endpoints WHERE scan_id=?", (scan_id,))
-            rows = [(scan_id, e.get("id") or "", json.dumps(_light_endpoint(e)))
+            rows = [(scan_id, e.get("id") or "", json.dumps(_light_endpoint(e)),
+                     _ep_rank(e))
                     for e in doc.get("endpoints", []) if e.get("id")]
             if rows:
                 conn.executemany(
-                    "INSERT OR REPLACE INTO endpoints(scan_id,eid,light) VALUES(?,?,?)",
-                    rows)
+                    "INSERT OR REPLACE INTO endpoints(scan_id,eid,light,rank) "
+                    "VALUES(?,?,?,?)", rows)
     except Exception as exc:
         log.debug(f"index_scan failed for {scan_id}: {exc}")
 
@@ -224,28 +252,106 @@ def get_summary(scan_id: str, mtime: float) -> dict | None:
     return None
 
 
-def light_endpoints(scan_id: str, mtime: float) -> list[dict] | None:
-    """Cached light endpoint list, or None if the cache is missing/stale."""
+def _fresh(conn, scan_id: str, mtime: float) -> bool:
+    row = conn.execute("SELECT mtime FROM scans WHERE scan_id=?",
+                       (scan_id,)).fetchone()
+    return bool(row) and abs((row["mtime"] or 0) - mtime) <= 1e-6
+
+
+def light_endpoints(scan_id: str, mtime: float,
+                    limit: int | None = None) -> list[dict] | None:
+    """Cached light endpoints, or None if the cache is missing/stale.
+
+    With `limit` set, only the top-`limit` by rank are returned · the interesting
+    ones first (see _ep_rank), so a capped scan-page table or graph reads a few
+    thousand rows out of a million straight from SQLite instead of shipping the
+    whole array. None means every endpoint (back-compat)."""
     conn = _connect()
     if conn is None:
         return None
     try:
-        row = conn.execute("SELECT mtime FROM scans WHERE scan_id=?",
-                           (scan_id,)).fetchone()
-        if not row or abs((row["mtime"] or 0) - mtime) > 1e-6:
+        if not _fresh(conn, scan_id, mtime):
             return None
-        cur = conn.execute("SELECT light FROM endpoints WHERE scan_id=?", (scan_id,))
+        sql = "SELECT light FROM endpoints WHERE scan_id=? ORDER BY rank, rowid"
+        args: tuple = (scan_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            args = (scan_id, int(limit))
+        cur = conn.execute(sql, args)
         return [json.loads(r["light"]) for r in cur.fetchall()]
     except Exception:
         return None
 
 
-def light_view(scan_id: str, mtime: float) -> dict | None:
+def backfill_ranks(scan_id: str | None = None, batch: int = 5000) -> int:
+    """Populate endpoints.rank for rows that predate the column (rank IS NULL),
+    computing it from the already-stored light JSON · no scan file is opened, so
+    a million-endpoint scan indexed before ranking existed gets its interesting
+    endpoints (classified requests, forms, JS, fielded) sorted to the front of a
+    capped view/graph without re-reading the gigabyte file. Returns rows updated.
+
+    Streamed in batches so peak memory is one batch, not the whole endpoints
+    table · the exact spike this project exists to avoid."""
+    conn = _connect()
+    if conn is None:
+        return 0
+    where = "rank IS NULL"
+    pre: tuple = ()
+    if scan_id:
+        where += " AND scan_id=?"
+        pre = (scan_id,)
+    updated = 0
+    try:
+        while True:
+            rows = conn.execute(
+                f"SELECT rowid, light FROM endpoints WHERE {where} LIMIT ?",
+                (*pre, batch)).fetchall()
+            if not rows:
+                break
+            ups = []
+            for r in rows:
+                try:
+                    e = json.loads(r["light"])
+                except Exception:
+                    e = {}
+                ups.append((_ep_rank(e), r["rowid"]))
+            with conn:
+                conn.executemany("UPDATE endpoints SET rank=? WHERE rowid=?", ups)
+            updated += len(ups)
+            if len(rows) < batch:
+                break
+    except Exception as exc:
+        log.debug(f"backfill_ranks failed: {exc}")
+    return updated
+
+
+def get_panel(scan_id: str, mtime: float) -> dict | None:
+    """The scan's `panel` (everything but endpoints: meta, subdomains, infra,
+    files, js_files, secrets, dns) from cache, or None if missing/stale. This is
+    the complete graph "shell" · small no matter how big the crawl · so the graph
+    can be built without opening the scan file at all."""
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute("SELECT mtime, panel FROM scans WHERE scan_id=?",
+                           (scan_id,)).fetchone()
+        if not row or abs((row["mtime"] or 0) - mtime) > 1e-6 or not row["panel"]:
+            return None
+        return json.loads(row["panel"])
+    except Exception:
+        return None
+
+
+def light_view(scan_id: str, mtime: float,
+               limit: int | None = None) -> dict | None:
     """The whole scan-page document (panel + table-ready endpoints) from cache,
     or None if anything about it is missing or stale.
 
     This is the one that matters for a big scan: a complete hit here means the
-    multi-hundred-megabyte JSON file is never opened to render the page.
+    multi-hundred-megabyte JSON file is never opened to render the page. `limit`
+    caps the endpoint list to the top-N by rank (the rest of the page · counts,
+    panel, graph · still describe the full surface).
     """
     conn = _connect()
     if conn is None:
@@ -256,7 +362,12 @@ def light_view(scan_id: str, mtime: float) -> dict | None:
         if not row or abs((row["mtime"] or 0) - mtime) > 1e-6 or not row["panel"]:
             return None
         doc = json.loads(row["panel"])
-        cur = conn.execute("SELECT light FROM endpoints WHERE scan_id=?", (scan_id,))
+        sql = "SELECT light FROM endpoints WHERE scan_id=? ORDER BY rank, rowid"
+        args: tuple = (scan_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            args = (scan_id, int(limit))
+        cur = conn.execute(sql, args)
         doc["endpoints"] = [json.loads(r["light"]) for r in cur.fetchall()]
         return doc
     except Exception:

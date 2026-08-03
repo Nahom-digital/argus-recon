@@ -289,67 +289,117 @@ def graph_from_scan(data: dict, *, max_nodes: int = 4000,
                       "total_nodes": sum(totals.values())}}
 
 
-def graph_from_scan_streaming(path, *, max_nodes: int = 4000,
-                              max_edges: int | None = None) -> dict:
-    """Bounded-memory equivalent of graph_from_scan for a scan too large to load.
+def apply_meta_totals(g: dict, stats: dict) -> dict:
+    """Overwrite the graph's per-type totals with the whole-scan counts recorded
+    in `meta.stats`, so the legend reports the real surface even when only a
+    bounded subset of nodes was actually built.
 
-    graph_from_scan needs the whole endpoints list in memory · for a gigabyte
+    This is what lets a gigabyte scan's graph load fast: the true size of the
+    crawl is read from `meta` (one small object at the head of the file) instead
+    of by counting a million endpoints. A count absent from meta (an older scan
+    predating the enriched stats) is left as the builder's own tally · never
+    lowered · so the number shown is always at least what was drawn."""
+    if not stats:
+        return g
+    totals = g["stats"]["totals"]
+
+    def bump(key: str, val) -> None:
+        if val is not None:
+            totals[key] = max(int(totals.get(key, 0)), int(val))
+
+    bump("Subdomain", stats.get("subdomains"))
+    bump("IP", stats.get("ips"))
+    bump("Port", stats.get("open_ports"))
+    bump("Secret", stats.get("secrets"))
+    bump("File", stats.get("files"))
+    bump("JS", stats.get("js_files"))
+    bump("External", stats.get("out_of_scope_endpoints"))
+    bump("Request", stats.get("requests"))   # enriched stat; absent on old scans
+    bump("Field", stats.get("fields"))        # enriched stat; absent on old scans
+    in_scope = stats.get("in_scope_endpoints")
+    if in_scope is not None:
+        # Plain in-scope pages = in-scope endpoints that are neither JS nor a
+        # form/xhr/fetch request. (On an old scan without `requests`, Request is
+        # whatever the subset held · a small under-count folded into Endpoint.)
+        plain = int(in_scope) - int(totals.get("JS", 0)) - int(totals.get("Request", 0))
+        bump("Endpoint", max(0, plain))
+    totals.setdefault("Domain", 1)
+
+    total_ep = stats.get("endpoints")
+    if total_ep is not None:
+        built = sum(g["stats"]["by_type"].get(t, 0)
+                    for t in ("Endpoint", "Request", "JS", "External"))
+        if int(total_ep) > built:
+            g["stats"]["truncated"] = True
+    g["stats"]["total_nodes"] = sum(totals.values())
+    return g
+
+
+def graph_from_scan_streaming(path, *, max_nodes: int = 4000,
+                              max_edges: int | None = None,
+                              panel: dict | None = None,
+                              cap: int | None = None) -> dict:
+    """Build a bounded graph from a scan file without loading it whole · the
+    from-scratch path for a scan the store has not indexed and no graph DB holds.
+
+    graph_from_scan needs the entire endpoints list in memory · for a gigabyte
     crawl that is what OOM-killed the build worker, so the graph "never loaded":
     the process died, the proxy answered 502, and the page polled a build that
-    was never coming back. This walks the endpoints off disk one at a time and
-    keeps only the `max_nodes` highest-priority ones (a bounded heap), so peak
-    memory is the view budget no matter how big the file is · while still
-    counting every endpoint so stats.totals reports the true size of the scan.
+    was never coming back. This instead:
 
-    The kept subset is then handed to graph_from_scan, which does the identical
-    node/edge construction. For a scan that fits under the budget the kept set is
-    every endpoint and the result is byte-for-byte what graph_from_scan(full_doc)
-    would have produced; only when the cap actually bites do the two differ, and
-    then only in which lowest-priority endpoints were dropped.
+      * takes the shell (subdomains, infra, secrets, files) from the caller's
+        `panel` if given (the store's, complete and free), else reads it forward
+        off disk and stops at the endpoints array (scan_stream.graph_shell);
+      * reads at most `cap` endpoints (config.GRAPH_SCAN_CAP) and keeps the
+        `max_nodes` highest-priority ones in a bounded heap · peak memory is the
+        view budget, not the file;
+      * takes the real per-type totals from meta.stats, so the legend is accurate
+        without counting the endpoints it did not read.
     """
     import heapq
     from . import scan_stream
 
-    shell = scan_stream.panel_only(path)
+    shell = panel if panel is not None else scan_stream.graph_shell(path)
+    if cap is None:
+        cap = getattr(config, "GRAPH_SCAN_CAP", 120000)
 
-    # Bounded top-`max_nodes` selection by priority, plus true per-type totals
-    # over the whole array (kept or not). The heap holds at most max_nodes items:
-    # keyed by (-priority, seq) it is a max-heap on priority, so the lowest
-    # priority endpoint is evicted first once the cap is reached.
+    # Bounded top-`max_nodes` selection by priority. item[0] = goodness (higher is
+    # better), so a size-capped min-heap whose smallest is replaced when a better
+    # endpoint arrives keeps the best max_nodes.
     heap: list = []
     seq = 0
-    ep_totals: dict[str, int] = {}
-    for ep in scan_stream.iter_graph_endpoints(path):
-        ep_totals[_ep_node_type(ep)] = ep_totals.get(_ep_node_type(ep), 0) + 1
-        nf = sum(1 for f in ep.get("fields", []) if f.get("name"))
-        if nf:
-            ep_totals["Field"] = ep_totals.get("Field", 0) + nf
+    read = 0
+    for ep in scan_stream.iter_graph_endpoints(path, cap=cap):
+        read += 1
         item = (-_ep_priority(ep), seq, ep)
         seq += 1
         if len(heap) < max_nodes:
             heapq.heappush(heap, item)
-        elif item < heap[0]:
+        elif item > heap[0]:
             heapq.heapreplace(heap, item)
-    truncated_eps = seq > len(heap)
 
-    # Build order does not affect correctness (nodes de-dupe by id), but feeding
-    # the survivors highest-priority-first matches graph_from_scan's sort so the
-    # node budget is spent the same way when structural nodes eat into it.
-    shell["endpoints"] = [ep for _p, _s, ep in
-                          sorted(heap, key=lambda t: (t[0], t[1]))]
+    # Feed survivors highest-priority-first to match graph_from_scan's own sort so
+    # the node budget is spent the same way when structural nodes eat into it.
+    shell["endpoints"] = [ep for _g, _s, ep in
+                          sorted(heap, key=lambda t: (-t[0], t[1]))]
 
     g = graph_from_scan(shell, max_nodes=max_nodes, max_edges=max_edges)
+    apply_meta_totals(g, (shell.get("meta") or {}).get("stats") or {})
+    if read >= cap:                       # the cap bit · more endpoints exist
+        g["stats"]["truncated"] = True
+    return g
 
-    # graph_from_scan only saw the survivors, so its endpoint-derived totals count
-    # the subset · replace them with the true counts gathered over the full stream
-    # so the legend reports the real surface. Spine/secret/file totals it computed
-    # from `shell` are already whole and are left alone.
-    stats = g["stats"]
-    for t, c in ep_totals.items():
-        stats["totals"][t] = max(stats["totals"].get(t, 0), c)
-    if truncated_eps:
-        stats["truncated"] = True
-    stats["total_nodes"] = sum(stats["totals"].values())
+
+def graph_from_endpoints(shell: dict, endpoints: list, *, max_nodes: int = 4000,
+                         max_edges: int | None = None) -> dict:
+    """Build a graph from an already-selected endpoint subset (e.g. the store's
+    top-N by rank) plus the full shell. No file is opened · this is the fast path
+    the web server uses when the store has the scan indexed. Totals come from the
+    shell's meta.stats so the legend still describes the whole crawl."""
+    doc = dict(shell)
+    doc["endpoints"] = endpoints
+    g = graph_from_scan(doc, max_nodes=max_nodes, max_edges=max_edges)
+    apply_meta_totals(g, (shell.get("meta") or {}).get("stats") or {})
     return g
 
 
