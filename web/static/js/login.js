@@ -34,11 +34,12 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) return fail(data.error || `sign-in failed (${r.status})`);
-      // Only same-origin paths are followed · a ?next= pointing anywhere else
-      // would turn the login page into an open redirect.
+      // safeInApp strips the mount prefix (so BASE is not applied twice ·
+      // /scanner/scanner/…) and rejects anything that is not a clean same-origin
+      // in-app path, so a ?next= pointing off-site cannot turn this into an open
+      // redirect. BASE is prepended exactly once.
       const next = new URLSearchParams(location.search).get('next') || '';
-      const safe = /^\/[^/\\]/.test(next) ? next : '/';
-      location.href = BASE + safe;
+      location.href = BASE + safeInApp(next);
     } catch (e2) {
       fail('the dashboard did not respond');
     } finally {

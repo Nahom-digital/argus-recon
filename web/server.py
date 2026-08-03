@@ -156,6 +156,32 @@ def _compress(resp):
 
 
 @app.after_request
+def _security_headers(resp):
+    """Baseline hardening on every response. The dashboard is an authenticated
+    surface that a proxy now exposes to the internet, so:
+
+      * X-Frame-Options / frame-ancestors · it is never meant to be framed, so
+        deny it · that closes clickjacking of the login form and the admin area,
+      * X-Content-Type-Options: nosniff · a browser must not re-interpret a scan
+        JSON or an asset as something executable,
+      * Referrer-Policy: no-referrer · the URL can carry a ?next= and the session
+        lives on this origin; never leak either in a Referer to a third party,
+      * a conservative Permissions-Policy · this tool needs none of these APIs.
+    """
+    try:
+        h = resp.headers
+        h.setdefault("X-Frame-Options", "DENY")
+        h.setdefault("X-Content-Type-Options", "nosniff")
+        h.setdefault("Referrer-Policy", "no-referrer")
+        h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        h.setdefault("Permissions-Policy",
+                     "geolocation=(), microphone=(), camera=(), interest-cohort=()")
+    except Exception:
+        pass
+    return resp
+
+
+@app.after_request
 def _cache_control(resp):
     """HTML pages are sent no-cache so the browser always revalidates them and
     picks up the current ?v= asset token; the versioned static files it then
@@ -209,8 +235,26 @@ def _claims():
     return auth.verify_token(token) if token else None
 
 
+def _safe_next(raw: str | None) -> str:
+    """A prefix-less, in-app relative path safe to echo back into the login page's
+    ?next=. Strips the mount prefix (so the client cannot double it into
+    /scanner/scanner/…) and rejects anything that is not a clean same-origin path:
+    absolute URLs (http:, javascript:, data:), protocol-relative //host, backslash
+    tricks /\\host, and any control/whitespace smuggling. Mirrors safeInApp() on
+    the client so the value is normalised the same way on both sides."""
+    p = raw or "/"
+    root = request.script_root or ""
+    if root and (p == root or p.startswith(root + "/")):
+        p = p[len(root):] or "/"
+    if not p.startswith("/") or p[:2] in ("//", "/\\"):
+        return "/"
+    if any(c in p for c in "\x00\r\n\t \\"):
+        return "/"
+    return p
+
+
 def _login_redirect():
-    nxt = request.full_path if request.query_string else request.path
+    nxt = _safe_next(request.full_path if request.query_string else request.path)
     return redirect(url_for("login_page", next=nxt))
 
 

@@ -16,6 +16,33 @@ function icon(name, cls) {
 const BASE = (document.body.dataset.base || '').replace(/\/+$/, '');
 const withBase = (path) => BASE + path;
 
+/* stripBase(path) -> the path with the mount prefix removed, so it is relative
+   to the app root. location.pathname carries the proxy prefix (/scanner/…) but
+   the server, every in-app link and withBase() all work in prefix-less paths.
+   A value that still has the prefix, then fed back through BASE, is applied
+   twice (/scanner/scanner/…) · which is exactly the doubled post-login redirect
+   this undoes. */
+function stripBase(path) {
+  path = String(path || '');
+  if (BASE && (path === BASE || path.startsWith(BASE + '/'))) {
+    return path.slice(BASE.length) || '/';
+  }
+  return path;
+}
+
+/* safeInApp(next) -> a same-origin, in-app relative path that is safe to hand to
+   `location.href = BASE + …`, or '/' when the value is missing or points off the
+   app. The mount prefix is stripped first (so it is not doubled), then the value
+   must be a single-slash-rooted path: this rejects open-redirect vectors ·
+   protocol-relative //evil.com, backslash tricks /\evil.com or \/evil.com,
+   absolute URLs (https:, javascript:, data:), and control/whitespace smuggling. */
+function safeInApp(next) {
+  const p = stripBase(next);        // callers pass an already-decoded value
+  if (/[\u0000-\u001f\u007f-\u009f\s\\]/.test(p)) return '/';  // no control/whitespace/backslash
+  if (!/^\/[^/]/.test(p)) return '/';              // single-slash-rooted path only
+  return p;
+}
+
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
@@ -53,7 +80,10 @@ const AUTH = { required: false, user: null, csrf: '' };
 
 function goToLogin() {
   if (/\/login(\?|$)/.test(location.pathname)) return;
-  const next = encodeURIComponent(location.pathname + location.search);
+  // Store next as a prefix-less, app-relative path. location.pathname carries the
+  // mount prefix (/scanner/…); leaving it in makes the post-login redirect prepend
+  // BASE a second time (/scanner/scanner/…). stripBase + safeInApp normalise it.
+  const next = encodeURIComponent(safeInApp(location.pathname) + location.search);
   location.href = `${BASE}/login?next=${next}`;
 }
 
