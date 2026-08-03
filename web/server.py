@@ -873,7 +873,14 @@ def _graph_from_store(scan_id: str, path: Path, max_nodes: int,
 def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
                          want_json: bool) -> dict:
     """The actual work · graph DB first, then the store, then the file."""
-    if not want_json:
+    path = config.SCANS_DIR / f"{scan_id}.json"
+    large = _is_large(path)
+    # A small scan loaded into a graph DB is authoritative and fast, so use it.
+    # A large scan is deliberately NOT loaded into the DB (it is what OOM'd the
+    # worker · see _drain_graph_queue), and any partial rows a past failed load
+    # left behind would misreport its size · so a large scan's graph always comes
+    # from the store/JSON path, which reads its true totals from meta.
+    if not want_json and not large:
         g = graph_loader.fetch_graph(scan_id, max_nodes=max_nodes,
                                      max_edges=max_edges)
         if g:
@@ -883,8 +890,7 @@ def _build_graph_payload(scan_id: str, max_nodes: int, max_edges: int,
     cached = _graph_cache_read(scan_id, max_nodes)
     if cached is not None:
         return cached
-    path = config.SCANS_DIR / f"{scan_id}.json"
-    if _is_large(path):
+    if large:
         # Big scan · never load it whole. The store holds a ranked, light copy of
         # every endpoint, so the graph is the complete shell plus the top-max_nodes
         # endpoints by rank · an indexed LIMIT, not a walk over a gigabyte. (The
@@ -1112,24 +1118,21 @@ def _drain_graph_queue():
                     if not path.exists():
                         store.dequeue_graph(sid)      # scan was deleted
                         continue
+                    if _is_large(path):
+                        # A gigabyte crawl is not worth pushing into the embedded
+                        # graph DB · loading a million endpoints is exactly what
+                        # OOM'd this worker and pinned a core retrying forever. The
+                        # dashboard graph for a large scan is served fast from the
+                        # store/JSON path anyway, so drop it from the queue instead
+                        # of loading it.
+                        store.dequeue_graph(sid)
+                        continue
                     try:
-                        # A big scan is built into a bounded graph off disk and
-                        # loaded prebuilt · this runs in a background thread, but
-                        # holding a gigabyte document (or an uncapped graph of it)
-                        # here is the same heap spike that takes the box down, so
-                        # cap it to the view ceiling like every other path.
-                        if _is_large(path):
-                            meta = scan_stream.stream_meta(path)
-                            graph = graph_loader.graph_from_scan_streaming(
-                                path, max_nodes=config.GRAPH_VIEW_MAX,
-                                max_edges=config.GRAPH_VIEW_MAX * 4)
-                            ok = graph_loader.load(
-                                graph=graph, scan_id=sid,
-                                domain=meta.get("domain", ""))
-                        else:
-                            with open(path, encoding="utf-8") as fh:
-                                doc = json.load(fh)
-                            ok = graph_loader.load(doc)
+                        # Only small scans reach here (large ones were dequeued
+                        # above): parse and load the whole document.
+                        with open(path, encoding="utf-8") as fh:
+                            doc = json.load(fh)
+                        ok = graph_loader.load(doc)
                         if ok:
                             store.dequeue_graph(sid)
                             _GRAPH_CACHE["value"] = None
