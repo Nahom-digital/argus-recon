@@ -510,16 +510,26 @@ function createGraph(canvas, data, opts) {
   // secrets), keeping the Domain node as an anchor. Sibling subdomains reached
   // through a shared IP are not crossed into. An empty/absent list clears the
   // restriction and shows the whole graph.
-  function computeVisible(hosts) {
-    if (!hosts || !hosts.length) return null;
-    const wanted = new Set(hosts);
+  //
+  // `ip` narrows the address layer on top of that: only that address is kept, so
+  // the other addresses those hosts resolve to disappear · and with them their
+  // Port and ASN nodes, which are only ever reachable through an address. Asking
+  // for one IP and still being shown every IP (with every port and AS) was the
+  // filter's oldest lie.
+  function computeVisible(hosts, ip) {
+    const wanted = new Set(hosts || []);
+    if (!wanted.size && !ip) return null;
     const subNodes = nodes.filter(n => n.type === 'Subdomain' && wanted.has(n.label));
-    if (!subNodes.length) return new Set();         // unknown host(s) -> hide all
+    const ipNode = ip ? nodes.find(n => n.type === 'IP' && n.label === ip) : null;
+    if (!subNodes.length && !ipNode) return new Set();   // nothing matched -> hide all
     const subIds = new Set(subNodes.map(n => n.id));
     const domNode = nodes.find(n => n.type === 'Domain');
     const keep = new Set(subIds);
     if (domNode) keep.add(domNode.id);
+    // the address is a root of its own, so its ports and AS survive even when
+    // no subdomain of this scan is known to resolve to it
     const stack = [...subIds];
+    if (ipNode) { keep.add(ipNode.id); stack.push(ipNode.id); }
     while (stack.length) {
       const id = stack.pop();
       for (const nb of (adj.get(id) || [])) {
@@ -528,6 +538,9 @@ function createGraph(canvas, data, opts) {
         if (!m) continue;
         if (m.type === 'Domain') { keep.add(nb); continue; }        // anchor only
         if (m.type === 'Subdomain' && !subIds.has(nb)) continue;    // a sibling host (shared IP) · don't cross into it
+        if (m.type === 'IP' && ip && m.label !== ip) continue;      // another address · its ports and AS go with it
+        // and no "+N more IP" marker either · there is nothing left behind it
+        if (m.type === 'More' && ip && m.childType === 'IP') continue;
         keep.add(nb); stack.push(nb);
       }
     }
@@ -565,9 +578,9 @@ function createGraph(canvas, data, opts) {
     for (const n of nodes) if (visible(n)) n.seeded = true;
   }
 
-  /* setFilter({hosts, detail}) · the single entry point the dashboard uses.
+  /* setFilter({hosts, ip, detail}) · the single entry point the dashboard uses.
      `detail` unlocks DETAIL_TYPES; it is only ever true when exactly one
-     subdomain is selected. */
+     subdomain is selected. `ip` scopes the address layer to one address. */
   function setFilter(f) {
     f = f || {};
     const wantDetail = !!f.detail;
@@ -575,7 +588,7 @@ function createGraph(canvas, data, opts) {
     detailUnlocked = wantDetail;
     // reveal the detail layers on unlock, even if they were toggled off before
     if (justUnlocked) DETAIL_TYPES.forEach(t => hidden.delete(t));
-    hostVisibleIds = computeVisible(f.hosts);
+    hostVisibleIds = computeVisible(f.hosts, f.ip || null);
     if (selected && !visible(selected)) {
       selected = null; locked = false; if (card) card.classList.remove('show');
     }
@@ -689,6 +702,13 @@ function createGraph(canvas, data, opts) {
     fit, reheat, buildLegend, activate, filterHost, setFilter,
     stats: data.stats,
     detailUnlocked: () => detailUnlocked,
+    /* What is actually on screen right now, by type · what the filters resolved
+       to, as opposed to the legend's scan-wide totals. */
+    visibleCounts() {
+      const out = {};
+      for (const n of visList) out[n.type] = (out[n.type] || 0) + 1;
+      return out;
+    },
     /* What is currently paged and how far each group has been opened. */
     pages: () => pageGroups.map(g => ({
       parent: g.parent.label, type: g.type,

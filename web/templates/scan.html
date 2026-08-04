@@ -24,6 +24,14 @@
 
   <!-- LEFT PANEL -->
   <aside class="side" id="side">
+    <!-- fold the whole panel away; the rail on the left edge brings it back -->
+    <div class="side-top">
+      <span class="side-top-t">Panel</span>
+      <button class="btn icon sm ghost" id="sideCollapse" aria-expanded="true" aria-controls="side"
+              title="Hide the panel · give the graph the full width">
+        <svg class="ic"><use href="#i-chevron-left"></use></svg>
+      </button>
+    </div>
     <div class="side-sec" data-sec="overview">
       <button class="sh"><svg class="ic lead"><use href="#i-radar-2"></use></svg>
         <h3>Overview</h3><svg class="ic chev"><use href="#i-chevron-down"></use></svg></button>
@@ -79,6 +87,12 @@
   <!-- drag to resize the left panel width (mirrors the graph/table splitter) -->
   <div class="side-resize" id="sideResize" role="separator" aria-orientation="vertical"
        tabindex="0" title="Drag to resize the panel · double-click to reset"></div>
+
+  <!-- restore rail: only shown while the left panel is hidden -->
+  <button class="side-restore" id="sideRestore" hidden aria-controls="side" aria-expanded="false"
+          title="Show the panel">
+    <svg class="ic"><use href="#i-chevron-right"></use></svg>
+  </button>
 
   <!-- MAIN -->
   <section class="main">
@@ -145,16 +159,30 @@
         <select class="input" id="statusFilter" aria-label="Status filter">
           <option value="">all status</option>
         </select>
+        <!-- which pass found it: crawler, JS analysis, wayback, robots, sitemap … -->
+        <select class="input" id="sourceFilter" aria-label="Discovery filter"
+                title="Filter by what discovered the endpoint · crawler, JS analysis, wayback, robots …">
+          <option value="">all findings</option>
+        </select>
         <div class="fchip" data-cls="1" id="clsToggle">
           <svg class="ic" style="width:13px;height:13px"><use href="#i-shield-half-filled"></use></svg>classified only
         </div>
         <div class="tcount" id="tCount"></div>
+        <button class="btn icon sm" id="tCollapse"
+                title="Minimise the endpoint list · give the graph the full height">
+          <svg class="ic"><use href="#i-chevron-down"></use></svg>
+        </button>
       </div>
       <div class="thead">
         <span>Method</span><span>URL</span><span>Type</span><span>Classification</span><span style="text-align:right">Status</span>
       </div>
       <div class="tbody" id="tBody"></div>
     </div>
+
+    <!-- restore strip: only shown while the endpoint list is minimised -->
+    <button class="table-restore" id="tableRestore" hidden>
+      <svg class="ic"><use href="#i-chevron-up"></use></svg> Show endpoints
+    </button>
   </section>
 
   <!-- FULL-WIDTH DETAIL VIEW (toggled from the graph's expand button) -->

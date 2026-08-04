@@ -316,7 +316,7 @@ function createCyGraph(container, data, opts) {
     const justUnlocked = wantDetail && !detailUnlocked;
     detailUnlocked = wantDetail;
     if (justUnlocked) CY_DETAIL_TYPES.forEach(t => hidden.delete(t));
-    hostVisibleIds = computeVisible(f.hosts);
+    hostVisibleIds = computeVisible(f.hosts, f.ip || null);
     if (selected && hostVisibleIds && !hostVisibleIds.has(selected.id())) clearSelect();
     applyVisibility();
     if (legendEl) buildLegend(legendEl);
@@ -326,16 +326,22 @@ function createCyGraph(container, data, opts) {
 
   /* Same subtree rule as the canvas renderer: keep each selected Subdomain and
      everything hanging off it, with the Domain as an anchor; don't cross into a
-     sibling subdomain reached only through a shared IP. */
-  function computeVisible(hosts) {
-    if (!hosts || !hosts.length) return null;
-    const wanted = new Set(hosts);
+     sibling subdomain reached only through a shared IP. And, when an address is
+     held, keep that address alone at the IP layer · the other addresses go, and
+     their Port and ASN nodes (only reachable through an address) go with them. */
+  function computeVisible(hosts, ip) {
+    const wanted = new Set(hosts || []);
+    if (!wanted.size && !ip) return null;
     const subs = cy.nodes().filter(n => n.data('ntype') === 'Subdomain' && wanted.has(n.data('label')));
-    if (!subs.length) return new Set();
+    const ipNode = ip
+      ? cy.nodes().filter(n => n.data('ntype') === 'IP' && n.data('label') === ip)
+      : null;
+    if (!subs.length && !(ipNode && ipNode.length)) return new Set();
     const subIds = new Set(subs.map(n => n.id()));
     const keep = new Set(subIds);
     const dom = cy.nodes('.Domain'); if (dom.length) keep.add(dom.id());
     const stack = [...subIds];
+    if (ipNode && ipNode.length) { keep.add(ipNode[0].id()); stack.push(ipNode[0].id()); }
     while (stack.length) {
       const id = stack.pop();
       cy.getElementById(id).neighborhood('node').forEach(m => {
@@ -344,6 +350,8 @@ function createCyGraph(container, data, opts) {
         const t = m.data('ntype');
         if (t === 'Domain') { keep.add(mid); return; }
         if (t === 'Subdomain' && !subIds.has(mid)) return;
+        if (t === 'IP' && ip && m.data('label') !== ip) return;
+        if (t === 'More' && ip && m.data('childType') === 'IP') return;
         keep.add(mid); stack.push(mid);
       });
     }
@@ -370,6 +378,16 @@ function createCyGraph(container, data, opts) {
     stats: data.stats,
     detailUnlocked: () => detailUnlocked,
     focusHost,
+    /* Same reading as the canvas engine: what the filters left on screen. */
+    visibleCounts() {
+      const out = {};
+      cy.nodes().forEach(n => {
+        if (n.style('display') === 'none') return;
+        const t = n.data('ntype');
+        out[t] = (out[t] || 0) + 1;
+      });
+      return out;
+    },
     /* Same paging surface as the canvas engine, so both behave alike. */
     pages: () => [...groups.entries()].map(([id, g]) => ({
       parent: g.parent, type: g.type, shown: g.shown, total: g.children.length,

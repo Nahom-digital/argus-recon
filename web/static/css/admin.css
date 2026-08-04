@@ -20,6 +20,10 @@
 .auth-submit{width:100%;justify-content:center;height:36px}
 .auth-error{display:flex;align-items:center;gap:7px;font-size:var(--fs-sm);color:var(--danger);
   background:var(--sev-high-bg);border-radius:var(--r-sm);padding:8px 10px}
+/* `display:flex` outranks the `hidden` attribute, so the empty error box drew as
+   a bare coloured bar between the password field and the submit button on every
+   fresh visit. It only exists once there is something to report. */
+.auth-error[hidden]{display:none}
 .auth-foot{font-size:var(--fs-xs);color:var(--faint);line-height:1.5;text-align:center}
 
 /* ---- admin shell ----------------------------------------------------------

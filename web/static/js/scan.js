@@ -7,7 +7,7 @@ const ROW_CAP = 1500;
 const GRAPH_LAZY = 500;              // above this, defer physics until activated
 let SCAN = null, GRAPH = null, detailMode = false;
 const F = {
-  search: '', type: '', status: '', scope: 'in', classifiedOnly: false,
+  search: '', type: '', status: '', source: '', scope: 'in', classifiedOnly: false,
   host: null, ip: null,
   // Section filters · each narrows one section's list, nothing else. The left
   // panel and the full-width detail view read the same state, so a filter set
@@ -41,6 +41,8 @@ async function init() {
   wireSections();
   wireGraphSplitter();
   wireSideSplitter();
+  wireSideCollapse();
+  wireTableCollapse();
   showLoading();
 
   // Both requests go out together, but the page does not wait for both before
@@ -60,6 +62,7 @@ async function init() {
     buildIpSeenIndex(scan);
     renderPanel(scan);
     buildStatusFilter();
+    buildSourceFilter();
     buildHostFilter();
     buildIpFilter();
     renderTable();
@@ -954,6 +957,15 @@ function matchStatus(code) {
   if (/^\dxx$/.test(F.status)) return code && Math.floor(code / 100) === +F.status[0];
   return String(code) === F.status;
 }
+/* Which pass found the endpoint · an endpoint can carry several sources, so it
+   matches if any of them is the one asked for. "none" is the escape hatch for
+   the records that never recorded where they came from. */
+function matchSource(sources) {
+  if (!F.source) return true;
+  const list = sources || [];
+  if (F.source === 'none') return !list.length;
+  return list.includes(F.source);
+}
 
 function filtered() {
   const q = F.search.toLowerCase();
@@ -962,6 +974,7 @@ function filtered() {
     if (F.classifiedOnly && !(e.classifications && e.classifications.length)) return false;
     if (!matchType(e.type)) return false;
     if (!matchStatus(e.status)) return false;
+    if (!matchSource(e.sources)) return false;
     if (F.host && e.host !== F.host) return false;
     if (F.ip && !(IP_HOSTS.get(F.ip) || new Set()).has(e.host)) return false;
     if (q) {
@@ -987,6 +1000,39 @@ function buildStatusFilter() {
   [...codes].sort((a, b) => a - b).forEach(c => opts.push(`<option value="${c}">${c}</option>`));
   if (hasNone) opts.push('<option value="none">no status</option>');
   sel.innerHTML = opts.join('');
+}
+
+/* Discovery filter · what actually found each endpoint (crawler, JS analysis,
+   wayback, robots, sitemap, deep crawl …). Built from the source codes present
+   in this scan, busiest first and spelled out with the label the source chips
+   use, so the dropdown reads as findings rather than as one-letter codes.
+
+   An endpoint can be found by more than one pass, so the counts add up to more
+   than the endpoint total · each option says how many endpoints that pass
+   contributed to, which is the question being asked. */
+function buildSourceFilter() {
+  const sel = document.getElementById('sourceFilter');
+  if (!sel) return;
+  const eps = SCAN.endpoints || [];
+  const counts = new Map();
+  let none = 0;
+  eps.forEach(e => {
+    const srcs = e.sources || [];
+    if (!srcs.length) { none++; return; }
+    srcs.forEach(sc => counts.set(sc, (counts.get(sc) || 0) + 1));
+  });
+  const opts = [`<option value="">all findings (${fmtNum(eps.length)})</option>`];
+  [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+    .forEach(([sc, n]) => {
+      const label = sourceMeta(sc).label;
+      const text = label && label !== sc ? `${label} · ${sc} (${fmtNum(n)})` : `${sc} (${fmtNum(n)})`;
+      opts.push(`<option value="${esc(sc)}">${esc(text)}</option>`);
+    });
+  if (none) opts.push(`<option value="none">no source recorded (${fmtNum(none)})</option>`);
+  sel.innerHTML = opts.join('');
+  sel.disabled = !counts.size && !none;
+  sel.value = F.source || '';
 }
 
 /* Domain / subdomain filter · every host seen in this scan (apex first).
@@ -1202,6 +1248,8 @@ function wireTableControls() {
 
   document.getElementById('typeFilter').addEventListener('change', e => { F.type = e.target.value; renderTable(); });
   document.getElementById('statusFilter').addEventListener('change', e => { F.status = e.target.value; renderTable(); });
+  const src = document.getElementById('sourceFilter');
+  if (src) src.addEventListener('change', e => { F.source = e.target.value; renderTable(); });
 
   const host = document.getElementById('hostFilter');
   if (host) host.addEventListener('change', e => setHostFilter(e.target.value));
@@ -1281,11 +1329,18 @@ function syncFilterUI() {
 /* Graph scope: a held subdomain wins as the anchor (its subtree, detail
    unlocked). An IP alone shows every host on it (detail locked). With both held
    the host is guaranteed to sit on the IP, so the host subtree is the
-   intersection. */
+   intersection.
+
+   The address itself is passed through as well, not just the hosts on it. A host
+   usually resolves to several addresses, so scoping by hosts alone still drew
+   every one of those addresses · and, hanging off them, their ports and their
+   announcing AS. With `ip` set the graph keeps that one address and nothing
+   else at that layer, which takes the other addresses' ports and AS nodes out
+   with them. */
 function syncGraphFilter() {
   if (!GRAPH) return;
   const hosts = F.host ? [F.host] : F.ip ? hostsOfIp(F.ip) : null;
-  GRAPH.setFilter({ hosts, detail: !!F.host });
+  GRAPH.setFilter({ hosts, ip: F.ip || null, detail: !!F.host });
 }
 
 /* ---- side sections collapse ---------------------------------------------- */
@@ -1676,12 +1731,25 @@ function setGraphH(px, persist) {
   return v;
 }
 function setCollapsed(on, persist) {
-  document.querySelector('.main').classList.toggle('graph-collapsed', on);
+  const main = document.querySelector('.main');
+  // the graph and the endpoint list share the column · folding one away brings
+  // the other back rather than leaving an empty page
+  if (on && main.classList.contains('table-collapsed')) setTableCollapsed(false, persist);
+  main.classList.toggle('graph-collapsed', on);
   document.getElementById('graphRestore').hidden = !on;
   const btn = document.getElementById('gCollapse');
   if (btn) btn.setAttribute('title', on ? 'Show graph' : 'Collapse graph · give the table the full height');
   if (persist) { try { localStorage.setItem(GRAPH_COLLAPSED_KEY, on ? '1' : '0'); } catch (e) {} }
-  if (!on && GRAPH) requestAnimationFrame(() => GRAPH.fit());
+  if (!on) refitGraph();
+}
+
+/* Re-frame the graph after a pane has been folded away or brought back. The
+   renderer only learns its new size from a ResizeObserver, so a single frame is
+   not always enough · frame it now, and again once the resize has landed. */
+function refitGraph() {
+  if (!GRAPH) return;
+  requestAnimationFrame(() => { if (GRAPH) GRAPH.fit(); });
+  setTimeout(() => { if (GRAPH) GRAPH.fit(); }, 240);
 }
 
 function wireGraphSplitter() {
@@ -1802,6 +1870,65 @@ function wireSideSplitter() {
     if (e.key === 'ArrowLeft') { setSideW(cur - 24, true); e.preventDefault(); if (GRAPH) GRAPH.fit(); }
     else if (e.key === 'ArrowRight') { setSideW(cur + 24, true); e.preventDefault(); if (GRAPH) GRAPH.fit(); }
   });
+}
+
+/* ---- fold the left panel away ---------------------------------------------
+   The panel can be narrowed by dragging, but a wide graph wants the whole page.
+   The header's left chevron takes the panel out of the layout entirely; the rail
+   it leaves on the viewport's left edge (a right chevron) brings it back. The
+   choice is remembered per browser, like the two splitters. */
+const SIDE_COLLAPSED_KEY = 'argus-side-collapsed';
+
+function setSideCollapsed(on, persist) {
+  const layout = document.querySelector('.scan-layout');
+  if (!layout) return;
+  layout.classList.toggle('side-collapsed', on);
+  const restore = document.getElementById('sideRestore');
+  if (restore) { restore.hidden = !on; restore.setAttribute('aria-expanded', on ? 'false' : 'true'); }
+  const btn = document.getElementById('sideCollapse');
+  if (btn) btn.setAttribute('aria-expanded', on ? 'false' : 'true');
+  if (persist) { try { localStorage.setItem(SIDE_COLLAPSED_KEY, on ? '1' : '0'); } catch (e) {} }
+  refitGraph();
+}
+
+function wireSideCollapse() {
+  let saved = false;
+  try { saved = localStorage.getItem(SIDE_COLLAPSED_KEY) === '1'; } catch (e) {}
+  setSideCollapsed(saved, false);
+  const btn = document.getElementById('sideCollapse');
+  if (btn) btn.addEventListener('click', () => setSideCollapsed(true, true));
+  const restore = document.getElementById('sideRestore');
+  if (restore) restore.addEventListener('click', () => setSideCollapsed(false, true));
+}
+
+/* ---- fold the endpoint list away ------------------------------------------
+   Same bargain the graph's own collapse makes, in the other direction: the down
+   chevron in the filter bar minimises the list and hands its height to the
+   graph, and the strip left behind (an up chevron) restores it. With the left
+   panel folded away too, the graph has the whole viewport. */
+const TABLE_COLLAPSED_KEY = 'argus-table-collapsed';
+
+function setTableCollapsed(on, persist) {
+  const main = document.querySelector('.main');
+  if (!main) return;
+  if (on && main.classList.contains('graph-collapsed')) setCollapsed(false, persist);
+  main.classList.toggle('table-collapsed', on);
+  const restore = document.getElementById('tableRestore');
+  if (restore) restore.hidden = !on;
+  const btn = document.getElementById('tCollapse');
+  if (btn) btn.setAttribute('aria-expanded', on ? 'false' : 'true');
+  if (persist) { try { localStorage.setItem(TABLE_COLLAPSED_KEY, on ? '1' : '0'); } catch (e) {} }
+  refitGraph();
+}
+
+function wireTableCollapse() {
+  let saved = false;
+  try { saved = localStorage.getItem(TABLE_COLLAPSED_KEY) === '1'; } catch (e) {}
+  if (saved) setTableCollapsed(true, false);
+  const btn = document.getElementById('tCollapse');
+  if (btn) btn.addEventListener('click', () => setTableCollapsed(true, true));
+  const restore = document.getElementById('tableRestore');
+  if (restore) restore.addEventListener('click', () => setTableCollapsed(false, true));
 }
 
 /* ---- graph ----------------------------------------------------------------

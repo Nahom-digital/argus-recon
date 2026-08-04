@@ -19,6 +19,35 @@
 
 /* ---- left panel ----------------------------------------------------------- */
 .side{background:var(--surface-2);border-right:1px solid var(--border);overflow-y:auto;overflow-x:hidden}
+/* panel header · carries the control that folds the whole panel away. Sticky, so
+   the way back out is reachable however far down the sections are scrolled. */
+.side-top{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:8px;
+  padding:6px 10px 6px 16px;background:var(--surface-2);border-bottom:1px solid var(--border)}
+.side-top-t{flex:1;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--faint)}
+
+/* Panel hidden: the grid drops to a single column and the main column takes the
+   whole width. The rail below is the only thing left of it.
+
+   One column, not `0 1fr`: a display:none panel leaves the grid entirely, so the
+   main column would be auto-placed into that first (zero-wide) track and squeeze
+   itself down to its own min-content. */
+.scan-layout.side-collapsed{grid-template-columns:1fr}
+.scan-layout.side-collapsed .side,
+.scan-layout.side-collapsed .side-resize{display:none}
+/* leave the rail its own strip, so it never sits on top of the first column of
+   the table or on the graph's own controls */
+.scan-layout.side-collapsed .main{padding-left:21px}
+.side-restore{position:absolute;left:0;top:50%;transform:translateY(-50%);z-index:7;
+  display:flex;align-items:center;justify-content:center;width:20px;height:66px;padding:0;
+  background:var(--surface-2);border:1px solid var(--border);border-left:none;
+  border-radius:0 var(--r-sm) var(--r-sm) 0;color:var(--muted);cursor:pointer;
+  transition:background .12s var(--ease),color .12s var(--ease)}
+.side-restore svg{width:14px;height:14px}
+.side-restore:hover{background:var(--hover);color:var(--ink-2)}
+.side-restore:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.side-restore[hidden]{display:none}
+.scan-layout.detail-mode .side-restore{display:none}
 .side-sec{border-bottom:1px solid var(--border)}
 .side-sec > .sh{display:flex;align-items:center;gap:9px;width:100%;padding:12px 16px;cursor:pointer;
   background:none;border:none;font:inherit;color:var(--ink);text-align:left;
@@ -163,6 +192,18 @@
 
 /* ---- requests table ------------------------------------------------------- */
 .table-wrap{flex:1;min-height:0;display:flex;flex-direction:column;background:var(--surface)}
+/* Endpoint list minimised · the graph takes the height the table gave up, and
+   with the left panel folded away too it has the whole viewport. */
+.main.table-collapsed .table-wrap,
+.main.table-collapsed .graph-resize{display:none}
+.main.table-collapsed .graph-wrap{height:auto;flex:1;border-bottom:none}
+.table-restore{display:none;align-items:center;justify-content:center;gap:8px;flex:none;width:100%;
+  height:34px;font:inherit;font-size:var(--fs-xs);font-weight:500;color:var(--muted);
+  background:var(--surface-2);border:none;border-top:1px solid var(--border);cursor:pointer;
+  transition:background .12s var(--ease),color .12s var(--ease)}
+.table-restore svg{width:14px;height:14px;color:var(--muted)}
+.table-restore:hover{background:var(--hover);color:var(--ink-2)}
+.main.table-collapsed .table-restore{display:flex}
 .tbar{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap}
 .tbar .tsearch{position:relative;flex:1;min-width:170px;max-width:340px}
 .tbar .tsearch svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--faint)}
@@ -468,6 +509,13 @@
   .graph-wrap{height:60vh}
   .main.graph-collapsed .graph-wrap{height:60vh;border-bottom:1px solid var(--border)}
   .graph-resize,.graph-restore,.side-resize{display:none !important}
+  /* the two fold-away controls trade space between panes in a fixed viewport ·
+     stacked, there is nothing to trade, so the panes always show */
+  .side-restore,.table-restore,.side-top{display:none !important}
+  .scan-layout.side-collapsed{grid-template-columns:1fr}
+  .scan-layout.side-collapsed .side{display:block}
+  .main.table-collapsed .table-wrap{display:flex}
+  .main.table-collapsed .graph-wrap{height:60vh;flex:none;border-bottom:1px solid var(--border)}
   .thead{display:none}
   .trow .tsummary{grid-template-columns:56px 1fr 60px;grid-auto-rows:auto}
   .trow .c-type{display:none}
