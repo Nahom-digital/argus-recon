@@ -110,6 +110,37 @@
   border-radius:var(--r-sm);padding:8px 10px}
 .form-msg.ok{color:var(--ok);background:rgba(63,125,82,.12)}
 
+/* ---- integrations (external API keys) ------------------------------------- */
+.intg-rows{display:flex;flex-direction:column}
+.intg-row{display:grid;grid-template-columns:1fr minmax(280px,360px);gap:14px 22px;
+  align-items:start;padding:16px;border-top:1px solid var(--border)}
+.intg-row:first-child{border-top:none}
+.intg-info{min-width:0}
+.intg-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.intg-name{display:flex;align-items:center;gap:7px;font-weight:600;color:var(--ink);font-size:var(--fs-sm)}
+.intg-name svg{width:15px;height:15px;color:var(--muted)}
+.intg-status{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;
+  letter-spacing:.02em;padding:2px 8px;border-radius:var(--r-pill)}
+.intg-status svg{width:12px;height:12px}
+.intg-status.on{color:var(--ok);background:rgba(63,125,82,.12)}
+.intg-status.off{color:var(--muted);background:var(--surface-2)}
+.intg-unlocks{font-size:11px}
+.intg-desc{margin:7px 0 0;font-size:var(--fs-xs);color:var(--muted);line-height:1.55}
+.intg-desc a{color:var(--accent-ink);white-space:nowrap}
+.intg-desc a svg{width:11px;height:11px;vertical-align:-1px}
+.intg-set{display:flex;gap:8px;align-items:center}
+.intg-field{position:relative;flex:1;min-width:0}
+.intg-field .input{width:100%;padding-right:34px;font-family:var(--mono);font-size:var(--fs-xs)}
+.intg-field .toggle-eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);
+  display:grid;place-items:center;width:26px;height:26px;border:0;background:transparent;
+  color:var(--muted);cursor:pointer;border-radius:var(--r-xs)}
+.intg-field .toggle-eye:hover{color:var(--ink-2);background:var(--hover)}
+.intg-field .toggle-eye svg{width:15px;height:15px}
+.intg-save{flex:none}
+.intg-msg{grid-column:1/-1;margin:0}
+.intg-msg[hidden]{display:none}
+@media (max-width:620px){.intg-row{grid-template-columns:1fr}}
+
 /* ---- tables (access log, scans) ------------------------------------------- */
 .atable-wrap{overflow-x:auto}
 .atable{width:100%;border-collapse:collapse;font-size:var(--fs-xs)}

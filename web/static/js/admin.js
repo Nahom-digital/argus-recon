@@ -39,7 +39,78 @@ function wireTabs() {
     });
     if (tab === 'access') loadAccess();
     if (tab === 'scans') loadOverview();
+    if (tab === 'integrations') loadIntegrations();
   }));
+}
+
+/* ---- integrations (external API keys) ------------------------------------- */
+async function loadIntegrations() {
+  const host = document.getElementById('integrationList');
+  if (!host) return;
+  let d;
+  try { d = await getJSON(withBase('/api/admin/integrations')); }
+  catch (e) { host.innerHTML = `<div class="empty" style="padding:22px">${icon('alert-triangle')}<h4>Could not load integrations</h4></div>`; return; }
+  const items = d.integrations || [];
+  document.getElementById('integrationCount').textContent = items.length;
+  host.innerHTML = `<div class="intg-rows">${items.map(intgRow).join('')}</div>`;
+  host.querySelectorAll('.intg-save').forEach(btn =>
+    btn.addEventListener('click', () => saveIntegration(btn.dataset.id)));
+  host.querySelectorAll('.intg-field .toggle-eye').forEach(btn =>
+    btn.addEventListener('click', () => {
+      const inp = btn.parentElement.querySelector('input');
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      btn.innerHTML = icon(show ? 'eye-off' : 'eye');
+    }));
+}
+
+function intgRow(i) {
+  const set = i.configured;
+  return `<div class="intg-row" data-id="${esc(i.id)}">
+    <div class="intg-info">
+      <div class="intg-head">
+        <span class="intg-name">${icon('api-app')}${esc(i.label)}</span>
+        <span class="intg-status ${set ? 'on' : 'off'}">${icon(set ? 'circle-check-filled' : 'point-filled')}${set ? 'configured' : 'not set'}</span>
+        <span class="intg-unlocks tag">${esc(i.unlocks)}</span>
+      </div>
+      <p class="intg-desc">${esc(i.desc)}${i.get_url ? ` <a href="${esc(i.get_url)}" target="_blank" rel="noopener">get a key ${icon('external-link')}</a>` : ''}</p>
+    </div>
+    <div class="intg-set">
+      <div class="intg-field">
+        <input class="input" type="password" id="intg-${esc(i.id)}" spellcheck="false"
+               autocomplete="off" autocapitalize="none"
+               placeholder="${set ? 'saved · enter a new key to replace' : 'paste the API key'}">
+        <button class="toggle-eye" type="button" title="Show or hide" aria-label="Show or hide">${icon('eye')}</button>
+      </div>
+      <button class="btn primary sm intg-save" data-id="${esc(i.id)}">${icon('key')}Save</button>
+    </div>
+    <p class="form-msg intg-msg" role="alert" hidden></p>
+  </div>`;
+}
+
+async function saveIntegration(id) {
+  const row = document.querySelector(`.intg-row[data-id="${CSS.escape(id)}"]`);
+  if (!row) return;
+  const input = row.querySelector('input');
+  const msg = row.querySelector('.intg-msg');
+  const btn = row.querySelector('.intg-save');
+  const value = input.value;
+  btn.disabled = true;
+  msg.hidden = true; msg.classList.remove('ok', 'err');
+  try {
+    const d = await sendJSON(withBase('/api/admin/integrations/' + encodeURIComponent(id)), 'POST', { value });
+    input.value = '';
+    let note = value.trim() ? 'Saved.' : 'Cleared.';
+    if (d.quota_error) note = `Saved, but the key check failed: ${d.quota_error}`;
+    else if (d.quota && d.quota.remaining != null) note = `Saved · ${fmtNum(d.quota.remaining)} deep-DNS lookups left.`;
+    msg.textContent = note;
+    msg.classList.add(d.quota_error ? 'err' : 'ok');
+    msg.hidden = false;
+    loadIntegrations();
+  } catch (e) {
+    msg.textContent = e.message || 'Could not save the key.';
+    msg.classList.add('err'); msg.hidden = false;
+  } finally { btn.disabled = false; }
 }
 
 /* ---- overview ------------------------------------------------------------- */

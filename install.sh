@@ -8,7 +8,7 @@
 # terminal any more.
 #
 #   ./install.sh              install everything, register the service, start it
-#   ./install.sh --upgrade    pull the latest from GitHub + restart the service
+#   ./install.sh --upgrade    pull the latest from GitHub, reinstall the unit + restart
 #   ./install.sh --status     is it live?
 #   ./install.sh --restart    bounce the service
 #   ./install.sh --force      reinstall dependencies + unit, then restart
@@ -750,7 +750,7 @@ Argus Recon — installer and service manager
   ./install.sh --p PORT     change the dashboard port (persists + restarts)
   ./install.sh --admin      create the administrator account (turns auth on)
   ./install.sh --check      doctor: force every dependency check, report readiness
-  ./install.sh --upgrade    pull the latest from GitHub + restart the service
+  ./install.sh --upgrade    pull the latest from GitHub, reinstall the unit + restart
   ./install.sh --status     is it live?
   ./install.sh --restart    bounce the service
   ./install.sh --force      reinstall dependencies + unit, then restart
@@ -906,15 +906,20 @@ if [ "${1:-}" = "--upgrade" ]; then
   # shellcheck source=/dev/null
   source "$HERE/bootstrap.sh"; _argus_bootstrap "$HERE" || warn "dependency refresh reported problems"
 
-  # An upgrade always lands on a running service: install the unit if the
-  # checkout predates it, refresh it if the paths changed, then restart.
+  # An upgrade always lands on a running service. Do a full force-style unit
+  # reinstall rather than a soft restart: tear the unit down, rewrite it, reload
+  # and bring it back up. A plain `restart` re-executes the process but can keep
+  # the old cgroup settings live, so a unit change (KillMode, OOMPolicy, paths)
+  # a new version ships would not actually take effect until the next reboot.
+  # Stopping the unit first guarantees the new one is the one that starts.
   migrate_legacy
+  say "reinstalling the service unit (force) …"
+  systemctl --user disable --now "$SERVICE.service" >/dev/null 2>&1 || true
   write_unit
-  systemctl --user enable "$SERVICE.service" >/dev/null 2>&1 || true
-  say "restarting $SERVICE on the new version …"
-  systemctl --user restart "$SERVICE.service"
+  systemctl --user enable --now "$SERVICE.service" >/dev/null 2>&1 \
+    || systemctl --user restart "$SERVICE.service"
   if wait_live 40; then
-    ok "upgraded and restarted."
+    ok "upgraded, unit reinstalled and restarted."
     report_live
   else
     err "the service did not come back up — journalctl --user -u $SERVICE -e"; exit 1

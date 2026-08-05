@@ -323,7 +323,12 @@ function wireDecode(root) {
     btn.addEventListener('click', () => {
       const next = current() === 'dark' ? 'light' : 'dark';
       root.setAttribute('data-theme', next);
+      // localStorage covers the pre-paint fallback; the httpOnly cookie is the
+      // real store the server renders from, so the choice holds across a restart
+      // and on every device this browser signs in from. Fire-and-forget · the
+      // repaint below does not wait on the round-trip.
       try { localStorage.setItem('argus-theme', next); } catch (e) {}
+      try { apiFetch(withBase('/api/theme'), { method: 'POST', body: { theme: next } }); } catch (e) {}
       window.dispatchEvent(new CustomEvent('themechange', { detail: next }));
     });
   });

@@ -41,6 +41,9 @@
   --n-domain:#bd5b3d; --n-subdomain:#3f6f8f; --n-ip:#5c6a4c; --n-asn:#8a7b52;
   --n-endpoint:#7a746a; --n-js:#8a5ea6; --n-request:#c07a2e; --n-field:#4a8f7b;
   --n-secret:#b4402e; --n-file:#4d7ea8; --n-external:#a39c8c; --n-port:#7b5ea0;
+  /* graph surface + edges · one source of truth so the canvas and the fCoSE
+     renderer draw the same, readable lines against the same background */
+  --graph-bg:#f0eee6; --graph-edge:rgba(74,71,63,.26); --graph-edge-dim:rgba(74,71,63,.08);
   --r:10px; --r-sm:7px; --r-xs:5px; --r-pill:999px;
   --sans:'Libertinus Serif',Georgia,'Times New Roman',serif;
   --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
@@ -66,6 +69,7 @@
   --n-domain:#d47a57; --n-subdomain:#6aa0c4; --n-ip:#94a578; --n-asn:#c4ad78;
   --n-endpoint:#a39c90; --n-js:#c194db; --n-request:#e0a05a; --n-field:#6dc4a8;
   --n-secret:#e0765c; --n-file:#7cb0dc; --n-external:#8a8474; --n-port:#a98fd0;
+  --graph-bg:#191816; --graph-edge:rgba(200,195,182,.24); --graph-edge-dim:rgba(200,195,182,.07);
   color-scheme:dark;
 }}
 :root[data-theme="dark"]{
@@ -83,6 +87,7 @@
   --n-domain:#d47a57; --n-subdomain:#6aa0c4; --n-ip:#94a578; --n-asn:#c4ad78;
   --n-endpoint:#a39c90; --n-js:#c194db; --n-request:#e0a05a; --n-field:#6dc4a8;
   --n-secret:#e0765c; --n-file:#7cb0dc; --n-external:#8a8474; --n-port:#a98fd0;
+  --graph-bg:#191816; --graph-edge:rgba(200,195,182,.24); --graph-edge-dim:rgba(200,195,182,.07);
   color-scheme:dark;
 }
 

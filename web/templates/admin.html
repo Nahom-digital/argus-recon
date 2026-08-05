@@ -29,6 +29,8 @@
       <svg class="ic"><use href="#i-list-details"></use></svg> Access history</button>
     <button class="atab" data-tab="scans" role="tab" aria-selected="false">
       <svg class="ic"><use href="#i-radar-2"></use></svg> Scans</button>
+    <button class="atab" data-tab="integrations" role="tab" aria-selected="false">
+      <svg class="ic"><use href="#i-plug-connected"></use></svg> Integrations</button>
     <button class="atab" data-tab="account" role="tab" aria-selected="false">
       <svg class="ic"><use href="#i-key"></use></svg> My password</button>
   </nav>
@@ -89,6 +91,22 @@
       <div class="phead"><svg class="ic"><use href="#i-clock"></use></svg>
         <h3>Running now</h3></div>
       <div id="runningScans"></div>
+    </div>
+  </section>
+
+  <!-- INTEGRATIONS -------------------------------------------------------- -->
+  <section class="atab-panel" id="tab-integrations" role="tabpanel" hidden>
+    <div class="panel">
+      <div class="phead">
+        <svg class="ic"><use href="#i-plug-connected"></use></svg>
+        <h3>API keys</h3>
+        <span class="count" id="integrationCount">0</span>
+      </div>
+      <p class="ns-help" style="margin:2px 0 12px">External services the scanner can
+        use. Keys are stored in <code>.env</code> on this machine and take effect
+        right away, without a restart. For safety a saved key is never shown back
+        to you · leave a field blank and save to clear it.</p>
+      <div id="integrationList"></div>
     </div>
   </section>
 

@@ -261,8 +261,13 @@ function createGraph(canvas, data, opts) {
     const faint = g('--faint') || '#999';
     TH = {
       ink: g('--ink') || '#111', ink2: g('--ink-2') || '#333',
-      edge: withAlpha(faint, 0.14), edgeDim: withAlpha(faint, 0.05),
-      halo: withAlpha(g('--bg') || '#fff', 0.9),
+      // edge colours come straight from the theme (already an rgba the CSS
+      // tuned for the current background) · falling back to the old faint-based
+      // stroke only if the variable is somehow missing. This is what makes the
+      // mesh legible in both light and dark instead of nearly invisible.
+      edge: g('--graph-edge') || withAlpha(faint, 0.26),
+      edgeDim: g('--graph-edge-dim') || withAlpha(faint, 0.07),
+      halo: withAlpha(g('--graph-bg') || g('--bg') || '#fff', 0.9),
       labelBg: withAlpha(g('--surface') || '#fff', 0.82),
     };
   }

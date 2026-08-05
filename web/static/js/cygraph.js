@@ -437,8 +437,11 @@ function styleFor() {
     { selector: 'node.hl', style: {
         'label': 'data(short)', 'z-index': 30, 'text-background-opacity': 0.95 } },
     { selector: 'edge', style: {
+        // line-color carries its own alpha (tuned per theme in app.css), so the
+        // edge opacity stays at 1 here · the old flat 0.5 washed the faint stroke
+        // out until the mesh was almost invisible on both light and dark.
         'width': 1, 'line-color': cyEdge(), 'curve-style': 'haystack',
-        'haystack-radius': 0.4, 'opacity': 0.5 } },
+        'haystack-radius': 0.4, 'opacity': 1 } },
     { selector: '.faded', style: { 'opacity': 0.12 } },
     // selected node keeps its label and gets an outline
     { selector: 'node.lit', style: {
@@ -449,7 +452,11 @@ function styleFor() {
 
 function cyInk() { return (getComputedStyle(document.documentElement).getPropertyValue('--ink') || '#111').trim(); }
 function cyBg() { return (getComputedStyle(document.documentElement).getPropertyValue('--surface') || '#fff').trim(); }
-function cyEdge() { return (getComputedStyle(document.documentElement).getPropertyValue('--faint') || '#bbb').trim(); }
+function cyEdge() {
+  const cs = getComputedStyle(document.documentElement);
+  return (cs.getPropertyValue('--graph-edge') || '').trim()
+    || (cs.getPropertyValue('--faint') || '#bbb').trim();
+}
 
 function shortCyLabel(n) {
   let s = n.label || '';

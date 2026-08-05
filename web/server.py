@@ -119,7 +119,16 @@ def asset_version() -> str:
 @app.context_processor
 def _inject_sprite():
     from markupsafe import Markup
-    return {"sprite": Markup(_SPRITE), "asset_v": asset_version()}
+    return {"sprite": Markup(_SPRITE), "asset_v": asset_version(),
+            "theme": _theme_pref()}
+
+
+def _theme_pref() -> str:
+    """The saved light/dark choice for this browser, or "" when none. Read from
+    the httpOnly cookie so the template can render the chosen theme server side
+    (no first-paint flash) even though page scripts cannot see the value."""
+    val = (request.cookies.get(THEME_COOKIE) or "").strip().lower()
+    return val if val in THEME_VALUES else ""
 
 
 import gzip as _gzip
@@ -212,10 +221,20 @@ def _cache_control(resp):
 SESSION_COOKIE = "argus_session"
 CSRF_HEADER = "X-Argus-CSRF"
 
+# The light/dark choice rides in its own httpOnly cookie, signed by nobody
+# because it is not a secret · it only has to survive a restart and be readable
+# by the server so the page can be rendered in the chosen theme before first
+# paint (no flash, and the same choice on every device this browser signs in
+# from). httpOnly keeps it out of reach of page scripts, exactly like the
+# session cookie, which is what the operator asked for.
+THEME_COOKIE = "argus_theme"
+THEME_VALUES = ("light", "dark")
+
 # Reachable without a session: the login page and its endpoint, the static
-# assets a login page needs, and the build-token poll.
+# assets a login page needs, the build-token poll, and the theme switch (a
+# preference, not a privileged action · it must work on the login page too).
 _OPEN_PATHS = {"/login", "/api/auth/login", "/api/auth/state", "/api/version",
-               "/favicon.ico"}
+               "/api/theme", "/favicon.ico"}
 
 
 def _open_path(path: str) -> bool:
@@ -762,6 +781,30 @@ def api_login():
 def api_logout():
     resp = make_response(jsonify({"ok": True}))
     resp.delete_cookie(SESSION_COOKIE, path=request.script_root or "/")
+    return resp
+
+
+@app.route("/api/theme", methods=["POST"])
+def api_set_theme():
+    """Remember the operator's light/dark choice in an httpOnly cookie so the
+    server can render every page in it from the first paint, on this device and
+    the next. Open and CSRF-free on purpose: a theme is a preference, not a
+    privileged action, and it has to work on the login page before any session
+    exists. `theme` must be exactly "light" or "dark"; anything else clears it."""
+    body = request.get_json(silent=True) or {}
+    want = (body.get("theme") or "").strip().lower()
+    resp = make_response(jsonify({"theme": want if want in THEME_VALUES else None}))
+    if want in THEME_VALUES:
+        resp.set_cookie(
+            THEME_COOKIE, want,
+            max_age=60 * 60 * 24 * 365,    # a year · a preference should stick
+            httponly=True,                 # unreadable to any script on the page
+            samesite="Lax",
+            secure=request.is_secure,
+            path=request.script_root or "/",
+        )
+    else:
+        resp.delete_cookie(THEME_COOKIE, path=request.script_root or "/")
     return resp
 
 
@@ -1718,6 +1761,71 @@ def api_admin_overview():
         "key_file": str(auth.store_path()),
         "access_log": access_log.ENABLED,
     })
+
+
+# --------------------------------------------------------------------------- #
+# Integrations · the external API keys the pipeline can be given. Each is stored
+# in .env (config.save_env_key, survives a restart) and mirrored onto the live
+# config object so it takes effect without one. The admin page lists and sets
+# them; the value itself is never sent back to a browser · only whether one is
+# present. Add a service here and it shows up in the admin page automatically.
+# --------------------------------------------------------------------------- #
+INTEGRATIONS = [
+    {"id": "securitytrails", "env": "SECURITYTRAILS_KEY", "attr": "SECURITYTRAILS_KEY",
+     "label": "SecurityTrails", "unlocks": "Deep DNS",
+     "desc": "Passive subdomain discovery and DNS history. Without a key the "
+             "deep-DNS stage stays locked.",
+     "get_url": "https://securitytrails.com/app/account/credentials"},
+    {"id": "ipinfo", "env": "IPINFO_TOKEN", "attr": "IPINFO_TOKEN",
+     "label": "IPinfo", "unlocks": "IP enrichment",
+     "desc": "Geolocation, ASN and owner lookups for resolved IPs. Falls back to "
+             "the rate-limited free tier when unset.",
+     "get_url": "https://ipinfo.io/account/token"},
+]
+_INTEGRATIONS_BY_ID = {i["id"]: i for i in INTEGRATIONS}
+
+
+def _integration_state(meta: dict) -> dict:
+    val = getattr(config, meta["attr"], "") or ""
+    return {"id": meta["id"], "label": meta["label"], "unlocks": meta["unlocks"],
+            "desc": meta["desc"], "get_url": meta.get("get_url"),
+            "configured": bool(val.strip())}
+
+
+@app.route("/api/admin/integrations")
+def api_admin_integrations():
+    """Every external API key the pipeline knows about, and whether each is set.
+    The keys themselves never leave the server."""
+    _require_admin()
+    return jsonify({"integrations": [_integration_state(m) for m in INTEGRATIONS]})
+
+
+@app.route("/api/admin/integrations/<key_id>", methods=["POST"])
+def api_admin_set_integration(key_id):
+    """Set (or clear, with a blank value) one integration's API key. Written to
+    .env so it survives a restart and mirrored onto the running config so it is
+    live immediately · no restart, no re-deploy."""
+    _require_admin()
+    meta = _INTEGRATIONS_BY_ID.get(key_id)
+    if not meta:
+        return jsonify({"error": "unknown integration"}), 404
+    body = request.get_json(silent=True) or {}
+    value = (body.get("value") or "").strip()
+    if len(value) > 400:
+        return jsonify({"error": "that value is too long to be an API key"}), 400
+    config.save_env_key(meta["env"], value)
+    setattr(config, meta["attr"], value)
+    out = {"integration": _integration_state(meta), "saved": True}
+    # The deep-DNS key gets an immediate liveness check so the admin sees at once
+    # whether it actually works, and any stale quota reading is dropped.
+    if key_id == "securitytrails":
+        securitytrails.forget_usage()
+        if value and body.get("check", True):
+            try:
+                out["quota"] = securitytrails.check(force=True)
+            except Exception as exc:
+                out["quota_error"] = str(exc)[:200]
+    return jsonify(out)
 
 
 @app.route("/favicon.ico")

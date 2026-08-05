@@ -1,13 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="en"{% if theme %} data-theme="{{ theme }}"{% endif %}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Argus Recon{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', filename='icons/favicon.svg') }}" type="image/svg+xml">
   <script>
-    // set theme before paint to avoid a flash
-    (function(){try{var t=localStorage.getItem('argus-theme');
+    // The server renders data-theme from the httpOnly argus_theme cookie, so the
+    // saved choice is already applied. localStorage is only a fallback for the
+    // very first visit before that cookie exists · never override the server.
+    (function(){try{if(document.documentElement.getAttribute('data-theme'))return;
+      var t=localStorage.getItem('argus-theme');
       if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
   </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v=asset_v) }}">

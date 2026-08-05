@@ -111,7 +111,7 @@
 /* graph · its height is user-controlled (drag the splitter, or collapse it) so
    the request table below is never squeezed into a sliver. --graph-h is set by
    scan.js from a saved preference; the value here is the first-run default. */
-.graph-wrap{position:relative;height:var(--graph-h,40vh);min-height:0;flex:none;background:var(--bg);
+.graph-wrap{position:relative;height:var(--graph-h,40vh);min-height:0;flex:none;background:var(--graph-bg,var(--bg));
   border-bottom:1px solid var(--border);overflow:hidden}
 .main.graph-collapsed .graph-wrap{height:0;border-bottom:none}
 
