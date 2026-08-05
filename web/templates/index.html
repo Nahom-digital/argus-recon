@@ -35,35 +35,53 @@
     <div class="ns-adv" id="scanOpts" inert>
       <div class="ns-adv-clip">
       <div class="ns-adv-in">
-        <fieldset class="ns-group">
-          <legend>Scope</legend>
-          <div class="seg" role="radiogroup" aria-label="Scope">
-            <label><input type="radio" name="scope" value="apex" checked>
-              <span>Apex + subdomains</span></label>
-            <label><input type="radio" name="scope" value="exact">
-              <span>Host + subdomains</span></label>
-            <label><input type="radio" name="scope" value="single">
-              <span>Single host</span></label>
-          </div>
-          <p class="ns-help" id="scopeHelp"></p>
-          <label class="chk" id="noBbotChk"><input type="checkbox" id="optNoBbot"> skip passive-enum engine</label>
-        </fieldset>
+        <div class="ns-adv-top">
+          <fieldset class="ns-group">
+            <legend>Scope</legend>
+            <div class="seg" role="radiogroup" aria-label="Scope">
+              <label><input type="radio" name="scope" value="apex" checked>
+                <span>Apex + subdomains</span></label>
+              <label><input type="radio" name="scope" value="exact">
+                <span>Host + subdomains</span></label>
+              <label><input type="radio" name="scope" value="single">
+                <span>Single host</span></label>
+            </div>
+            <p class="ns-help" id="scopeHelp"></p>
+          </fieldset>
 
-        <fieldset class="ns-group">
-          <legend>Crawl limits</legend>
-          <div class="ns-nums">
-            <label class="field"><span>Max pages per host</span>
-              <input class="input" id="optMaxPages" type="number" min="1" max="100000" inputmode="numeric"></label>
-            <label class="field"><span>Max depth</span>
-              <input class="input" id="optMaxDepth" type="number" min="1" max="50" inputmode="numeric"></label>
-          </div>
-          <p class="ns-help">Empty uses the configured default.</p>
-        </fieldset>
+          <fieldset class="ns-group">
+            <legend>Crawl limits</legend>
+            <div class="ns-nums">
+              <label class="field"><span>Max pages per host</span>
+                <input class="input" id="optMaxPages" type="number" min="1" max="100000" inputmode="numeric"></label>
+              <label class="field"><span>Max depth</span>
+                <input class="input" id="optMaxDepth" type="number" min="1" max="50" inputmode="numeric"></label>
+            </div>
+            <p class="ns-help">Empty uses the configured default.</p>
+          </fieldset>
+        </div>
 
-        <fieldset class="ns-group ns-stages">
-          <legend>Pipeline stages</legend>
-          <div class="stage-chips" id="stageChips"></div>
-          <p class="ns-help">Every stage runs by default. Switch one off to skip it.</p>
+        <fieldset class="ns-group ns-tools">
+          <legend>Tools</legend>
+          <p class="ns-help">Every tool runs by default · switch off any you don't need.
+            A locked tool is not installed on this machine.</p>
+          <div class="tool-cols">
+            <div class="tool-col">
+              <div class="tool-col-head"><svg class="ic"><use href="#i-shield-half-filled"></use></svg>
+                Passive &amp; discovery</div>
+              <div class="tool-list" id="toolsPassive"></div>
+            </div>
+            <div class="tool-col">
+              <div class="tool-col-head"><svg class="ic"><use href="#i-radar-2"></use></svg>
+                Active scan</div>
+              <div class="tool-list" id="toolsActive"></div>
+            </div>
+          </div>
+          <div class="tool-col tool-col-process">
+            <div class="tool-col-head"><svg class="ic"><use href="#i-forms"></use></svg>
+              Processing</div>
+            <div class="tool-list tool-list-row" id="toolsProcess"></div>
+          </div>
         </fieldset>
       </div>
       </div>

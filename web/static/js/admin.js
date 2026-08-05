@@ -351,7 +351,67 @@ async function loadAccess() {
         'the access log is switched off (ARGUS_ACCESS_LOG=0)'}</td></tr>`;
     return;
   }
-  body.innerHTML = rows.map(r => `<tr>
+  // Group the flat log into sessions · one account, one browser, one sitting ·
+  // each a collapsible header with its requests folded away underneath.
+  const sessions = groupSessions(rows);
+  body.innerHTML = sessions.map((s, i) =>
+    sessionHeadHtml(s, i) + s.rows.map(r => accessRowHtml(r, i)).join('')).join('');
+  reflectExpandAll();
+}
+
+/* A session is consecutive activity by one account from one browser. Records come
+   newest-first; a gap longer than SESSION_GAP starts a fresh session. Grouping on
+   account + user-agent (not IP) keeps one sitting together even when a CDN spreads
+   it across a couple of edge addresses. */
+const SESSION_GAP_MS = 30 * 60 * 1000;
+
+function groupSessions(rows) {
+  const openByKey = new Map();
+  const sessions = [];
+  for (const r of rows) {                    // newest-first
+    const key = (r.user || 'anonymous') + '\n' + (r.ua || '');
+    const t = Date.parse(r.ts || '') || 0;
+    const s = openByKey.get(key);
+    if (s && (s.startT - t) <= SESSION_GAP_MS) {
+      s.rows.push(r);
+      s.startT = Math.min(s.startT, t);
+    } else {
+      const ns = { user: r.user || '', ua: r.ua || '', rows: [r], startT: t };
+      openByKey.set(key, ns);
+      sessions.push(ns);
+    }
+  }
+  return sessions;
+}
+
+function sessionHeadHtml(s, i) {
+  const ipCounts = {};
+  s.rows.forEach(r => { const ip = r.ip || '?'; ipCounts[ip] = (ipCounts[ip] || 0) + 1; });
+  const ips = Object.keys(ipCounts).sort((a, b) => ipCounts[b] - ipCounts[a]);
+  const ipLabel = esc(ips[0]) + (ips.length > 1 ? ` <span class="faint">+${ips.length - 1}</span>` : '');
+  const errs = s.rows.filter(r => r.status && r.status >= 400).length;
+  const endTs = s.rows[0].ts, startTs = s.rows[s.rows.length - 1].ts;
+  const range = esc(shortTime(startTs)) + (startTs !== endTs ? ' <span class="faint">to</span> ' + esc(shortTime(endTs)) : '');
+  const n = s.rows.length;
+  return `<tr class="asess-head" data-sess="${i}" tabindex="0" role="button" aria-expanded="false">
+    <td colspan="8">
+      <div class="asess-sum">
+        <svg class="ic chev"><use href="#i-chevron-right"></use></svg>
+        <span class="asess-when mono">${range}</span>
+        <span class="asess-who">${s.user ? `<span class="tag">${esc(s.user)}</span>`
+          : '<span class="faint">anonymous</span>'}</span>
+        <span class="asess-ip mono">${ipLabel}</span>
+        <span class="asess-ua faint" title="${esc(s.ua)}">${esc(shortAgent(s.ua))}</span>
+        <span class="asess-spacer"></span>
+        ${errs ? `<span class="asess-errs">${errs} error${errs > 1 ? 's' : ''}</span>` : ''}
+        <span class="asess-count">${fmtNum(n)} request${n > 1 ? 's' : ''}</span>
+      </div>
+    </td>
+  </tr>`;
+}
+
+function accessRowHtml(r, i) {
+  return `<tr class="arow" data-parent="${i}" hidden>
     <td class="mono nowrap">${esc(shortTime(r.ts))}</td>
     <td>${r.user ? `<span class="tag">${esc(r.user)}</span>`
       : '<span class="faint">anonymous</span>'}</td>
@@ -361,7 +421,23 @@ async function loadAccess() {
     <td class="mono ${statusClass(r.status)}">${esc(r.status == null ? '·' : r.status)}</td>
     <td class="mono faint">${r.ms != null ? esc(Math.round(r.ms) + 'ms') : ''}</td>
     <td class="faint agent" title="${esc(r.ua || '')}">${esc(shortAgent(r.ua))}</td>
-  </tr>`).join('');
+  </tr>`;
+}
+
+/* open / close one session's requests */
+function toggleSession(head, force) {
+  const i = head.dataset.sess;
+  const open = force == null ? !head.classList.contains('open') : force;
+  head.classList.toggle('open', open);
+  head.setAttribute('aria-expanded', String(open));
+  document.querySelectorAll(`#accessBody .arow[data-parent="${i}"]`)
+    .forEach(r => { r.hidden = !open; });
+}
+
+let accessAllOpen = false;
+function reflectExpandAll() {
+  const btn = document.getElementById('accessExpand');
+  if (btn) btn.textContent = accessAllOpen ? 'collapse all' : 'expand all';
 }
 
 function fillOptions(id, values, allLabel, current) {
@@ -380,6 +456,23 @@ function wireAccessFilters() {
   let t;
   document.getElementById('accessQ').addEventListener('input', () => {
     clearTimeout(t); t = setTimeout(loadAccess, 220);
+  });
+  // one delegated handler · the body is re-rendered on every load
+  const body = document.getElementById('accessBody');
+  body.addEventListener('click', e => {
+    const head = e.target.closest('.asess-head');
+    if (head) toggleSession(head);
+  });
+  body.addEventListener('keydown', e => {
+    const head = e.target.closest && e.target.closest('.asess-head');
+    if (head && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleSession(head); }
+  });
+  const expand = document.getElementById('accessExpand');
+  if (expand) expand.addEventListener('click', () => {
+    accessAllOpen = !accessAllOpen;
+    document.querySelectorAll('#accessBody .asess-head')
+      .forEach(h => toggleSession(h, accessAllOpen));
+    reflectExpandAll();
   });
 }
 

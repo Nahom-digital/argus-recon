@@ -42,6 +42,32 @@ def _skip(path: str) -> bool:
     return path.startswith("/static/") or path in _SKIP_EXACT
 
 
+def client_ip(request) -> str:
+    """The real visitor's address, not the proxy in front of it.
+
+    Behind Cloudflare (or any CDN) the socket the dashboard sees belongs to the
+    edge, so `request.remote_addr` is a Cloudflare address (104.x, 172.x ...) and
+    every visitor looks like the proxy. Cloudflare puts the true client in
+    `CF-Connecting-IP`, so that wins when present; `True-Client-IP` is the
+    enterprise equivalent. Failing both, the client is the first (left-most) hop
+    of `X-Forwarded-For`, which is the original caller before each proxy appended
+    itself. Only then do we fall back to the socket address.
+
+    The dashboard binds to loopback behind one trusted proxy, so these headers
+    reach us only through that proxy and are safe to believe.
+    """
+    for header in ("CF-Connecting-IP", "True-Client-IP"):
+        val = (request.headers.get(header) or "").strip()
+        if val:
+            return val[:64]
+    xff = request.headers.get("X-Forwarded-For") or ""
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first[:64]
+    return (request.remote_addr or "")[:64]
+
+
 def _response_bytes(response) -> int | None:
     try:
         n = response.calculate_content_length()
@@ -73,8 +99,9 @@ def record(request, response, *, started: float | None = None,
         ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         rec = {
             "ts": ts,
-            # ProxyFix has already promoted a trusted X-Forwarded-For to remote_addr
-            "ip": request.remote_addr or "",
+            # The real visitor, resolved past Cloudflare / any CDN in front (see
+            # client_ip); remote_addr alone would log the proxy for every hit.
+            "ip": client_ip(request),
             "user": (user or "")[:64],
             "method": request.method,
             "path": path,

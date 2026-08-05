@@ -320,7 +320,157 @@ def _access_log(resp):
 SCAN_ID_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 JOBS_DIR = config.SCANS_DIR / ".jobs"
 JOBS_DIR.mkdir(exist_ok=True)
+
+# The scan job table. It used to live only in memory, so a dashboard restart (a
+# crash, a redeploy, or the OOM killer taking the process during a huge scan)
+# wiped every running job · the scan simply vanished from the list with no error.
+# It is now mirrored to disk and reconciled on startup so a run is never lost
+# silently: it is either still followed, or reported as interrupted with a reason.
 _JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
+_JOBS_FILE = JOBS_DIR / "jobs.json"
+_JOBS_MAX = 250                     # most job records to keep on disk
+_JOBS_KEEP_SEC = 7 * 86400          # drop finished jobs older than a week on load
+_ACTIVE_STATES = ("queued", "running", "stopping")
+
+
+def _persist_jobs() -> None:
+    """Mirror the whole job table to disk. It is small, so a full atomic rewrite
+    (temp file renamed over the target) keeps the file consistent and cheap.
+    Best-effort: a write failure never affects a running scan."""
+    try:
+        with _JOBS_LOCK:
+            data = list(_JOBS.values())
+        tmp = _JOBS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_JOBS_FILE)
+    except Exception:
+        pass
+
+
+def _save_job(_job_id: str | None = None) -> None:
+    """Persist after a job changed. The argument is accepted for readability at
+    call sites; the whole table is written either way."""
+    _persist_jobs()
+
+
+def _log_tail_error(job_id: str, limit: int = 600) -> str:
+    """A short, human reason lifted from the end of a failed job's log, so the UI
+    can show what actually went wrong instead of only the word 'failed'."""
+    log_path = JOBS_DIR / f"{job_id}.log"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    for ln in reversed(lines[-40:]):
+        low = ln.lower()
+        if any(k in low for k in ("error", "traceback", "exception",
+                                  "aborted", "fatal", "cannot", "failed")):
+            return ln.strip()[:limit]
+    return lines[-1][:limit]
+
+
+def _log_stage_warning(job_id: str) -> str:
+    """A finished scan can still have had a tool fail mid-run · the engine marks
+    that on its last log line (main.STAGE_ERROR_MARKER). Return a short summary
+    when present, so the UI can flag a completed-with-errors run."""
+    log_path = JOBS_DIR / f"{job_id}.log"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    for ln in reversed(text.splitlines()):
+        if ln.startswith("##ARGUS_STAGE_ERRORS"):
+            body = ln[len("##ARGUS_STAGE_ERRORS"):].strip()
+            parts = body.split(" ", 1)
+            n = parts[0] if parts else "?"
+            detail = parts[1] if len(parts) > 1 else ""
+            return (f"{n} stage(s) reported errors · the scan finished with the "
+                    f"rest. {detail}").strip()[:600]
+    return ""
+
+
+def _find_scan_after(domain: str, since: float):
+    """A saved scan for `domain` written at/after `since`. Used when reconciling
+    an orphaned job to tell whether it actually finished before the restart. The
+    match is lenient because a subdomain target is saved under its apex (the scan
+    pivots scope), so `app.example.com` may land as `example.com_...`."""
+    domain = (domain or "").lower()
+    try:
+        for p in _scan_files():
+            if p.stat().st_mtime < since - 2:
+                continue
+            base = p.name.rsplit("_", 2)[0].lower()   # strip _YYYYmmdd_HHMMSS.json
+            if base and (base == domain or domain.endswith("." + base)):
+                return p
+    except Exception:
+        pass
+    return None
+
+
+def _finalize_orphan(job_id: str) -> None:
+    """Close out a job whose worker is no longer running after a restart: mark it
+    done if its scan landed, otherwise interrupted with a plain reason."""
+    job = _JOBS.get(job_id)
+    if not job:
+        return
+    if _find_scan_after(job.get("domain", ""), job.get("started", 0)) is not None:
+        job.update(status="done", finished=time.time(),
+                   note="finished while the dashboard was restarting")
+    else:
+        job.update(status="interrupted", finished=time.time(),
+                   error="The dashboard restarted while this scan was running, so "
+                         "it did not finish. Nothing was saved · start it again.")
+    _save_job(job_id)
+
+
+def _reattach_job(job_id: str, pid: int) -> None:
+    """Follow a scan whose worker outlived a dashboard restart. The worker runs in
+    its own session (start_new_session), so it survives us · poll until it exits,
+    then finalize from whatever it left behind."""
+    while _pid_alive(pid):
+        time.sleep(2)
+    job = _JOBS.get(job_id)
+    if job and job.get("status") in _ACTIVE_STATES:
+        _finalize_orphan(job_id)
+
+
+def _load_jobs() -> None:
+    """Restore the job table a previous dashboard wrote, then reconcile every job
+    that was mid-run when we last stopped: re-attach if its worker is still alive,
+    otherwise report it interrupted instead of letting it disappear."""
+    try:
+        raw = json.loads(_JOBS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = []
+    now = time.time()
+    for job in raw if isinstance(raw, list) else []:
+        jid = job.get("id")
+        if not jid:
+            continue
+        st = job.get("status")
+        if st in _ACTIVE_STATES:
+            _JOBS[jid] = job
+            pid = job.get("pid")
+            if pid and _pid_alive(pid):
+                threading.Thread(target=_reattach_job, args=(jid, pid),
+                                 daemon=True).start()
+            else:
+                _finalize_orphan(jid)
+        else:
+            done_at = job.get("finished") or job.get("started") or now
+            if now - done_at <= _JOBS_KEEP_SEC:
+                _JOBS[jid] = job
+    if len(_JOBS) > _JOBS_MAX:
+        keep = sorted(_JOBS.values(), key=lambda j: j.get("started", 0),
+                      reverse=True)[:_JOBS_MAX]
+        _JOBS.clear()
+        _JOBS.update({j["id"]: j for j in keep})
+    _persist_jobs()
 
 
 # --------------------------------------------------------------------------- #
@@ -594,14 +744,15 @@ def api_login():
     # A brute-force guard that does not depend on the account existing: the
     # per-account lockout in modules.auth cannot slow down a spray across many
     # usernames from one address, so the address is rate-limited too.
-    if not _login_rate_ok(request.remote_addr or "?"):
+    who = access_log.client_ip(request) or "?"
+    if not _login_rate_ok(who):
         return jsonify({"error": "too many sign-in attempts · wait a minute"}), 429
     try:
         user = auth.verify(username, password)
     except auth.AuthError as exc:
         return jsonify({"error": str(exc)}), 401
     token, csrf, exp = auth.issue_token(username)
-    _login_rate_clear(request.remote_addr or "?")
+    _login_rate_clear(who)
     resp = make_response(jsonify({"user": {**user, "csrf": csrf},
                                   "expires_at": exp}))
     return _set_session_cookie(resp, token, exp)
@@ -1043,6 +1194,19 @@ def api_status():
         resolve_tool(config.BBOT_BIN), resolve_tool(config.WHATWEB_BIN),
         resolve_tool(config.FFUF_BIN) or resolve_tool(config.FEROX_BIN),
     ])
+    # Per-tool presence, so the launcher can lock a tool it cannot run rather than
+    # letting the scan fail at that stage. A false here means "not installed".
+    tools = {
+        "bbot": bool(resolve_tool(config.BBOT_BIN)),
+        "httpx": bool(resolve_tool(config.HTTPX_BIN)),
+        "whatweb": bool(resolve_tool(config.WHATWEB_BIN)),
+        "katana": bool(resolve_tool(config.KATANA_BIN)),
+        "ffuf": bool(resolve_tool(config.FFUF_BIN) or resolve_tool(config.FEROX_BIN)),
+        "nmap": portscan.available(),
+        "wayback_engine": bool(wayback.binary()),
+        "securitytrails": bool(config.SECURITYTRAILS_KEY),
+        "ipinfo": bool(config.IPINFO_TOKEN),
+    }
     svc = _service_state()
     graph = _graph_status()
     return jsonify({
@@ -1050,6 +1214,7 @@ def api_status():
         "graph_db": graph["available"],
         "graph": graph,
         "engines_ready": engines_ready,
+        "tools": tools,
         "ipinfo_token": bool(config.IPINFO_TOKEN),
         # can a scan actually be routed over Tor from this machine? The launcher
         # locks the toggle rather than letting a run fail at the first step.
@@ -1184,6 +1349,7 @@ def _run_job(job_id: str, domain: str, extra: list[str], owner: str | None = Non
     py = sys.executable
     cmd = [py, str(ROOT / "main.py"), domain, *extra]
     _JOBS[job_id].update(status="running", cmd=" ".join(cmd))
+    _save_job(job_id)
     # The engine refuses to run from a terminal; this flag marks it as ours.
     # Its own process group lets "stop" take the whole tool subtree with it.
     # ARGUS_OWNER is stamped into the scan document so the library can show an
@@ -1196,16 +1362,39 @@ def _run_job(job_id: str, domain: str, extra: list[str], owner: str | None = Non
             proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                     cwd=str(ROOT), env=env, start_new_session=True)
             _JOBS[job_id]["pid"] = proc.pid
+            _save_job(job_id)
             rc = proc.wait()
             if _JOBS[job_id].get("status") == "stopping":
                 _JOBS[job_id].update(status="stopped", returncode=rc,
                                      finished=time.time())
+            elif rc == 0:
+                # Done, but a tool may have failed mid-run · surface that as a
+                # warning on the finished job rather than a silent success.
+                warn = _log_stage_warning(job_id)
+                fields = {"status": "done", "returncode": rc,
+                          "finished": time.time()}
+                if warn:
+                    fields["warning"] = warn
+                _JOBS[job_id].update(fields)
             else:
-                _JOBS[job_id].update(status="done" if rc == 0 else "failed",
-                                     returncode=rc, finished=time.time())
+                # A non-zero exit, or a negative code (killed by a signal, which
+                # on a very large scan is usually the OOM killer). Say so plainly
+                # and lift the real reason out of the log, so it reaches the UI
+                # as an alert rather than being buried in the terminal stream.
+                if rc < 0:
+                    reason = (f"The scan was killed by signal {-rc}. On a large "
+                              "target this is almost always the system running "
+                              "out of memory · try it with fewer stages or a "
+                              "lower page cap.")
+                else:
+                    reason = _log_tail_error(job_id) or f"The scan exited with code {rc}."
+                _JOBS[job_id].update(status="failed", returncode=rc,
+                                     error=reason, finished=time.time())
         except Exception as exc:
-            _JOBS[job_id].update(status="failed", error=str(exc),
+            _JOBS[job_id].update(status="failed",
+                                 error=f"Could not start the scan: {exc}",
                                  finished=time.time())
+    _save_job(job_id)
 
 
 # Pipeline stages the dashboard can switch off (mirrors main.ALL_MODULES).
@@ -1270,6 +1459,10 @@ def api_launch():
         extra.append("--wayback")
     if body.get("no_bbot"):
         extra.append("--no-bbot")
+    if body.get("no_probe"):
+        extra.append("--no-probe")
+    if body.get("no_deepcrawl"):
+        extra.append("--no-deepcrawl")
     if body.get("no_graph"):
         extra.append("--no-graph")
     for key, flag in (("max_pages", "--max-pages"), ("max_depth", "--max-depth")):
@@ -1285,6 +1478,16 @@ def api_launch():
     if skip:
         extra += ["--skip", ",".join(skip)]
 
+    # Tools switched off that are not one of the pipeline stages · shown on the
+    # job row so a trimmed-down run is never a mystery after the fact.
+    off_tools = []
+    if body.get("no_bbot"):
+        off_tools.append("no BBOT")
+    if body.get("no_probe"):
+        off_tools.append("no httpx probe")
+    if body.get("no_deepcrawl"):
+        off_tools.append("no katana")
+
     job_id = uuid.uuid4().hex[:12]
     _JOBS[job_id] = {"id": job_id, "domain": domain, "status": "queued",
                      "started": time.time(), "owner": owner, "options": {
@@ -1295,8 +1498,13 @@ def api_launch():
                          "tor": want_tor,
                          "portscan": want_portscan,
                          "wayback": want_wayback,
+                         "no_bbot": bool(body.get("no_bbot")),
+                         "no_probe": bool(body.get("no_probe")),
+                         "no_deepcrawl": bool(body.get("no_deepcrawl")),
+                         "off_tools": off_tools,
                          "skipped": skip + (["graph"] if body.get("no_graph") and "graph" not in skip else []),
                      }}
+    _save_job(job_id)
     if auth.configured() and owner:
         auth.record_scan(owner)
     threading.Thread(target=_run_job, args=(job_id, domain, extra, owner),
@@ -1322,12 +1530,15 @@ def api_job_stop(job_id):
     pid = job.get("pid")
     if not pid:
         job.update(status="stopped", finished=time.time())
+        _save_job(job_id)
         return jsonify({"job": job})
     job["status"] = "stopping"
+    _save_job(job_id)
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         job.update(status="stopped", finished=time.time())
+        _save_job(job_id)
         return jsonify({"job": job})
 
     def _hard_kill():
@@ -1614,6 +1825,9 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _cleanup_pid)
     import atexit
     atexit.register(lambda: _cleanup_pid())
+    # Restore and reconcile the job table before serving, so a scan that was
+    # running when the dashboard last stopped is followed or reported, never lost.
+    _load_jobs()
     _start_graph_worker()
     print(f"\n  Argus Recon dashboard  →  http://{host}:{port}")
     print(f"  Serving scans from     →  {config.SCANS_DIR}")

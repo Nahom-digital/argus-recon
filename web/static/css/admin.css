@@ -124,6 +124,35 @@
 .atable td.nowrap{white-space:nowrap}
 .atable .agent{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* access log · one collapsible row per session (account + browser + sitting),
+   its requests folded away until the chevron is opened */
+.atable .asess-head{cursor:pointer}
+.atable .asess-head > td{padding:0;background:var(--surface-2)}
+.atable .asess-head:hover > td{background:var(--hover)}
+.atable .asess-head:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+.asess-sum{display:flex;align-items:center;flex-wrap:wrap;gap:12px;row-gap:4px;padding:9px 12px}
+.asess-sum .chev{width:14px;height:14px;flex:none;color:var(--muted);
+  transition:transform .18s var(--ease)}
+.asess-head.open .chev{transform:rotate(90deg)}
+.asess-when{color:var(--ink);white-space:nowrap}
+.asess-who{flex:none}
+.asess-ip{color:var(--ink-2);white-space:nowrap}
+.asess-ua{max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.asess-spacer{flex:1 1 auto;min-width:8px}
+.asess-count{flex:none;font-family:var(--mono);font-size:11px;color:var(--muted);
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-pill);
+  padding:1px 9px;white-space:nowrap}
+.asess-errs{flex:none;font-size:11px;font-weight:600;color:var(--sev-high-fg);
+  background:var(--sev-high-bg);border-radius:var(--r-pill);padding:1px 9px;white-space:nowrap}
+/* the individual requests, indented under their session */
+.atable .arow td{background:var(--surface)}
+.atable .arow:hover td{background:var(--hover)}
+.atable .arow > td:first-child{padding-left:30px}
+
+@media (prefers-reduced-motion: reduce){
+  .asess-sum .chev{transition:none}
+}
+
 .access-filters{display:flex;align-items:center;gap:7px;margin-left:auto;flex-wrap:wrap}
 .access-filters .input{height:28px;font-size:var(--fs-xs);width:auto;min-width:120px}
 .access-users{display:flex;gap:5px;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid var(--border)}

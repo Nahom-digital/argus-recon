@@ -7,11 +7,57 @@ let DEEP_AVAILABLE = false;
 let TOR = { available: false };
 let PORTSCAN_AVAILABLE = false;
 let WAYBACK = { available: true, engine: false };
+let TOOLS_AVAIL = {};                 // per-tool "installed?" map from /api/status
 const STAGES = [
   ['subdomain', 'subdomains'], ['fingerprint', 'fingerprint'], ['crawl', 'crawl'],
   ['bruteforce', 'bruteforce'], ['ip_enrich', 'IP enrich'], ['classify', 'classify'],
   ['graph', 'graph'],
 ];
+
+/* Every recon tool the engine can run, grouped the way an operator thinks about
+   them, so even inside "deep" or "passive" a single tool can be switched off.
+   One table drives the whole panel; each entry says how turning it off maps onto
+   the scan options the server understands:
+     kind 'stage'  · a pipeline stage · off adds it to `skip`
+     kind 'flag'   · an on-by-default tool behind a --no-x flag · off sets the flag
+     kind 'enable' · an off-by-default extra that mirrors a top-bar toggle
+   avail  · key in the server tool map; when false the tool is locked (not installed)
+   needs  · another tool id this one rides on (off/na when that one is off) */
+const TOOLS = [
+  // passive & discovery
+  { id: 'subdomain', group: 'passive', kind: 'stage', name: 'Subdomain enum',
+    tool: 'crt.sh · dnsx', desc: 'Cert transparency + DNS brute' },
+  { id: 'bbot', group: 'passive', kind: 'flag', flag: 'no_bbot', name: 'BBOT',
+    tool: 'bbot', avail: 'bbot', noSingle: true, desc: 'Deep passive subdomain sweep' },
+  { id: 'deep', group: 'passive', kind: 'enable', mirror: 'optDeep', name: 'Deep DNS',
+    tool: 'SecurityTrails', avail: 'securitytrails', deep: true,
+    desc: 'Extra subdomains + full & historical DNS' },
+  { id: 'wayback', group: 'passive', kind: 'enable', mirror: 'optWayback',
+    name: 'Web archive', tool: 'waybackurls', desc: 'URLs the domain used to serve' },
+  // active scan
+  { id: 'probe', group: 'active', kind: 'flag', flag: 'no_probe', name: 'HTTP probe',
+    tool: 'httpx', desc: 'Which hosts are live, on which scheme' },
+  { id: 'fingerprint', group: 'active', kind: 'stage', name: 'Fingerprint',
+    tool: 'WhatWeb', avail: 'whatweb', desc: 'Name the stack behind each host' },
+  { id: 'deepcrawl', group: 'active', kind: 'flag', flag: 'no_deepcrawl',
+    name: 'Deep crawl', tool: 'katana', avail: 'katana', needs: 'crawl',
+    desc: 'JS-aware route & endpoint discovery' },
+  { id: 'crawl', group: 'active', kind: 'stage', name: 'Crawler', tool: 'built in',
+    desc: 'Fetch pages, forms, bodies, secrets' },
+  { id: 'bruteforce', group: 'active', kind: 'stage', name: 'Content brute',
+    tool: 'ffuf', avail: 'ffuf', desc: 'Guess unlinked paths & files' },
+  { id: 'portscan', group: 'active', kind: 'enable', mirror: 'optPortscan',
+    name: 'Port scan', tool: 'nmap', avail: 'nmap',
+    desc: 'Open ports & services on every IP' },
+  // processing
+  { id: 'ip_enrich', group: 'process', kind: 'stage', name: 'IP enrich',
+    tool: 'ipinfo', desc: 'ASN, org & geo per address' },
+  { id: 'classify', group: 'process', kind: 'stage', name: 'Classify',
+    tool: 'built in', desc: 'Label sensitive fields' },
+  { id: 'graph', group: 'process', kind: 'stage', name: 'Graph', tool: 'built in',
+    desc: 'Build the relationship graph' },
+];
+const TOOL_BY_ID = Object.fromEntries(TOOLS.map(t => [t.id, t]));
 
 /* uptime for the Live chip: minutes up to an hour, then hours, then days */
 function fmtUptime(sec) {
@@ -34,10 +80,12 @@ async function loadStatus() {
     TOR = s.tor || { available: false };
     PORTSCAN_AVAILABLE = !!s.portscan_available;
     WAYBACK = { available: s.wayback_available !== false, engine: !!s.wayback_engine };
+    TOOLS_AVAIL = s.tools || {};
     reflectDeep();
     reflectTor();
     reflectPortscan();
     reflectWayback();
+    reflectTools();
     applyDefaults(s.defaults || {});
 
     // Service state first: the dashboard is the product now, so whether it is
@@ -99,6 +147,19 @@ function applyDefaults(d) {
   if (q && d.max_depth) q.placeholder = String(d.max_depth);
 }
 
+/* Push a top-bar toggle's state down onto its mirrored tool row (deep, port scan,
+   web archive appear in both places · the top bar owns them). */
+function syncToolRow(id, { checked, locked = false, na = false, disabled = false, reason = '' }) {
+  const row = document.querySelector(`.tool[data-tool="${id}"]`);
+  const box = document.getElementById('tool-' + id);
+  if (!row || !box) return;
+  box.checked = !!checked;
+  box.disabled = !!disabled;
+  row.classList.toggle('locked', !!locked);
+  row.classList.toggle('na', !!na);
+  if (reason) row.title = reason;
+}
+
 function reflectDeep() {
   const chk = document.getElementById('deepChk');
   const box = document.getElementById('optDeep');
@@ -108,6 +169,9 @@ function reflectDeep() {
     ? 'Extra subdomains + full DNS records + historical DNS'
     : 'Deep DNS is locked · click to add an API key';
   if (!DEEP_AVAILABLE && box) box.checked = false;
+  syncToolRow('deep', {
+    checked: box && box.checked, locked: !DEEP_AVAILABLE, disabled: !DEEP_AVAILABLE,
+    reason: chk.title });
 }
 
 /* Tor is a machine capability, not a setting: it needs a tor client (or a live
@@ -152,6 +216,10 @@ function reflectPortscan() {
       : 'Scan every discovered IP for open ports & services (slow, and it touches the target directly)';
   if (locked && box) box.checked = false;
   if (box) box.disabled = locked;
+  syncToolRow('portscan', {
+    checked: box && box.checked, disabled: locked,
+    locked: !PORTSCAN_AVAILABLE, na: PORTSCAN_AVAILABLE && passiveOn,
+    reason: chk.title });
 }
 
 /* The archive pass always has a path that works · the index over plain HTTP
@@ -159,11 +227,46 @@ function reflectPortscan() {
    Say which of the two it will use, since the engine is meaningfully wider. */
 function reflectWayback() {
   const chk = document.getElementById('waybackChk');
+  const box = document.getElementById('optWayback');
   if (!chk) return;
   chk.title = WAYBACK.engine
     ? 'Mine the web archive for URLs this domain used to serve · nothing is sent to the target'
     : 'Mine the web archive for URLs this domain used to serve (via the archive index · '
       + 'run ./install.sh to add the faster engine). Nothing is sent to the target.';
+  syncToolRow('wayback', { checked: box && box.checked, reason: chk.title });
+}
+
+/* Lock, grey out, and label every non-mirror tool against what this machine can
+   actually run and the scope in play. The three mirror tools (deep, port scan,
+   web archive) are owned by their reflect* above; this handles the rest. */
+function reflectTools() {
+  const scope = currentScope();
+  TOOLS.forEach(t => {
+    if (t.kind === 'enable') return;              // mirror tools handled elsewhere
+    const row = document.querySelector(`.tool[data-tool="${t.id}"]`);
+    const box = document.getElementById('tool-' + t.id);
+    if (!row || !box) return;
+    let locked = false, na = false, reason = t.desc;
+    if (t.avail && TOOLS_AVAIL[t.avail] === false) {
+      locked = true;
+      reason = `${t.tool} is not installed on this machine · run ./install.sh to add it`;
+    } else if (t.noSingle && scope === 'single') {
+      na = true;
+      reason = 'No host enumeration runs in single-host mode';
+    } else if (t.needs) {
+      const dep = document.getElementById('tool-' + t.needs);
+      if (dep && !dep.checked) {
+        na = true;
+        reason = `Runs inside the ${(TOOL_BY_ID[t.needs] || {}).name || t.needs} · turn that on first`;
+      }
+    }
+    row.classList.toggle('locked', locked);
+    row.classList.toggle('na', na);
+    row.title = reason;
+    const block = locked || na;
+    box.disabled = block;
+    if (block) box.checked = false;
+  });
 }
 
 /* The account's remaining allowance, shown next to the launcher so a limit is
@@ -436,9 +539,21 @@ function jobOpts(j) {
   if (o.passive) tags.push('passive');
   if (o.deep) tags.push('deep DNS');
   if (o.exact_scope) tags.push('exact host');
+  (o.off_tools || []).forEach(t => tags.push(t));
   (o.skipped || []).forEach(s => tags.push('no ' + (label[s] || s)));
   return tags.length
     ? `<span class="jopts">${tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : '';
+}
+
+/* A finished-but-failed or interrupted run carries a plain reason · show it as an
+   inline alert on the row, not only buried in the terminal log. A run that
+   completed with a tool failure gets the softer warning treatment. */
+function jobAlert(j) {
+  if ((j.status === 'failed' || j.status === 'interrupted') && j.error)
+    return `<div class="job-alert err" role="alert">${icon('alert-triangle')}<span>${esc(j.error)}</span></div>`;
+  if (j.status === 'done' && j.warning)
+    return `<div class="job-alert warn" role="status">${icon('alert-triangle')}<span>${esc(j.warning)}</span></div>`;
+  return '';
 }
 
 /* The job list is polled every 2.5s while something is running. It used to be
@@ -475,6 +590,7 @@ function jobRowHtml(j) {
     <span class="jdom">${esc(j.domain)}</span>
     ${jobOpts(j)}
     <span class="jstat">${jobStatusHtml(j)}</span>
+    <div class="jalert-slot" data-alert>${jobAlert(j)}</div>
     <div class="job-log ${openLogs.has(j.id) ? 'open' : ''}" id="log-${esc(j.id)}"></div>
   </div>`;
 }
@@ -512,6 +628,11 @@ async function loadJobs() {
         stat.innerHTML = next;
         stat.dataset.html = next;
         wireJobRow(stat);
+      }
+      const slot = row.querySelector('[data-alert]');
+      if (slot) {
+        const alert = jobAlert(j);
+        if (slot.dataset.html !== alert) { slot.innerHTML = alert; slot.dataset.html = alert; }
       }
     });
   }
@@ -588,15 +709,58 @@ async function refreshLog(id) {
 function pollJobs() { loadJobs(); }
 
 /* ---- advanced options ----------------------------------------------------- */
-/* The engine no longer runs from a terminal, so every pipeline flag has to be
-   reachable here. The common three stay in the bar; the rest live one click
-   away, with a badge so a non-default setup is never invisible. */
-function renderStages() {
-  const wrap = document.getElementById('stageChips');
-  if (!wrap) return;
-  wrap.innerHTML = STAGES.map(([id, label]) =>
-    `<label class="stage"><input type="checkbox" data-stage="${id}" checked>
-      <span>${esc(label)}</span></label>`).join('');
+/* The engine no longer runs from a terminal, so every tool has to be reachable
+   here. The common toggles stay in the bar; the full per-tool list lives one
+   click away (grouped passive / active / processing), with a badge so a
+   non-default setup is never invisible. */
+function renderTools() {
+  const rowHtml = (t) => {
+    const on = t.kind !== 'enable';         // extras start off · everything else on
+    return `<label class="tool" data-tool="${esc(t.id)}">
+      <input type="checkbox" id="tool-${esc(t.id)}" data-tool-box="${esc(t.id)}"${on ? ' checked' : ''}>
+      <span class="tool-body">
+        <span class="tool-top"><span class="tool-name">${esc(t.name)}</span>
+          <span class="tool-tool">${esc(t.tool)}</span></span>
+        <span class="tool-desc">${esc(t.desc)}</span>
+      </span>
+    </label>`;
+  };
+  const fill = (elId, group) => {
+    const wrap = document.getElementById(elId);
+    if (wrap) wrap.innerHTML = TOOLS.filter(t => t.group === group).map(rowHtml).join('');
+  };
+  fill('toolsPassive', 'passive');
+  fill('toolsActive', 'active');
+  fill('toolsProcess', 'process');
+}
+
+/* A locked tool cannot run (not installed) · an N/A tool has no meaning under the
+   current choices (BBOT in single-host mode, deep crawl when the crawler is off).
+   Either way, a click explains why rather than silently doing nothing. */
+function onToolClick(e) {
+  const row = e.currentTarget;
+  const t = TOOL_BY_ID[row.dataset.tool];
+  if (!t) return;
+  const locked = row.classList.contains('locked');
+  const na = row.classList.contains('na');
+  if (t.deep && locked) { e.preventDefault(); openKeyModal(); return; }
+  if (locked || na) { e.preventDefault(); formError(null, row.title || 'this tool is not available'); }
+}
+
+/* A mirror tool (deep, port scan, web archive) writes back to its top-bar twin;
+   every change re-checks the relations (turning the crawler off makes deep crawl
+   N/A) and the options badge. */
+function onToolChange(e) {
+  const t = TOOL_BY_ID[e.target.dataset.toolBox];
+  if (t && t.kind === 'enable' && t.mirror) {
+    const top = document.getElementById(t.mirror);
+    if (top) top.checked = e.target.checked;
+    if (t.id === 'deep') reflectDeep();
+    else if (t.id === 'portscan') reflectPortscan();
+    else if (t.id === 'wayback') reflectWayback();
+  }
+  reflectTools();
+  reflectOptionCount();
 }
 
 /* Each scope answers "what counts as the target?", so the help line states the
@@ -615,16 +779,7 @@ function reflectScope() {
   const scope = currentScope();
   const help = document.getElementById('scopeHelp');
   if (help) help.textContent = SCOPE_HELP[scope] || SCOPE_HELP.apex;
-  // Nothing is enumerated in single-host mode, so the enum-engine switch has
-  // nothing to act on. Disabled and explained, rather than silently ignored.
-  const box = document.getElementById('optNoBbot');
-  const label = document.getElementById('noBbotChk');
-  if (!box || !label) return;
-  const na = scope === 'single';
-  box.disabled = na;
-  if (na) box.checked = false;
-  label.classList.toggle('na', na);
-  label.title = na ? 'No host enumeration runs in single-host mode' : '';
+  reflectTools();       // single-host mode makes BBOT N/A (no enumeration runs)
 }
 
 function scanOptions() {
@@ -633,8 +788,15 @@ function scanOptions() {
     const n = parseInt(v, 10);
     return v && Number.isFinite(n) && n > 0 ? n : null;
   };
-  const skip = [...document.querySelectorAll('[data-stage]')]
-    .filter(c => !c.checked).map(c => c.dataset.stage);
+  // a tool with no rendered box defaults to "on" · a stage that is skipped or a
+  // --no-x flag both read off the tool's own checkbox
+  const on = (id) => {
+    const el = document.getElementById('tool-' + id);
+    return el ? el.checked : true;
+  };
+  const STAGE_IDS = ['subdomain', 'fingerprint', 'crawl', 'bruteforce',
+                     'ip_enrich', 'classify', 'graph'];
+  const skip = STAGE_IDS.filter(id => !on(id));
   const scope = currentScope();
   return {
     passive: document.getElementById('optPassive').checked,
@@ -644,17 +806,24 @@ function scanOptions() {
     wayback: document.getElementById('optWayback').checked,
     single: scope === 'single',
     exact_scope: scope === 'exact',
-    no_bbot: document.getElementById('optNoBbot').checked,
+    no_bbot: !on('bbot'),
+    no_probe: !on('probe'),
+    no_deepcrawl: !on('deepcrawl'),
     max_pages: num('optMaxPages'),
     max_depth: num('optMaxDepth'),
     skip,
   };
 }
 
-/* how many advanced options differ from the defaults */
+/* how many advanced options differ from the defaults · consequences of a choice
+   already counted elsewhere (BBOT off because scope is single) are not re-counted */
 function countAdvanced(o) {
-  return (o.exact_scope ? 1 : 0) + (o.single ? 1 : 0) + (o.no_bbot ? 1 : 0) +
+  let n = (o.exact_scope ? 1 : 0) + (o.single ? 1 : 0) +
     (o.max_pages ? 1 : 0) + (o.max_depth ? 1 : 0) + o.skip.length;
+  if (o.no_bbot && !o.single) n += 1;
+  if (o.no_probe) n += 1;
+  if (o.no_deepcrawl && !o.skip.includes('crawl')) n += 1;
+  return n;
 }
 
 function reflectOptionCount() {
@@ -666,8 +835,12 @@ function reflectOptionCount() {
 }
 
 function wireOptions() {
-  renderStages();
+  renderTools();
   reflectScope();
+  document.querySelectorAll('[data-tool-box]').forEach(box =>
+    box.addEventListener('change', onToolChange));
+  document.querySelectorAll('.tool').forEach(row =>
+    row.addEventListener('click', onToolClick));
   document.querySelectorAll('input[name=scope]').forEach(r =>
     r.addEventListener('change', reflectScope));
   // a locked Tor toggle has nothing to open · say what is missing, in place

@@ -29,8 +29,12 @@
 .ns-adv{display:grid;grid-template-rows:0fr;transition:grid-template-rows .2s var(--ease)}
 .ns-adv.open{grid-template-rows:1fr}
 .ns-adv-clip{overflow:hidden;min-height:0}
-.ns-adv-in{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
-  margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+/* The panel stacks vertically · Scope and Crawl limits share a row while there
+   is room, then the full Tools list runs the width beneath them, so nothing is
+   crammed into a narrow column. */
+.ns-adv-in{display:flex;flex-direction:column;gap:20px;
+  margin-top:14px;padding-top:16px;border-top:1px solid var(--border)}
+.ns-adv-top{display:grid;gap:16px 24px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
 .ns-group{border:none;margin:0;padding:0;min-width:0;display:flex;flex-direction:column;gap:9px}
 .ns-group > legend{padding:0;font-size:var(--fs-xs);font-weight:600;letter-spacing:.04em;
   text-transform:uppercase;color:var(--faint)}
@@ -52,23 +56,43 @@
 .seg input:checked + span{background:var(--surface);color:var(--ink);border:1px solid var(--border-strong)}
 .seg input:focus-visible + span{outline:2px solid var(--ring);outline-offset:1px}
 
-/* pipeline stage toggles */
-.stage-chips{display:flex;flex-wrap:wrap;gap:6px}
-.stage{position:relative;display:inline-flex}
-.stage input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
-/* off state is carried by a dashed edge as well as colour, and stays at AA
-   contrast · these are controls, not decoration */
-.stage span{display:inline-flex;align-items:center;gap:6px;height:25px;padding:0 10px;
-  font-size:var(--fs-xs);font-weight:500;color:var(--muted);background:var(--surface-2);
-  border:1px dashed var(--border-strong);border-radius:var(--r-pill);white-space:nowrap;
-  transition:background .13s var(--ease),color .13s var(--ease),border-color .13s var(--ease)}
-.stage span::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--faint);
-  transition:background .13s var(--ease)}
-.stage input:checked + span{color:var(--ink-2);background:var(--surface);
-  border-style:solid;border-color:var(--border-strong)}
-.stage input:checked + span::before{background:var(--ok)}
-.stage:hover span{color:var(--ink)}
-.stage input:focus-visible + span{outline:2px solid var(--ring);outline-offset:1px}
+/* per-tool toggles · grouped passive / active / processing, each naming the real
+   tool so a specific one can be switched off even inside a broader mode */
+.ns-tools{gap:12px}
+.tool-cols{display:grid;gap:12px 18px;grid-template-columns:repeat(auto-fit,minmax(264px,1fr))}
+.tool-col{display:flex;flex-direction:column;gap:8px;min-width:0}
+.tool-col-process{margin-top:2px}
+.tool-col-head{display:flex;align-items:center;gap:7px;font-size:var(--fs-xs);
+  font-weight:600;letter-spacing:.02em;color:var(--ink-2)}
+.tool-col-head svg{width:14px;height:14px;color:var(--accent)}
+.tool-list{display:flex;flex-direction:column;gap:6px}
+.tool-list-row{display:grid;gap:6px;grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+.tool{display:flex;align-items:flex-start;gap:10px;padding:9px 11px;cursor:pointer;user-select:none;
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm);
+  transition:background .14s var(--ease),border-color .14s var(--ease),
+    opacity .14s var(--ease),transform .1s var(--ease)}
+.tool:hover{background:var(--hover);border-color:var(--border-strong)}
+.tool:active{transform:scale(.99)}
+.tool input[type=checkbox]{margin-top:1px;flex:none;width:15px;height:15px;
+  accent-color:var(--accent);cursor:pointer}
+.tool-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.tool-top{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.tool-name{font-size:var(--fs-sm);font-weight:550;color:var(--ink)}
+.tool-tool{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);line-height:16px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-xs);padding:0 5px}
+.tool-desc{font-size:var(--fs-xs);color:var(--muted);line-height:1.4}
+/* on (running): a quiet solid edge, not a loud fill */
+.tool:has(input:checked){border-color:var(--border-strong);background:var(--surface)}
+/* off but available: legible and clearly inactive (stays at AA contrast) */
+.tool:has(input:not(:checked)):not(.locked):not(.na){opacity:.7}
+/* locked = not installed · N/A = no meaning under the current choices */
+.tool.locked,.tool.na{opacity:.5;cursor:default}
+.tool.locked input,.tool.na input{pointer-events:none}
+.tool.locked .tool-name::after{content:"locked";margin-left:6px;font-size:9.5px;font-weight:600;
+  color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
+.tool.na .tool-name::after{content:"n/a";margin-left:6px;font-size:9.5px;font-weight:600;
+  color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
+.tool:focus-within{outline:2px solid var(--ring);outline-offset:1px}
 
 /* status strip */
 .statusbar{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 26px;font-size:var(--fs-xs)}
@@ -149,6 +173,7 @@
 .job .jstate svg{width:14px;height:14px}
 .job .jstate.done{color:var(--ok)}
 .job .jstate.failed{color:var(--danger)}
+.job .jstate.interrupted{color:var(--warn)}
 .job .jstate.stopped{color:var(--muted)}
 .job .jstop:hover{color:var(--danger)}
 .job .jstop:hover svg{color:var(--danger)}
@@ -157,6 +182,21 @@
   background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm);
   padding:12px;max-height:220px;overflow:auto;white-space:pre-wrap;margin-top:8px;display:none}
 .job-log.open{display:block}
+
+/* a failed / interrupted run states its reason inline · a completed-with-errors
+   run gets the softer warning tint · shown here, not only in the terminal log */
+.jalert-slot{flex-basis:100%}
+.jalert-slot:empty{display:none}
+.job-alert{display:flex;align-items:flex-start;gap:8px;margin-top:8px;padding:9px 11px;
+  font-size:var(--fs-sm);line-height:1.45;border-radius:var(--r-sm)}
+.job-alert svg{width:15px;height:15px;flex:none;margin-top:1px}
+.job-alert.err{color:var(--sev-high-fg);background:var(--sev-high-bg)}
+.job-alert.warn{color:var(--sev-med-fg);background:var(--sev-med-bg)}
+
+@media (prefers-reduced-motion: reduce){
+  .tool{transition:none}
+  .tool:active{transform:none}
+}
 
 /* The modal itself now lives in app.css · the home page's key dialog and the
    admin page's account dialog are the same component. An API key is an opaque

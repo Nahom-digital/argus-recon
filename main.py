@@ -53,6 +53,33 @@ log = get_logger("main")
 
 SRC_PORTSCAN = config.SOURCE_CODES["portscan"]
 
+# Printed on its own line at the very end of a run that had stage errors, so the
+# dashboard's job runner can spot it in the log tail and raise a UI warning on an
+# otherwise-finished scan (web.server · _run_job).
+STAGE_ERROR_MARKER = "##ARGUS_STAGE_ERRORS"
+
+
+def _stage(result, name, fn, *args, **kwargs):
+    """Run one pipeline stage without letting a single tool's failure abort the
+    whole scan.
+
+    A recon run touches a dozen external tools; before, an unhandled error in any
+    one of them (a missing binary, a tool that changed its flags, a timeout that
+    raised) killed the entire process, so the scan stopped mid-way and the only
+    trace was a stack in the log. Now the failure is logged plainly, recorded on
+    the result so it reaches the dashboard, and the remaining stages still run.
+    The scan finishes and saves what it found, with the errors attached.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        log.error(f"stage '{name}' failed and was skipped: {exc}")
+        result.meta.setdefault("errors", []).append(
+            {"stage": name, "error": str(exc)[:500]})
+        return None
+
 # The stages a scan runs by default and can switch off from the dashboard. The
 # port scan is deliberately NOT here: it is opt-in (a toggle, like Tor and deep
 # DNS), because it touches the target's infrastructure directly rather than its
@@ -140,20 +167,21 @@ def run_pipeline(args) -> ScanResult:
 
     # 1. Subdomains + infra
     if "subdomain" in run:
-        subdomain.run(result, domain, passive=args.passive,
-                      timeout=args.bbot_timeout, use_bbot=not args.no_bbot,
-                      deep=deep, input_host=input_host, single=args.single)
+        _stage(result, "subdomain", subdomain.run, result, domain,
+               passive=args.passive, timeout=args.bbot_timeout,
+               use_bbot=not args.no_bbot, deep=deep, input_host=input_host,
+               single=args.single)
     else:
         result.add_subdomain(domain, source="seed")
-        subdomain.run(result, domain, passive=True, use_bbot=False,
-                      deep=deep, input_host=input_host,
-                      single=args.single)  # resolve + DNS only
+        _stage(result, "subdomain", subdomain.run, result, domain,
+               passive=True, use_bbot=False, deep=deep, input_host=input_host,
+               single=args.single)  # resolve + DNS only
 
     # 2. Mass HTTP probe · establishes which hosts are live and on which scheme
     #    for both the fingerprint and the crawl. Runs whenever either of those
     #    stages will (they both start from the live-host list it produces).
     if ("fingerprint" in run or "crawl" in run) and not args.no_probe:
-        probe.run(result, timeout=args.tool_timeout)
+        _stage(result, "probe", probe.run, result, timeout=args.tool_timeout)
 
     # 2a. Port / service scan (opt-in). Placed after the IPs are known but before
     #     the crawl so a web service found on a non-standard port (an admin panel
@@ -161,12 +189,14 @@ def run_pipeline(args) -> ScanResult:
     #     body/form/secret treatment as the rest of the surface.
     port_seeds: list[str] = []
     if args.portscan:
-        got = portscan.run(result, timeout=args.portscan_timeout)
+        got = _stage(result, "portscan", portscan.run, result,
+                     timeout=args.portscan_timeout)
         if isinstance(got, list):
             port_seeds = got
         # Name the stack behind each open web port (host:port), not just nmap's
         # "http" · WhatWeb against the exact port, tags folded onto the record.
-        portscan.fingerprint_web_ports(result, timeout=args.tool_timeout)
+        _stage(result, "portscan_fingerprint", portscan.fingerprint_web_ports,
+               result, timeout=args.tool_timeout)
 
     # 2b. Web archive (opt-in). Nothing is sent to the target: these are URLs the
     #     internet archive recorded over the years, which is where retired admin
@@ -174,11 +204,13 @@ def run_pipeline(args) -> ScanResult:
     #     Runs before the crawl so everything it recovers is re-checked today.
     wayback_seeds: list[str] = []
     if args.wayback:
-        wayback_seeds = wayback.run(result, timeout=args.wayback_timeout) or []
+        wayback_seeds = _stage(result, "wayback", wayback.run, result,
+                               timeout=args.wayback_timeout) or []
 
     # 3. Fingerprint
     if "fingerprint" in run:
-        fingerprint.run(result, timeout=args.tool_timeout)
+        _stage(result, "fingerprint", fingerprint.run, result,
+               timeout=args.tool_timeout)
 
     # 4-5. Crawl (HTML + JS parsing happen inside). A JS-aware deep-crawl
     #      pre-pass discovers routes/endpoints the static crawler cannot see and
@@ -187,11 +219,12 @@ def run_pipeline(args) -> ScanResult:
         seeds: list[str] = list(port_seeds) + list(wayback_seeds)
         if not args.no_deepcrawl:
             roots = probe.live_roots(result) or _fallback_roots(result)
-            got = deepcrawl.run(result, roots=roots, timeout=args.tool_timeout)
+            got = _stage(result, "deepcrawl", deepcrawl.run, result,
+                         roots=roots, timeout=args.tool_timeout)
             if got:
                 seeds += got
-        crawler.run(result, max_pages=args.max_pages, max_depth=args.max_depth,
-                    threads=args.threads, extra_seeds=seeds)
+        _stage(result, "crawl", crawler.run, result, max_pages=args.max_pages,
+               max_depth=args.max_depth, threads=args.threads, extra_seeds=seeds)
     elif args.portscan and port_seeds:
         # crawl disabled but a scan still turned up web ports · record them as
         # confirmed endpoints so they are not silently dropped.
@@ -200,18 +233,23 @@ def run_pipeline(args) -> ScanResult:
 
     # 6. Bruteforce
     if "bruteforce" in run:
-        bruteforce.run(result, timeout=args.tool_timeout,
-                       maxtime=args.brute_maxtime, max_hosts=args.brute_hosts)
+        _stage(result, "bruteforce", bruteforce.run, result,
+               timeout=args.tool_timeout, maxtime=args.brute_maxtime,
+               max_hosts=args.brute_hosts)
 
     # 7. IP enrichment
     if "ip_enrich" in run:
-        ip_enrich.run(result)
+        _stage(result, "ip_enrich", ip_enrich.run, result)
 
     # 8. Classification
     if "classify" in run:
-        classifier.run(result)
+        _stage(result, "classify", classifier.run, result)
 
     result.meta["elapsed_sec"] = round(time.time() - t0, 1)
+    errs = result.meta.get("errors") or []
+    if errs:
+        log.warning(f"{len(errs)} stage(s) reported errors · the scan finished "
+                    "with what the rest of the pipeline found")
     return result
 
 
@@ -265,11 +303,24 @@ def print_summary(result: ScanResult, path) -> None:
               + ", ".join(f"{k}={v}" for k, v in
                           result.meta["classification_summary"].items()),
               file=sys.stderr)
+    errs = d["meta"].get("errors") or []
+    if errs:
+        print("-" * 58, file=sys.stderr)
+        print(f"  {len(errs)} STAGE(S) HAD ERRORS "
+              "(the scan still finished with the rest):", file=sys.stderr)
+        for e in errs:
+            print(f"    · {e.get('stage', '?')}: {e.get('error', '')}", file=sys.stderr)
     print("-" * 58, file=sys.stderr)
     print(f"  Saved: {path}", file=sys.stderr)
     print(f"  View:  http://{config.WEB_HOST}:{config.WEB_PORT}/scan/"
           f"{d['meta']['scan_id']}", file=sys.stderr)
     print("=" * 58 + "\n", file=sys.stderr)
+    # A marker the dashboard's job runner greps for, to flag an otherwise-done
+    # scan that had stage errors. Kept on its own final line for a cheap tail read.
+    if errs:
+        summary = "; ".join(f"{e.get('stage', '?')}: {e.get('error', '')[:120]}"
+                            for e in errs[:6])
+        print(f"{STAGE_ERROR_MARKER} {len(errs)} {summary}", file=sys.stderr)
 
 
 def main(argv=None):
