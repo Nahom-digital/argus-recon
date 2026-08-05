@@ -1377,15 +1377,23 @@ def _run_job(job_id: str, domain: str, extra: list[str], owner: str | None = Non
                     fields["warning"] = warn
                 _JOBS[job_id].update(fields)
             else:
-                # A non-zero exit, or a negative code (killed by a signal, which
-                # on a very large scan is usually the OOM killer). Say so plainly
-                # and lift the real reason out of the log, so it reaches the UI
-                # as an alert rather than being buried in the terminal stream.
-                if rc < 0:
-                    reason = (f"The scan was killed by signal {-rc}. On a large "
-                              "target this is almost always the system running "
-                              "out of memory · try it with fewer stages or a "
-                              "lower page cap.")
+                # A non-zero exit, or a negative code (killed by a signal). Name
+                # the signal honestly · SIGKILL is the out-of-memory killer, while
+                # SIGTERM is a polite stop (a dashboard restart or a shutdown), not
+                # a crash. Lift the real reason out of the log for ordinary exits,
+                # so it reaches the UI as an alert instead of only the terminal.
+                if rc == -9:
+                    reason = ("The scan was killed (SIGKILL) · the machine ran out "
+                              "of memory. Endpoints now spill to disk, so retry it; "
+                              "if it recurs, lower the page cap or drop a stage.")
+                elif rc == -15:
+                    reason = ("The scan was stopped by the system (SIGTERM), usually "
+                              "a dashboard restart or shutdown rather than a crash. "
+                              "The service now keeps scans running across restarts, "
+                              "so starting it again should hold.")
+                elif rc < 0:
+                    reason = (f"The scan was killed by signal {-rc}. "
+                              + (_log_tail_error(job_id) or "")).strip()
                 else:
                     reason = _log_tail_error(job_id) or f"The scan exited with code {rc}."
                 _JOBS[job_id].update(status="failed", returncode=rc,

@@ -237,6 +237,15 @@ Environment=ARGUS_WEB_PORT=$PORT
 ExecStart="$HERE/serve"
 Restart=on-failure
 RestartSec=3
+# A scan runs as a detached child of the dashboard. With the default
+# KillMode=control-group, restarting the dashboard (on-failure, an upgrade, or a
+# reboot) would SIGTERM the whole group and kill any scan mid-run · which is
+# exactly the "killed by signal 15" a large scan used to hit. KillMode=process
+# signals only the dashboard, so running scans survive a restart and the
+# dashboard re-attaches to them when it comes back up.
+KillMode=process
+# If a single process is OOM-killed, do not tear the whole service down with it.
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target

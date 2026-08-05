@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
+from .spill import SpillMap
 from .util import registrable_root, host_of, short_hash
 
 
@@ -39,7 +40,13 @@ class ScanResult:
         # Keyed stores for dedup ------------------------------------------------
         self._subdomains: dict[str, dict] = {}      # host -> record
         self._ips: dict[str, dict] = {}             # ip -> record
-        self._endpoints: dict[str, dict] = {}       # "METHOD url" -> record
+        # Endpoints are the one store that scales without bound (a deep crawl is
+        # a million records). They live in a spill store: in memory while small,
+        # overflowing to disk once large, so the worker's footprint stays bounded
+        # instead of running the process out of memory · see modules.spill.
+        self._endpoints = SpillMap(                 # "METHOD url" -> record
+            config.SPILL_DIR / f"{self.meta['scan_id']}.spill.db",
+            hot_max=config.ENDPOINT_HOT_MAX)
         self._files: dict[str, dict] = {}           # url -> record
         self._js_files: dict[str, dict] = {}        # url -> record
         self._secrets: dict[str, dict] = {}         # hash -> record
@@ -272,6 +279,13 @@ class ScanResult:
     def iter_endpoints(self):
         return self._endpoints.values()
 
+    def map_endpoints(self, fn) -> None:
+        """Apply fn(endpoint) to every endpoint, persisting the change even for
+        records that have spilled to disk. The classifier uses this to tag each
+        endpoint · a plain iterate-and-mutate would silently drop the tags on any
+        record that is no longer in memory."""
+        self._endpoints.map_inplace(fn)
+
     # ------------------------------------------------------------------ #
     # Discovered files
     # ------------------------------------------------------------------ #
@@ -367,44 +381,58 @@ class ScanResult:
     # Serialisation
     # ------------------------------------------------------------------ #
     def _stats(self) -> dict:
-        eps = list(self._endpoints.values())
         dns_records = sum(len(v) for v in self.dns.get("records", {}).values())
         dns_history = sum(len(v) for v in self.dns.get("history", {}).values())
         open_ports = sum(len(r.get("ports") or []) for r in self._ips.values())
+        # One streaming pass over the endpoints · a huge scan's endpoint store may
+        # be mostly on disk, so materialising it just to count would defeat the
+        # spill. Every tally the JSON needs is accumulated here in a single walk.
+        n = in_scope = out_scope = forms = requests = fields = classified = 0
+        for e in self._endpoints.values():
+            n += 1
+            if e["in_scope"]:
+                in_scope += 1
+            else:
+                out_scope += 1
+            etype = e["type"]
+            if etype == "form":
+                forms += 1
+            if etype in ("form", "xhr", "fetch"):
+                requests += 1
+            fields += sum(1 for f in (e.get("fields") or []) if f.get("name"))
+            if e["classifications"]:
+                classified += 1
         return {
             "subdomains": len(self._subdomains),
             "ips": len(self._ips),
             "open_ports": open_ports,
             "scanned_ips": sum(1 for r in self._ips.values() if r.get("scanned")),
-            "endpoints": len(eps),
-            "in_scope_endpoints": sum(1 for e in eps if e["in_scope"]),
-            "out_of_scope_endpoints": sum(1 for e in eps if not e["in_scope"]),
-            "forms": sum(1 for e in eps if e["type"] == "form"),
+            "endpoints": n,
+            "in_scope_endpoints": in_scope,
+            "out_of_scope_endpoints": out_scope,
+            "forms": forms,
             # The graph groups form/xhr/fetch endpoints under one "Request" node
             # type and counts each named input as a "Field". Recording both here
             # means the graph legend can report the true surface of a huge scan
             # from `meta` alone · without re-walking a million endpoints to count.
-            "requests": sum(1 for e in eps if e["type"] in ("form", "xhr", "fetch")),
-            "fields": sum(sum(1 for f in (e.get("fields") or []) if f.get("name"))
-                          for e in eps),
+            "requests": requests,
+            "fields": fields,
             "js_files": len(self._js_files),
             "files": len(self._files),
             "secrets": len(self._secrets),
-            "classified_requests": sum(1 for e in eps if e["classifications"]),
+            "classified_requests": classified,
             "dns_records": dns_records,
             "dns_history": dns_history,
         }
 
-    def to_dict(self) -> dict:
+    def _shell(self) -> dict:
+        """The whole document except the endpoints array · every layer that stays
+        small no matter how large the crawl gets (meta, dns, subdomains, infra,
+        files, js_files, secrets). Stamps the closing meta fields as a side effect
+        so it is the single place `finished_at` / `duration_sec` / `stats` are set."""
         self.meta["finished_at"] = _now_iso()
         self.meta["duration_sec"] = round(time.time() - self.started, 1)
         self.meta["stats"] = self._stats()
-        # `endpoints` is written LAST on purpose. It is the only array that scales
-        # without bound (a deep crawl is a million records / a gigabyte); every
-        # other layer stays small. Keeping it last means a reader that needs only
-        # the "shell" · meta, dns, subdomains, infra, files, js_files, secrets ·
-        # can stream forward and stop the moment the endpoints array begins,
-        # instead of parsing past a gigabyte to reach a trailing key.
         return {
             "meta": self.meta,
             "dns": self.dns,
@@ -413,23 +441,68 @@ class ScanResult:
             "files": sorted(self._files.values(), key=lambda r: r["url"]),
             "js_files": sorted(self._js_files.values(), key=lambda r: r["url"]),
             "secrets": list(self._secrets.values()),
-            "endpoints": sorted(self._endpoints.values(),
-                                key=lambda r: (not r["in_scope"], r["host"], r["url"])),
         }
 
+    def to_dict(self) -> dict:
+        # `endpoints` is written LAST on purpose. It is the only array that scales
+        # without bound (a deep crawl is a million records / a gigabyte); every
+        # other layer stays small. Keeping it last means a reader that needs only
+        # the "shell" · meta, dns, subdomains, infra, files, js_files, secrets ·
+        # can stream forward and stop the moment the endpoints array begins,
+        # instead of parsing past a gigabyte to reach a trailing key.
+        #
+        # This materialises every endpoint · use `save()` (which streams) for a
+        # huge scan. It is kept for callers that genuinely need the whole document
+        # in hand (a Neo4j load, the tests).
+        doc = self._shell()
+        doc["endpoints"] = list(self._endpoints.sorted_stream())
+        return doc
+
     def save(self, scans_dir: Path | None = None) -> Path:
+        """Write the scan JSON, streaming the endpoints array straight into the
+        file so the whole (potentially gigabyte) list is never resident at once,
+        and index each endpoint into the SQLite cache in the same pass. This is
+        what keeps a million-endpoint scan from running the worker out of memory
+        at the finish line."""
         scans_dir = scans_dir or config.SCANS_DIR
         scans_dir.mkdir(parents=True, exist_ok=True)
         out = scans_dir / f"{self.meta['scan_id']}.json"
-        doc = self.to_dict()
-        with open(out, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, ensure_ascii=False)
+        shell = self._shell()
         # Populate the SQLite cache (summary + per-endpoint light index) so the
-        # dashboard never has to parse this whole file just to list it or expand
-        # a row. Best-effort · the JSON on disk stays the source of truth.
+        # dashboard never has to parse this whole file just to list it or expand a
+        # row · fed endpoint-by-endpoint here. Best-effort · the JSON is the truth.
+        indexer = None
         try:
             from . import store
-            store.index_scan(self.meta["scan_id"], doc, out)
+            indexer = store.ScanIndexer(self.meta["scan_id"], shell)
+        except Exception:
+            indexer = None
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write("{")
+            for i, (key, val) in enumerate(shell.items()):
+                if i:
+                    fh.write(",")
+                fh.write(json.dumps(key) + ":" + json.dumps(val, ensure_ascii=False))
+            fh.write(',"endpoints":[')
+            first = True
+            for ep in self._endpoints.sorted_stream():
+                fh.write(json.dumps(ep, ensure_ascii=False) if first
+                         else "," + json.dumps(ep, ensure_ascii=False))
+                first = False
+                if indexer is not None:
+                    indexer.add(ep)
+            fh.write("]}")
+        if indexer is not None:
+            try:
+                indexer.finish(out)
+            except Exception:
+                pass
+        return out
+
+    def close(self) -> None:
+        """Release the endpoint spill store and delete its scratch file. Safe to
+        call more than once; call it when the scan is fully written."""
+        try:
+            self._endpoints.close()
         except Exception:
             pass
-        return out

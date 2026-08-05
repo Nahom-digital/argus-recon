@@ -267,7 +267,14 @@ def _fallback_roots(result: ScanResult) -> list[str]:
 
 
 def print_summary(result: ScanResult, path) -> None:
-    d = result.to_dict()
+    # Read straight off meta rather than materialising the whole document again ·
+    # save() already computed and stamped the stats, and a huge scan's endpoints
+    # have been streamed out and must not be pulled back into memory just to print
+    # a summary.
+    meta = result.meta
+    if "stats" not in meta:
+        meta["stats"] = result._stats()
+    d = {"meta": meta}
     s = d["meta"]["stats"]
     print("\n" + "=" * 58, file=sys.stderr)
     print(f"  SCAN COMPLETE  ·  {d['meta']['domain']}", file=sys.stderr)
@@ -404,6 +411,7 @@ def main(argv=None):
                   "established.\n  Nothing was sent to the target.\n", file=sys.stderr)
             return 3
 
+    result = None
     try:
         result = run_pipeline(args)
         if args.tor:
@@ -418,10 +426,13 @@ def main(argv=None):
         #     is queued and the dashboard's worker loads it. Either way a failure
         #     is queued, never lost, and the graph still renders from JSON.
         if "graph" in _selected(args):
-            doc = result.to_dict()
             backend = graph_loader.active_backend()
             loaded = False
             if backend == "neo4j":
+                # Only Neo4j needs the whole document in hand · materialise it once
+                # here rather than for the far more common queued path below, where
+                # a huge scan would otherwise be pulled back into memory for nothing.
+                doc = result.to_dict()
                 loaded = graph_loader.load(doc, backend="neo4j")
                 if loaded:
                     log.info("graph loaded into neo4j")
@@ -432,7 +443,7 @@ def main(argv=None):
             if not loaded and backend != "none":
                 try:
                     from modules import store
-                    store.enqueue_graph(doc["meta"]["scan_id"], doc["meta"]["domain"])
+                    store.enqueue_graph(result.meta["scan_id"], result.meta["domain"])
                     if backend == "kuzu":
                         log.info("graph queued for the dashboard's embedded DB")
                 except Exception:
@@ -440,6 +451,10 @@ def main(argv=None):
 
         print_summary(result, path)
     finally:
+        # Release the endpoint spill store (deletes its scratch DB) before Tor,
+        # so a huge scan leaves nothing behind under scans/.spill.
+        if result is not None:
+            result.close()
         tor.shutdown()
     return 0
 

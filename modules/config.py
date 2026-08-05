@@ -45,6 +45,17 @@ WORDLISTS_DIR.mkdir(exist_ok=True)
 # restart · a later view of the same scan is served straight from disk.
 GRAPHCACHE_DIR = SCANS_DIR / ".graphcache"
 
+# Scratch space for the endpoint spill store (modules.spill). A deep crawl of a
+# million endpoints overflows the coldest records here instead of holding them
+# all in RAM · the file is scratch, written and deleted within one scan.
+SPILL_DIR = SCANS_DIR / ".spill"
+
+# How many endpoint records the scan keeps in memory before it starts spilling
+# the coldest ones to disk. Under this, a scan behaves exactly as it always has
+# (everything in RAM, no disk store at all); over it, memory stays roughly flat
+# no matter how large the crawl gets. Tune down on a tiny box, up on a big one.
+ENDPOINT_HOT_MAX = _int_env("ARGUS_ENDPOINT_HOT_MAX", 60000)
+
 
 # --------------------------------------------------------------------------- #
 # .env · minimal loader (no external dependency). Keys already present in the

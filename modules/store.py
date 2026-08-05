@@ -237,6 +237,78 @@ def index_scan(scan_id: str, doc: dict, path: Path) -> None:
         log.debug(f"index_scan failed for {scan_id}: {exc}")
 
 
+class ScanIndexer:
+    """Streaming counterpart to index_scan · fed one endpoint at a time while the
+    engine writes the scan JSON, so a huge scan is indexed without the whole
+    endpoint list ever being held in memory. The panel/summary row is written at
+    finish(), once the file's size and mtime are known.
+
+    Best-effort throughout: if the cache DB is unavailable the indexer quietly
+    does nothing, exactly like index_scan, and the JSON on disk stays the truth.
+    """
+
+    def __init__(self, scan_id: str, panel_doc: dict):
+        self.scan_id = scan_id
+        self.panel_doc = panel_doc          # the shell · everything but endpoints
+        self.conn = _connect()
+        self._batch: list[tuple] = []
+        self.ok = self.conn is not None
+        if self.ok:
+            try:
+                with self.conn:
+                    self.conn.execute("DELETE FROM endpoints WHERE scan_id=?", (scan_id,))
+            except Exception as exc:
+                log.debug(f"ScanIndexer reset failed for {scan_id}: {exc}")
+                self.ok = False
+
+    def add(self, ep: dict) -> None:
+        if not self.ok or not ep.get("id"):
+            return
+        self._batch.append((self.scan_id, ep.get("id") or "",
+                            json.dumps(_light_endpoint(ep)), _ep_rank(ep)))
+        if len(self._batch) >= 2000:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self.ok or not self._batch:
+            return
+        try:
+            with self.conn:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO endpoints(scan_id,eid,light,rank) "
+                    "VALUES(?,?,?,?)", self._batch)
+        except Exception as exc:
+            log.debug(f"ScanIndexer flush failed for {self.scan_id}: {exc}")
+            self.ok = False
+        self._batch = []
+
+    def finish(self, path: Path) -> None:
+        if not self.ok:
+            return
+        self._flush()
+        try:
+            st = path.stat()
+            mtime, size = st.st_mtime, st.st_size
+        except OSError:
+            mtime, size = time.time(), 0
+        summary = build_summary(self.panel_doc, scan_id=self.scan_id, mtime=mtime, size=size)
+        panel = json.dumps(build_panel(self.panel_doc))
+        meta = self.panel_doc.get("meta", {})
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO scans(scan_id,domain,mtime,size,started_at,finished_at,summary,panel,updated) "
+                    "VALUES(?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(scan_id) DO UPDATE SET domain=excluded.domain,"
+                    "mtime=excluded.mtime,size=excluded.size,started_at=excluded.started_at,"
+                    "finished_at=excluded.finished_at,summary=excluded.summary,"
+                    "panel=excluded.panel,updated=excluded.updated",
+                    (self.scan_id, meta.get("domain"), mtime, size, meta.get("started_at"),
+                     meta.get("finished_at"), json.dumps(summary), panel, time.time()))
+        except Exception as exc:
+            log.debug(f"ScanIndexer finish failed for {self.scan_id}: {exc}")
+
+
 def get_summary(scan_id: str, mtime: float) -> dict | None:
     """Cached summary if it matches the file's current mtime, else None."""
     conn = _connect()

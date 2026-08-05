@@ -35,11 +35,10 @@ def classify_field(name: str) -> dict | None:
 
 def run(result: ScanResult) -> None:
     t0 = time.time()
-    classified_fields = 0
-    classified_eps = 0
+    counts = {"fields": 0, "eps": 0}
     category_counts: dict[str, int] = {}
 
-    for ep in result.iter_endpoints():
+    def classify_ep(ep: dict) -> None:
         tags: dict[str, dict] = {}   # category -> {label,severity,sev,fields}
         for field in ep["fields"]:
             cls = classify_field(field.get("name", ""))
@@ -48,7 +47,7 @@ def run(result: ScanResult) -> None:
             field["classification"] = {"category": cls["category"],
                                        "label": cls["label"],
                                        "severity": cls["severity"]}
-            classified_fields += 1
+            counts["fields"] += 1
             cat = cls["category"]
             entry = tags.setdefault(cat, {"category": cat, "label": cls["label"],
                                           "severity": cls["severity"],
@@ -64,9 +63,16 @@ def run(result: ScanResult) -> None:
             ep["classifications"] = [{k: v for k, v in t.items() if k != "sev"}
                                      for t in ordered]
             ep["max_severity"] = config.CLASSIFICATION_SEVERITY[max(t["sev"] for t in tags.values())]
-            classified_eps += 1
+            counts["eps"] += 1
             for cat in tags:
                 category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    # map_endpoints applies the tagging to every endpoint and persists it even
+    # for records that have spilled to disk · a plain iterate-and-mutate would
+    # silently lose the tags on a huge scan's overflowed endpoints.
+    result.map_endpoints(classify_ep)
+    classified_fields = counts["fields"]
+    classified_eps = counts["eps"]
 
     result.meta["classification_summary"] = dict(
         sorted(category_counts.items(), key=lambda kv: -kv[1]))
