@@ -16,7 +16,7 @@
 /* How much of an unbounded list one report carries. A deep crawl holds more
    rows than anyone prints; each table says what it left out rather than
    silently ending. */
-const REPORT_CAPS = { subdomains: 3000, files: 3000, requests: 600, secrets: 2000 };
+const REPORT_CAPS = { subdomains: 3000, files: 3000, requests: 600, secrets: 2000, findings: 2000 };
 
 /* Where this page's static assets live, taken from a tag that is already on it,
    so the report works under any mount prefix. */
@@ -90,6 +90,7 @@ function reportHtml() {
   const sections = [
     reportSummary(s, m),
     reportModules(m),
+    reportFindings(s.findings || []),
     reportDns(s.dns || {}),
     reportSubdomains(s.subdomains || []),
     reportInfra(((s.infra || {}).ips) || []),
@@ -166,7 +167,7 @@ table.t tr{break-inside:avoid}
 .stat b{display:block;font-family:'Oswald',sans-serif;font-size:14pt;font-weight:500;line-height:1.1}
 .stat span{font-size:7.5pt;color:#736e62;text-transform:uppercase;letter-spacing:.04em}
 .sev{font-weight:600}
-.sev.high{color:#a63a28}.sev.medium{color:#8a5e12}.sev.low{color:#5c6a4c}
+.sev.critical{color:#8f1a17}.sev.high{color:#a63a28}.sev.medium{color:#8a5e12}.sev.low{color:#5c6a4c}.sev.info{color:#3f6079}
 .s2{color:#3f7d52}.s3{color:#9a6a16}.s4,.s5{color:#b4402e}.sx{color:#8a8375}
 .tag{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:7pt;padding:0 3pt;
   border:.4pt solid #e4e1d5;border-radius:3pt;margin:0 2pt 2pt 0;color:#4a473f}
@@ -359,6 +360,23 @@ function reportTech(subs) {
   return `<section><h2>Tech stack</h2>
     ${rTable(['Technology', 'Hosts', 'Detected on', 'Served from'], rows,
       ['20%', '7%', '43%', '30%'])}</section>`;
+}
+
+function reportFindings(findings) {
+  if (!findings.length) return '';
+  const rows = findings.slice(0, REPORT_CAPS.findings).map(f => {
+    const host = f.host || (f.target && f.target.includes('://') ? splitUrl(f.target).host : f.target || '');
+    return `<tr><td class="sev ${sevClass(f.severity)}">${esc(f.severity)}</td>
+      <td>${esc(f.title)}</td>
+      <td class="mono faint">${esc(host)}</td>
+      <td class="mono">${f.confidence != null ? esc(String(f.confidence)) : ''}</td>
+      <td class="faint">${esc(f.recommendation || '')}</td>
+      <td class="faint mono">${esc((f.sources || []).join(' '))}</td></tr>`;
+  });
+  return `<section><h2>Findings</h2>
+    ${rTable(['Sev', 'Finding', 'Target', 'Conf', 'Recommendation', 'Src'], rows,
+      ['7%', '30%', '20%', '6%', '30%', '7%'])}
+    ${capNote(findings.length, REPORT_CAPS.findings, 'findings')}</section>`;
 }
 
 function reportSecrets(secrets) {

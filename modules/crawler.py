@@ -138,10 +138,19 @@ class Crawler:
             jsrec["endpoints"] = parsed["endpoints"]
             jsrec["requests"] = parsed["requests"]
             jsrec["secrets"] = parsed["secrets"]
+            # deep-recon categories · store them on the JS record so the panel and
+            # the graph can show what the asset actually leaks, then promote the
+            # ones that matter into the unified findings list.
+            for k in ("graphql", "graphql_introspection", "websockets", "oauth",
+                      "source_maps", "cloud", "firebase", "internal_refs",
+                      "analytics", "comments", "params", "third_party"):
+                if k in parsed:
+                    jsrec[k] = parsed[k]
             for s in parsed["secrets"]:
                 self.result.add_secret(kind=s["type"], match=s["match"],
                                        severity=s["severity"], source_url=url,
                                        context=s.get("context", ""), found_by="js")
+            self._emit_js_findings(url, parsed)
             # endpoints discovered as string literals
             for ep in parsed["endpoints"]:
                 norm = normalize_url(ep, url)
@@ -176,6 +185,114 @@ class Crawler:
                 if scoped and r["method"] in ("GET", None):
                     new.add(norm)
         return new
+
+    def _emit_js_findings(self, source_url: str, parsed: dict) -> None:
+        """Promote the high-value things a JS file leaks into the unified findings
+        list · secrets, source maps, Firebase config, cloud buckets, internal
+        addresses, GraphQL/introspection, security-relevant TODOs. Dedup/merge is
+        handled by schema.add_finding, so the same leak seen in ten bundles is one
+        finding. Called while holding self.lock (from _handle_js)."""
+        add = self.result.add_finding
+        host = host_of(source_url)
+
+        for s in parsed.get("secrets", []):
+            match = s.get("match") or ""
+            add(title=f"{s['type']} exposed in client JavaScript",
+                category="secret", severity=s.get("severity", "medium"),
+                confidence=80, source="js", target=source_url,
+                evidence=s.get("context", "")[:300],
+                parsed={"type": s["type"], "match": match, "line": s.get("line"),
+                        "file": source_url},
+                risk=("A credential or key is shipped to the browser, where anyone "
+                      "can read it straight from the page source."),
+                recommendation=("Revoke and rotate the key, move the secret "
+                                "server-side, and scope any genuinely-public key to "
+                                "the minimum it needs."),
+                tags=["secret", "js"],
+                signature=f"secret:{s['type']}:{match[:12]}")
+
+        for m in parsed.get("source_maps", []):
+            mapurl = normalize_url(m, source_url) or m
+            add(title="JavaScript source map exposed", category="exposure",
+                severity="low", confidence=70, source="js", target=mapurl,
+                evidence=f"sourceMappingURL={m} (from {source_url})",
+                parsed={"source_map": mapurl, "from": source_url},
+                risk=("A source map reconstructs the original, unminified source · "
+                      "comments, internal paths and business logic included."),
+                recommendation="Do not deploy .map files to production.",
+                tags=["source-map", "js"], signature=f"sourcemap:{mapurl}")
+            if mapurl:
+                self.result.add_file(mapurl, kind="data", subtype="sourcemap",
+                                     source="js", found_on=source_url)
+
+        fb = parsed.get("firebase")
+        if fb:
+            proj = fb.get("projectId") or fb.get("authDomain") or "unknown"
+            add(title=f"Firebase configuration exposed ({proj})", category="cloud",
+                severity="medium", confidence=75, source="js", target=source_url,
+                evidence="; ".join(f"{k}={v}" for k, v in list(fb.items())[:6]),
+                parsed=fb,
+                risk=("The Firebase project config is public. With permissive "
+                      "database/storage rules, data becomes readable or writable "
+                      "by anyone holding this config."),
+                recommendation=("Confirm Firestore / RTDB / Storage rules deny "
+                                "unauthenticated access and restrict the API key."),
+                tags=["firebase", "gcp", "js"], signature=f"firebase:{proj}")
+
+        for c in parsed.get("cloud", []):
+            if c.get("type") not in ("s3-bucket", "s3-uri", "gcs", "blob", "spaces"):
+                continue
+            add(title=f"{c['provider'].upper()} storage bucket referenced",
+                category="cloud", severity="info", confidence=60, source="js",
+                target=c["value"],
+                evidence=f"{c['type']}: {c['value']} (in {source_url})", parsed=c,
+                risk=("A cloud storage bucket is referenced in client code; if it "
+                      "is world-listable it may leak files."),
+                recommendation="Verify the bucket denies public listing and access.",
+                tags=["cloud", c["provider"]], signature=f"bucket:{c['value']}")
+
+        for ref in parsed.get("internal_refs", []):
+            sev = "medium" if ref["type"] == "ip" else "low"
+            add(title=f"Internal {ref['type']} leaked in client JavaScript",
+                category="info-leak", severity=sev, confidence=65, source="js",
+                target=ref["value"],
+                evidence=f"{ref['value']} (in {source_url})",
+                parsed={"value": ref["value"], "kind": ref["type"], "file": source_url},
+                risk=("An internal address exposes network layout that is useful "
+                      "for pivoting once a foothold exists."),
+                recommendation="Strip internal hostnames / IPs from production bundles.",
+                tags=["info-leak", "js"], signature=f"internal:{ref['value']}")
+
+        for g in parsed.get("graphql", []):
+            gnorm = normalize_url(g, source_url) or g
+            introspect = bool(parsed.get("graphql_introspection"))
+            add(title="GraphQL endpoint discovered"
+                      + (" (introspection referenced)" if introspect else ""),
+                category="api", severity="low" if introspect else "info",
+                confidence=70 if introspect else 55, source="js", target=gnorm,
+                evidence=f"{g} (in {source_url})",
+                parsed={"endpoint": gnorm, "introspection": introspect},
+                risk=("GraphQL introspection can enumerate the whole schema, "
+                      "revealing every type, query and mutation."
+                      if introspect else
+                      "A GraphQL endpoint is a broad, single-URL attack surface."),
+                recommendation=("Disable introspection in production and enforce "
+                                "auth plus query depth / complexity limits."),
+                tags=["graphql", "api"], signature=f"graphql:{gnorm}")
+
+        for cm in parsed.get("comments", []):
+            if not cm.get("security"):
+                continue
+            add(title=f"Security-relevant {cm['tag']} comment in JavaScript",
+                category="info-leak", severity="low", confidence=55, source="js",
+                target=source_url,
+                evidence=f"{cm['tag']}: {cm['text']} (line {cm.get('line')})",
+                parsed=cm,
+                risk=("Developer comments can reveal known weaknesses, "
+                      "workarounds, or code meant to be removed before launch."),
+                recommendation="Strip developer comments from production bundles.",
+                tags=["comment", "js"],
+                signature=f"comment:{host}:{(cm.get('text') or '')[:40]}")
 
     # ------------------------------------------------------------------ #
     # HTML handling

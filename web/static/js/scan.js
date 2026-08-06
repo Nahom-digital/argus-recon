@@ -282,6 +282,16 @@ function renderPanel(s) {
     <div style="margin-top:6px">${mods}</div>
   </div>`;
 
+  // Findings · the ranked cross-module conclusions (exposed services, weak TLS,
+  // leaked secrets, bypassable controls, known CVEs). Placed first so the scan's
+  // headline reads before the raw inventory below. Auto-collapses when clean.
+  const findings = s.findings || [];
+  setCount('cFindings', findings.length);
+  F.findSev = ''; F.findCat = '';
+  buildFindingFilter('findingFilter', 'sd');
+  renderFindingList();
+  document.querySelector('.side-sec[data-sec="findings"]').classList.toggle('collapsed', !findings.length);
+
   // Each section below carries its own filter, built from what this scan
   // actually contains · a status code nothing returned is never offered.
   const subs = s.subdomains || [];
@@ -448,6 +458,12 @@ const filteredIps = () => allIps().filter(ipMatches);
 function secretMatches(x) { return !F.secretSev || x.severity === F.secretSev; }
 const filteredSecrets = () => allSecrets().filter(secretMatches);
 
+const allFindings = () => (SCAN && SCAN.findings) || [];
+function findMatches(f) {
+  return (!F.findSev || f.severity === F.findSev) && (!F.findCat || f.category === F.findCat);
+}
+const filteredFindings = () => allFindings().filter(findMatches);
+
 /* Tech is a derived list (fingerprint -> the hosts carrying it), so it is built
    rather than filtered in place. */
 function techEntries() {
@@ -516,6 +532,25 @@ function buildSecretFilter(containerId, prefix) {
   }]);
 }
 
+/* Findings · by severity (worst first) and by type. */
+function buildFindingFilter(containerId, prefix) {
+  const items = allFindings();
+  const order = ['critical', 'high', 'medium', 'low', 'info'];
+  const sevCounts = facetCounts(items, f => f.severity);
+  const sevOpts = [['', `all severities (${items.length})`]];
+  order.filter(s => sevCounts.get(s)).forEach(s => sevOpts.push([s, `${s} (${sevCounts.get(s)})`]));
+  const catCounts = facetCounts(items, f => f.category);
+  const catOpts = [['', `all types (${[...catCounts.keys()].length})`]];
+  [...catCounts.entries()].sort((a, b) => b[1] - a[1])
+    .forEach(([c, n]) => catOpts.push([c, `${c} (${n})`]));
+  panelFilter(containerId, prefix, [
+    { key: 'findSev', id: 'FindSev', aria: 'Filter findings by severity',
+      value: F.findSev, options: sevOpts, onChange: refreshFindings },
+    { key: 'findCat', id: 'FindCat', aria: 'Filter findings by type',
+      value: F.findCat, options: catOpts, onChange: refreshFindings },
+  ]);
+}
+
 /* ---- one refresh per section ----------------------------------------------
    A filter can be moved from the left panel or from the detail view, and both
    are on screen in their own mode, so each refresh redraws whichever of the two
@@ -538,6 +573,11 @@ function refreshTech() {
 function refreshSecrets() {
   renderSecretList();
   renderDvBody('secrets');
+  syncPanelSelects();
+}
+function refreshFindings() {
+  renderFindingList();
+  renderDvBody('findings');
   syncPanelSelects();
 }
 function refreshFiles() {
@@ -571,6 +611,61 @@ function renderSecretList() {
   const secrets = filteredSecrets();
   el.innerHTML = secrets.map(secRow).join('')
     || emptyMini(F.secretSev ? 'none at that severity' : 'none flagged');
+}
+
+function renderFindingList() {
+  const el = document.getElementById('findingList');
+  if (!el) return;
+  const items = filteredFindings();
+  el.innerHTML = items.map(findRow).join('')
+    || emptyMini((F.findSev || F.findCat) ? 'none match those filters'
+        : (allFindings().length ? 'none'
+           : 'no findings · the surface looks clean, or no active review ran'));
+}
+
+/* One finding · summary row (severity, title, confidence) that expands to the
+   risk, the fix, the raw evidence, a parsed breakdown, tags and references.
+   Same expand vocabulary as the file rows: instant detail, animated chevron. */
+function findRow(f) {
+  const src = (f.sources || []).map(sc =>
+    `<span class="src-chip mini" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`).join('');
+  const host = f.host || (f.target && f.target.includes('://') ? splitUrl(f.target).host : f.target || '');
+  const tgtPath = f.target && f.target.includes('://') ? splitUrl(f.target).path : '';
+  const conf = typeof f.confidence === 'number' ? f.confidence : null;
+  const tags = (f.tags || []).slice(0, 6).map(t => `<span class="tag mono">${esc(t)}</span>`).join('');
+  const refs = (f.refs || []).map(r =>
+    `<a class="find-ref" href="${esc(r)}" target="_blank" rel="noopener">${icon('external-link')}${esc(splitUrl(r).host || r)}</a>`).join('');
+  const parsed = (f.parsed && typeof f.parsed === 'object')
+    ? Object.entries(f.parsed)
+        .filter(([, v]) => v != null && v !== '' && (!Array.isArray(v) || v.length))
+        .slice(0, 8)
+        .map(([k, v]) => `<div class="find-kv"><span class="k">${esc(k)}</span><span class="v mono">${
+          esc(Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : String(v))).slice(0, 300)
+        }</span></div>`).join('')
+    : '';
+  const det = [
+    f.risk ? `<div class="find-block"><span class="find-lbl">Risk</span><p>${esc(f.risk)}</p></div>` : '',
+    f.recommendation ? `<div class="find-block"><span class="find-lbl">Fix</span><p>${esc(f.recommendation)}</p></div>` : '',
+    f.evidence ? `<div class="find-block"><span class="find-lbl">Evidence</span><pre class="find-ev">${esc(f.evidence)}</pre></div>` : '',
+    parsed ? `<div class="find-block"><span class="find-lbl">Detail</span><div class="find-kvs">${parsed}</div></div>` : '',
+    tags ? `<div class="find-tags">${tags}</div>` : '',
+    refs ? `<div class="find-refs">${refs}</div>` : '',
+  ].join('');
+  return `<div class="find-row" data-sev="${esc(f.severity)}">
+    <button class="find-sum" aria-expanded="false">
+      <span class="sev ${sevClass(f.severity)}">${esc(f.severity)}</span>
+      <span class="find-title">${esc(f.title)}</span>
+      ${conf != null ? `<span class="find-conf" title="confidence">${conf}</span>` : ''}
+      <svg class="ic find-chev"><use href="#i-chevron-down"></use></svg>
+    </button>
+    <div class="find-meta">
+      ${f.category ? `<span class="find-cat">${esc(f.category)}</span>` : ''}
+      ${host ? `<span class="find-host" title="${esc(f.target || host)}">${esc(host)}${esc(tgtPath)}</span>` : ''}
+      ${f.occurrences > 1 ? `<span class="faint">seen ${f.occurrences}x</span>` : ''}
+      ${src ? `<span class="find-src">${src}</span>` : ''}
+    </div>
+    ${det ? `<div class="find-det">${det}</div>` : ''}
+  </div>`;
 }
 
 function subItem(sd) {
@@ -909,6 +1004,13 @@ function wirePanelInteractions() {
     // port rows: expand to reveal version / CPE / script output
     const port = e.target.closest('.prow.has-detail .psummary');
     if (port) { port.closest('.prow').classList.toggle('open'); return; }
+    // finding rows: expand to reveal risk / fix / evidence
+    const find = e.target.closest('.find-row .find-sum');
+    if (find) {
+      const row = find.closest('.find-row');
+      find.setAttribute('aria-expanded', String(row.classList.toggle('open')));
+      return;
+    }
     const item = e.target.closest('.sitem[data-host]');
     if (item) setHostFilter(item.dataset.host);
     // file rows are wired by renderFileList, which owns their expanded detail
@@ -1372,6 +1474,7 @@ function toggleDetailMode() {
    collapses from its own header, and it carries the same filter row, reading the
    same state. Collapsing one section is how the others get the screen. */
 const DV_SECTIONS = [
+  { id: 'findings', title: 'Findings', short: 'findings', icon: 'shield-half-filled', filter: buildFindingFilter },
   { id: 'dns', title: 'DNS records & history', short: 'DNS', icon: 'network' },
   { id: 'subdomains', title: 'Subdomains', short: 'subdomains', icon: 'world', filter: buildSubFilter },
   { id: 'infra', title: 'Infrastructure', short: 'IPs', icon: 'server-2', filter: buildAsnFilter },
@@ -1468,6 +1571,7 @@ function dvCounts(id) {
       const total = n(dns.records) + n(dns.history);
       return { shown: total, total };
     }
+    case 'findings': return { shown: filteredFindings().length, total: allFindings().length };
     case 'subdomains': return { shown: filteredSubs().length, total: allSubs().length };
     case 'infra': return { shown: filteredIps().length, total: allIps().length };
     case 'tech': return { shown: filteredTech().length, total: techEntries().length };
@@ -1483,6 +1587,7 @@ function renderDvBody(id) {
   const slot = document.getElementById('dvBody-' + id);
   if (!slot || !SCAN) return;
   const body = {
+    findings: () => dvFindingsBody(filteredFindings()),
     dns: () => dvDnsBody(SCAN.dns || {}),
     subdomains: () => dvSubdomainsBody(filteredSubs()),
     infra: () => dvInfraBody(filteredIps()),
@@ -1509,6 +1614,11 @@ function wireDvInteractions(root) {
     el.addEventListener('click', () => { toggleDetailMode(); setIpFilter(el.dataset.ip); }));
   root.querySelectorAll('.prow.has-detail .psummary').forEach(btn =>
     btn.addEventListener('click', () => btn.closest('.prow').classList.toggle('open')));
+  root.querySelectorAll('.find-row .find-sum').forEach(btn =>
+    btn.addEventListener('click', () => {
+      const row = btn.closest('.find-row');
+      btn.setAttribute('aria-expanded', String(row.classList.toggle('open')));
+    }));
   wireDecode(root);
 }
 
@@ -1669,6 +1779,13 @@ function dvTechBody(entries) {
   return `<div class="dv-body"><table class="dv-table"><thead><tr>
     <th>Technology</th><th>Hosts</th><th>Detected on</th><th>IPs</th><th>Served from</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
+}
+
+function dvFindingsBody(items) {
+  if (!items.length)
+    return dvEmpty((F.findSev || F.findCat) ? 'No findings match those filters' : 'No findings',
+      allFindings().length ? '' : 'The surface looks clean, or no active review ran.');
+  return `<div class="dv-body"><div class="find-list dv-find">${items.map(findRow).join('')}</div></div>`;
 }
 
 function dvSecretsBody(secrets) {

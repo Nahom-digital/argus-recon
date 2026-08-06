@@ -24,6 +24,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+# Findings severity ladder · higher wins when two reports of the same thing are
+# merged, and the dashboard sorts on it. Kept here so every module that raises a
+# finding (schema.add_finding) agrees on the same five levels.
+SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def normalize_severity(sev: str | int | None) -> str:
+    """Coerce any of the severities modules speak (a 1..3 int from the classifier,
+    a bare 'warn', a stray 'crit') onto the five-level ladder above."""
+    if isinstance(sev, (int, float)):
+        return {0: "info", 1: "low", 2: "medium", 3: "high"}.get(int(sev), "medium")
+    s = (sev or "").strip().lower()
+    if s in SEVERITY_RANK:
+        return s
+    return {"informational": "info", "warn": "low", "warning": "low",
+            "moderate": "medium", "med": "medium", "important": "high",
+            "crit": "critical", "severe": "critical"}.get(s, "info")
+
+
 class ScanResult:
     def __init__(self, domain: str):
         self.domain = registrable_root(domain)
@@ -50,6 +69,12 @@ class ScanResult:
         self._files: dict[str, dict] = {}           # url -> record
         self._js_files: dict[str, dict] = {}        # url -> record
         self._secrets: dict[str, dict] = {}         # hash -> record
+        # Findings · the one normalised, cross-module store. Every analysis stage
+        # (port scan, HTTP/TLS review, JS analysis, Shodan, 403 bypass) reports
+        # what it concludes here, deduplicated and merged, so the dashboard has a
+        # single ranked list of "what is wrong / what is exposed" independent of
+        # which tool noticed it. Keyed by a stable signature for auto-merge.
+        self._findings: dict[str, dict] = {}        # signature hash -> record
         # DNS records + historical DNS (module 1 / SecurityTrails + resolver)
         self.dns: dict[str, Any] = {
             "records": {},      # type -> [ {value, first_seen, last_seen, ...} ]
@@ -117,6 +142,8 @@ class ScanResult:
                 "city": None, "region": None, "country": None, "loc": None,
                 "provider": None, "type": None, "datacenter": None,
                 "whois": {}, "ip_history": [],
+                "cdn": None,        # {name, kind} when the address is a CDN/WAF/cloud edge
+                "shodan": None,     # passive host intel (modules.shodan_enrich)
                 "enriched": False,
                 # port scan (module 7a) · open services on this address
                 "ports": [],        # [{port, protocol, state, service, ...}]
@@ -329,7 +356,13 @@ class ScanResult:
         rec = self._js_files.get(url)
         if rec is None:
             rec = {"url": url, "host": host_of(url), "sources": [], "found_on": [],
-                   "endpoints": [], "requests": [], "secrets": []}
+                   "endpoints": [], "requests": [], "secrets": [],
+                   # deep-recon categories (js_parser.parse) · empty by default so
+                   # a record from an older scan or a non-parsed file stays valid
+                   "graphql": [], "graphql_introspection": False, "websockets": [],
+                   "oauth": [], "source_maps": [], "cloud": [], "firebase": None,
+                   "internal_refs": [], "analytics": [], "comments": [],
+                   "params": [], "third_party": []}
             self._js_files[url] = rec
         if source and source not in rec["sources"]:
             rec["sources"].append(source)
@@ -352,6 +385,115 @@ class ScanResult:
         if found_by and found_by not in rec["found_by"]:
             rec["found_by"].append(found_by)
         return rec
+
+    # ------------------------------------------------------------------ #
+    # Findings · the normalised cross-module store
+    # ------------------------------------------------------------------ #
+    def add_finding(self, *, title: str, category: str, severity: str = "info",
+                    confidence: int = 50, source: str = "", target: str = "",
+                    evidence: str = "", parsed: dict | None = None,
+                    risk: str = "", recommendation: str = "",
+                    screenshot: str | None = None, tags: list[str] | None = None,
+                    refs: list[str] | None = None,
+                    signature: str | None = None) -> dict:
+        """Record one finding, merging it into an identical earlier one.
+
+        A finding is a normalised conclusion · "this port exposes a database",
+        "this cert expired", "this JS leaks a token" · carrying everything the
+        dashboard shows for it: a confidence score (0..100), a severity on the
+        five-level ladder, the raw evidence and a parsed breakdown of it, the
+        source that noticed it, timestamps, a plain-language risk explanation, a
+        recommendation, and a screenshot when one exists.
+
+        Deduplication is by `signature` (falling back to title) scoped to the
+        target, so the same issue seen by two tools (nmap says 'ssl/http' on 8443,
+        the HTTP review confirms an admin panel there) becomes one record with the
+        higher severity/confidence and both sources · not two rows saying the same
+        thing. Returns the stored record.
+        """
+        title = (title or "").strip()
+        category = (category or "misc").strip().lower()
+        if not title:
+            return {}
+        sev = normalize_severity(severity)
+        try:
+            conf = max(0, min(100, int(confidence)))
+        except (TypeError, ValueError):
+            conf = 50
+        target = (target or "").strip()
+        sig = (signature or title).strip().lower()
+        key = short_hash(category, sig, target)
+        now = _now_iso()
+        rec = self._findings.get(key)
+        if rec is None:
+            rec = {
+                "id": key,
+                "title": title,
+                "category": category,
+                "severity": sev,
+                "confidence": conf,
+                "sources": [],
+                "target": target,
+                "host": host_of(target) if "://" in target else target,
+                "evidence": (evidence or "")[: config.MAX_BODY_STORE],
+                "parsed": dict(parsed or {}),
+                "risk": risk or "",
+                "recommendation": recommendation or "",
+                "screenshot": screenshot or None,
+                "tags": [],
+                "refs": [],
+                "occurrences": 0,
+                "first_seen": now,
+                "last_seen": now,
+            }
+            self._findings[key] = rec
+        else:
+            # Merge · keep the worst severity and the strongest confidence, and
+            # fill anything the first report left blank.
+            if SEVERITY_RANK.get(sev, 0) > SEVERITY_RANK.get(rec["severity"], 0):
+                rec["severity"] = sev
+            rec["confidence"] = max(rec["confidence"], conf)
+            if evidence and not rec["evidence"]:
+                rec["evidence"] = evidence[: config.MAX_BODY_STORE]
+            for k, v in (parsed or {}).items():
+                rec["parsed"].setdefault(k, v)
+            if risk and not rec["risk"]:
+                rec["risk"] = risk
+            if recommendation and not rec["recommendation"]:
+                rec["recommendation"] = recommendation
+            if screenshot and not rec.get("screenshot"):
+                rec["screenshot"] = screenshot
+            rec["last_seen"] = now
+        rec["occurrences"] += 1
+        if source and source not in rec["sources"]:
+            rec["sources"].append(source)
+        for t in tags or []:
+            t = (t or "").strip()
+            if t and t not in rec["tags"]:
+                rec["tags"].append(t)
+        for r in refs or []:
+            r = (r or "").strip()
+            if r and r not in rec["refs"]:
+                rec["refs"].append(r)
+        return rec
+
+    def _findings_sorted(self) -> list[dict]:
+        """Findings worst-first · severity, then confidence, then how many times
+        it was seen. This is the order the dashboard renders them in."""
+        return sorted(
+            self._findings.values(),
+            key=lambda f: (SEVERITY_RANK.get(f.get("severity"), 0),
+                           f.get("confidence", 0), f.get("occurrences", 0)),
+            reverse=True)
+
+    def _findings_severity_counts(self) -> dict:
+        """How many findings at each severity · lets the dashboard header show a
+        '2 critical / 5 high' summary from meta alone."""
+        counts = {s: 0 for s in SEVERITY_RANK}
+        for f in self._findings.values():
+            sev = f.get("severity", "info")
+            counts[sev] = counts.get(sev, 0) + 1
+        return counts
 
     # ------------------------------------------------------------------ #
     # DNS records + historical DNS (module 1)
@@ -420,6 +562,8 @@ class ScanResult:
             "js_files": len(self._js_files),
             "files": len(self._files),
             "secrets": len(self._secrets),
+            "findings": len(self._findings),
+            "findings_by_severity": self._findings_severity_counts(),
             "classified_requests": classified,
             "dns_records": dns_records,
             "dns_history": dns_history,
@@ -441,6 +585,7 @@ class ScanResult:
             "files": sorted(self._files.values(), key=lambda r: r["url"]),
             "js_files": sorted(self._js_files.values(), key=lambda r: r["url"]),
             "secrets": list(self._secrets.values()),
+            "findings": self._findings_sorted(),
         }
 
     def to_dict(self) -> dict:

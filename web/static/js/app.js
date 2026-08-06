@@ -207,7 +207,10 @@ function splitUrl(url) {
     return { host: u.host, path: (u.pathname || '/') + (u.search || '') };
   } catch (e) { return { host: '', path: url }; }
 }
-function sevClass(s) { return s === 'high' ? 'high' : s === 'medium' ? 'medium' : 'low'; }
+function sevClass(s) {
+  return s === 'critical' ? 'critical' : s === 'high' ? 'high'
+    : s === 'medium' ? 'medium' : s === 'info' ? 'info' : 'low';
+}
 
 /* ---- source provenance (anonymized codes -> label + icon) ----------------- */
 const SOURCE_META = {
@@ -223,6 +226,11 @@ const SOURCE_META = {
   r: { label: 'bulk DNS', icon: 'network' },
   p: { label: 'port scan', icon: 'plug-connected' },
   y: { label: 'web archive', icon: 'history' },
+  S: { label: 'passive intel', icon: 'radar-2' },
+  H: { label: 'http review', icon: 'shield-half-filled' },
+  T: { label: 'tls review', icon: 'lock' },
+  x: { label: '403 bypass', icon: 'alert-triangle' },
+  A: { label: 'param discovery', icon: 'list-details' },
   crawler: { label: 'crawler', icon: 'topology-star-3' },
   js: { label: 'JS analysis', icon: 'braces' },
   js_parser: { label: 'JS analysis', icon: 'braces' },

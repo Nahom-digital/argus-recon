@@ -13,7 +13,7 @@ import concurrent.futures
 import re
 import time
 
-from . import config
+from . import config, httpcache
 from .schema import ScanResult
 from .util import get_logger, make_session
 
@@ -59,15 +59,17 @@ def _split_asn_org(org_field: str) -> tuple[str | None, str | None]:
 
 
 def _enrich_one(session, ip: str) -> dict:
+    # Through the shared disk cache · a second stage (or a re-run) that looks up
+    # the same address is served from disk instead of spending another API call.
     url = f"https://ipinfo.io/{ip}/json"
     params = {"token": config.IPINFO_TOKEN} if config.IPINFO_TOKEN else {}
-    try:
-        resp = session.get(url, params=params, timeout=config.HTTP_TIMEOUT)
-        if resp.status_code != 200:
-            return {"ip": ip, "error": f"http {resp.status_code}"}
-        return resp.json()
-    except Exception as exc:
-        return {"ip": ip, "error": str(exc)}
+    data = httpcache.get_json(session, url, params=params,
+                              timeout=config.HTTP_TIMEOUT, cache_key=f"ipinfo:{ip}")
+    if not data:
+        return {"ip": ip, "error": "request failed"}
+    if "__status__" in data:
+        return {"ip": ip, "error": f"http {data['__status__']}"}
+    return data
 
 
 def run(result: ScanResult, *, threads: int = 6) -> None:

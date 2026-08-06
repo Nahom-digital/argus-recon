@@ -47,7 +47,8 @@ from modules.util import (get_logger, registrable_root, registrable_domain,
                           is_subdomain_of, set_single_host)
 from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
                      classifier, graph_loader, securitytrails, tor, probe,
-                     deepcrawl, portscan, wayback)
+                     deepcrawl, portscan, wayback, http_analysis, tls_analysis,
+                     bypass403, paramscan, shodan_enrich)
 
 log = get_logger("main")
 
@@ -84,8 +85,18 @@ def _stage(result, name, fn, *args, **kwargs):
 # port scan is deliberately NOT here: it is opt-in (a toggle, like Tor and deep
 # DNS), because it touches the target's infrastructure directly rather than its
 # web surface · see --portscan.
-ALL_MODULES = ["subdomain", "fingerprint", "crawl", "bruteforce",
-               "ip_enrich", "classify", "graph"]
+#
+# http_analysis / tls / bypass / paramscan are active-only web-surface reviews:
+# they run by default in a normal scan and are skipped in a passive one (they
+# send requests to the target). shodan is the mirror image · a passive intel
+# lookup that runs only in passive mode. All are individually skippable.
+ALL_MODULES = ["subdomain", "fingerprint", "http_analysis", "tls", "crawl",
+               "bruteforce", "bypass", "paramscan", "ip_enrich", "shodan",
+               "classify", "graph"]
+
+# Active web-surface reviews · run by default, but only when the scan is allowed
+# to touch the target (not passive). Kept as a set so the gate is one check.
+ACTIVE_REVIEWS = {"http_analysis", "tls", "bypass", "paramscan"}
 
 
 def _refuse_terminal_use() -> int:
@@ -154,8 +165,20 @@ def run_pipeline(args) -> ScanResult:
     # here it is simply present or it is not.
     deep = bool(args.deep) and securitytrails.available()
 
+    def _enabled(module: str) -> bool:
+        """Whether a selected stage will actually run this scan · the active
+        web-surface reviews are gated off in a passive scan, and the passive
+        intel lookup is gated off in an active one."""
+        if module not in run:
+            return False
+        if module in ACTIVE_REVIEWS:
+            return not args.passive
+        if module == "shodan":
+            return bool(args.passive) and shodan_enrich.available()
+        return True
+
     print(BANNER.format(ver="1.0.0", target=domain), file=sys.stderr)
-    log.info(f"modules: {', '.join(m for m in ALL_MODULES if m in run)}"
+    log.info(f"modules: {', '.join(m for m in ALL_MODULES if _enabled(m))}"
              + ("  · deep DNS" if deep else "")
              + ("  · port scan" if args.portscan else "")
              + ("  · web archive" if args.wayback else "")
@@ -212,6 +235,16 @@ def run_pipeline(args) -> ScanResult:
         _stage(result, "fingerprint", fingerprint.run, result,
                timeout=args.tool_timeout)
 
+    # 3b. HTTP security review + TLS/certificate review · active web-surface
+    #     reviews of each live root (security headers, cookies, CORS, methods,
+    #     server/WAF fingerprint; TLS versions, ciphers, certificate). Both are
+    #     skipped in a passive scan · they send requests to the target · and the
+    #     TLS pass additionally stands down over Tor (raw sockets would leak).
+    if _enabled("http_analysis"):
+        _stage(result, "http_analysis", http_analysis.run, result)
+    if _enabled("tls"):
+        _stage(result, "tls", tls_analysis.run, result)
+
     # 4-5. Crawl (HTML + JS parsing happen inside). A JS-aware deep-crawl
     #      pre-pass discovers routes/endpoints the static crawler cannot see and
     #      seeds it with them; the crawler then does the body/form/secret work.
@@ -237,9 +270,26 @@ def run_pipeline(args) -> ScanResult:
                timeout=args.tool_timeout, maxtime=args.brute_maxtime,
                max_hosts=args.brute_hosts)
 
+    # 6b. Access-control bypass · replays every 401/403 the scan surfaced with the
+    #     known path/header/method tricks (non-destructive: GET/HEAD/OPTIONS only).
+    if _enabled("bypass"):
+        _stage(result, "bypass", bypass403.run, result)
+
+    # 6c. Parameter discovery · mines the interesting endpoints for hidden query
+    #     parameters (arjun when installed). Stands down over Tor · the external
+    #     tool would not honour the proxy.
+    if _enabled("paramscan") and not tor.active():
+        _stage(result, "paramscan", paramscan.run, result)
+
     # 7. IP enrichment
     if "ip_enrich" in run:
         _stage(result, "ip_enrich", ip_enrich.run, result)
+
+    # 7b. Passive host intelligence (Shodan with a key, else the free InternetDB).
+    #     Passive mode only · it is an external lookup, folded into the IP records
+    #     and findings rather than shown raw.
+    if _enabled("shodan"):
+        _stage(result, "shodan", shodan_enrich.run, result, passive=True)
 
     # 8. Classification
     if "classify" in run:

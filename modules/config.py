@@ -163,6 +163,29 @@ PORTSCAN_PARALLEL = _int_env("ARGUS_PORTSCAN_PARALLEL", 3)
 # extra seeds · an admin panel on :8443 is exactly what this stage is for.
 PORTSCAN_SEED_CRAWL = os.environ.get("ARGUS_PORTSCAN_SEED_CRAWL", "1") != "0"
 
+# Full-range discovery pre-pass. nmap's default is only the top 1000 ports, which
+# is exactly why a service on a high port gets missed. When this is on, a fast
+# connect sweep first finds EVERY open port across the whole range, and the
+# aggressive version/OS/script scan is then aimed at precisely those ports · so
+# nothing open is skipped and the slow scan is not wasted on closed ports. Set to
+# 0 to fall back to the single top-1000 nmap scan (the original behaviour).
+PORTSCAN_FULL_RANGE = os.environ.get("ARGUS_PORTSCAN_FULL_RANGE", "1") != "0"
+# When full range is off, how many top ports the discovery sweep still covers
+# (kept well above nmap's default 1000).
+PORTSCAN_TOP_PORTS = _int_env("ARGUS_PORTSCAN_TOP_PORTS", 3000)
+# Packets/sec for the discovery sweep (nmap --min-rate, naabu/masscan -rate).
+# Higher is faster and louder; the per-target timeout still bounds the whole run.
+PORTSCAN_DISCOVERY_RATE = _int_env("ARGUS_PORTSCAN_RATE", 1000)
+# Faster discovery engines · used automatically when installed, else the nmap
+# connect sweep does the job. naabu is a rootless connect scanner; masscan is a
+# rootless-when-capable SYN scanner. Both are optional accelerators.
+NAABU_BIN = os.environ.get("ARGUS_NAABU", "naabu")
+MASSCAN_BIN = os.environ.get("ARGUS_MASSCAN", "masscan")
+# CDN/cloud range classifier (ProjectDiscovery cdncheck). Used when installed to
+# tag an address that belongs to a CDN/WAF/cloud provider, so its open ports are
+# read as the edge's rather than the origin's. Optional.
+CDNCHECK_BIN = os.environ.get("ARGUS_CDNCHECK", "cdncheck")
+
 # --- mass HTTP probe (httpx) ------------------------------------------------ #
 PROBE_THREADS = _int_env("ARGUS_PROBE_THREADS", 150)
 PROBE_RATE = _int_env("ARGUS_PROBE_RATE", 300)       # requests/sec cap
@@ -263,6 +286,75 @@ DNS_NAMESERVERS = [s for s in os.environ.get(
 IPINFO_TOKEN = os.environ.get("IPINFO_TOKEN", "").strip()
 
 # --------------------------------------------------------------------------- #
+# Shodan · passive host intelligence (module "S").
+#
+# Off during a normal active scan · it is a passive external lookup that belongs
+# to passive-discovery mode, where nothing may touch the target directly. With a
+# key the full REST host API is used (open ports, service banners, products,
+# versions, CVEs/CPEs, SSL/TLS + JA3, HTTP headers + favicon/html hashes, org/
+# ISP/ASN/geo, tags, screenshots). Without a key the free InternetDB API still
+# returns ports, CPEs, hostnames, tags and known vulnerabilities · so the stage
+# always contributes something. Results are merged into the IP records and the
+# findings list, never left as raw output.
+# --------------------------------------------------------------------------- #
+SHODAN_KEY = os.environ.get("SHODAN_KEY", os.environ.get("SHODAN_API_KEY", "")).strip()
+SHODAN_API_BASE = os.environ.get("SHODAN_API_BASE", "https://api.shodan.io")
+SHODAN_INTERNETDB_BASE = os.environ.get("SHODAN_INTERNETDB_BASE",
+                                        "https://internetdb.shodan.io")
+# The free InternetDB API needs no key and is safe to use even without a Shodan
+# membership. When off, passive mode with no key simply skips the stage.
+SHODAN_USE_INTERNETDB = os.environ.get("ARGUS_SHODAN_INTERNETDB", "1") != "0"
+# Shodan's free API tier is ~1 request/second · space host lookups out to respect
+# it and avoid 429s. Higher only makes sense on a paid plan.
+SHODAN_RATE = float(os.environ.get("ARGUS_SHODAN_RATE", "1.0"))   # requests/sec
+SHODAN_MAX_TARGETS = _int_env("ARGUS_SHODAN_MAX_TARGETS", 100)
+
+# --------------------------------------------------------------------------- #
+# HTTP security review (module "H") · analyses the response of each live root ·
+# security headers, cookies, CSP, CORS, cache/compression, allowed methods
+# (OPTIONS/TRACE/PUT/DELETE/PATCH), server fingerprint, auth challenge, and any
+# CDN/WAF the headers reveal. Findings only, nothing intrusive beyond an OPTIONS.
+# --------------------------------------------------------------------------- #
+HTTP_ANALYSIS_MAX_HOSTS = _int_env("ARGUS_HTTP_ANALYSIS_HOSTS", 60)
+HTTP_ANALYSIS_METHODS = os.environ.get("ARGUS_HTTP_METHODS", "1") != "0"  # probe OPTIONS/methods
+WAFW00F_BIN = os.environ.get("ARGUS_WAFW00F", "wafw00f")
+
+# --------------------------------------------------------------------------- #
+# TLS / certificate review (module "T") · for every HTTPS host and TLS port ·
+# negotiated protocol versions, cipher, full certificate chain, issuer/subject,
+# SAN list, validity window, wildcard/self-signed detection, HSTS. Uses the
+# stdlib ssl module (no dependency); tlsx is used additionally when installed.
+# --------------------------------------------------------------------------- #
+TLS_ANALYSIS_MAX_HOSTS = _int_env("ARGUS_TLS_ANALYSIS_HOSTS", 80)
+TLS_CONNECT_TIMEOUT = _int_env("ARGUS_TLS_TIMEOUT", 8)
+TLS_EXPIRY_WARN_DAYS = _int_env("ARGUS_TLS_EXPIRY_WARN_DAYS", 21)
+TLSX_BIN = os.environ.get("ARGUS_TLSX", "tlsx")
+
+# --------------------------------------------------------------------------- #
+# Access-control bypass probe (module "x") · replays 401/403 responses with the
+# well-known header, path and method tricks to see whether the control is real
+# or just front-door. Bounded and non-destructive (GET/HEAD/OPTIONS only). Off
+# unless there is something forbidden to test.
+# --------------------------------------------------------------------------- #
+BYPASS_ENABLE = os.environ.get("ARGUS_BYPASS", "1") != "0"
+BYPASS_MAX_TARGETS = _int_env("ARGUS_BYPASS_MAX_TARGETS", 40)
+BYPASS_THREADS = _int_env("ARGUS_BYPASS_THREADS", 12)
+
+# Parameter discovery (module "A") · arjun when installed, against a bounded set
+# of the most interesting endpoints.
+ARJUN_BIN = os.environ.get("ARGUS_ARJUN", "arjun")
+PARAM_MAX_TARGETS = _int_env("ARGUS_PARAM_MAX_TARGETS", 25)
+
+# --------------------------------------------------------------------------- #
+# External-lookup response cache (modules.httpcache) · a small on-disk cache so a
+# repeated lookup of the same IP/host across stages (ipinfo, Shodan, InternetDB)
+# is served from disk instead of re-hitting the API and burning rate limit.
+# --------------------------------------------------------------------------- #
+HTTP_CACHE_ENABLED = os.environ.get("ARGUS_HTTP_CACHE", "1") != "0"
+HTTP_CACHE_DIR = SCANS_DIR / ".httpcache"
+HTTP_CACHE_TTL = _int_env("ARGUS_HTTP_CACHE_TTL", 86400)   # seconds
+
+# --------------------------------------------------------------------------- #
 # SecurityTrails · deep DNS / subdomain / historical-DNS source (module "s").
 # The key is read from the environment / .env (SECURITYTRAILS_KEY). Without a
 # key, "Deep" mode is unavailable and the tool relies on the local resolver +
@@ -294,6 +386,11 @@ SOURCE_CODES = {
     "dnsx": "r",            # bulk resolver
     "portscan": "p",        # port / service scan
     "wayback": "y",         # web archive mining
+    "shodan": "S",          # passive host intel (Shodan / InternetDB)
+    "http_analysis": "H",   # HTTP security review (headers/CORS/methods/cookies)
+    "tls": "T",             # TLS / certificate review
+    "bypass": "x",          # 403/401 access-control bypass probe
+    "param": "A",           # parameter discovery
 }
 # Human labels for the dashboard legend (still no real tool names).
 SOURCE_LABELS = {
@@ -309,6 +406,11 @@ SOURCE_LABELS = {
     "r": "bulk DNS",
     "p": "port scan",
     "y": "web archive",
+    "S": "passive intel",
+    "H": "http review",
+    "T": "tls review",
+    "x": "403 bypass",
+    "A": "param discovery",
     "crawler": "crawler",
     "js": "JS analysis",
     "robots": "robots.txt",

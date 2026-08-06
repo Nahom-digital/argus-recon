@@ -11,6 +11,10 @@ scans/.argus.db*
 scans/.kuzu*
 # built graph payloads, cached per scan-file mtime (derived from scans)
 scans/.graphcache/
+# endpoint spill store (scratch, one file per running scan) and the external
+# lookup cache (ipinfo / Shodan / InternetDB responses) · both derived, transient
+scans/.spill/
+scans/.httpcache/
 !scans/.gitkeep
 .env
 # account store: password hashes, per-account allowances and the token signing

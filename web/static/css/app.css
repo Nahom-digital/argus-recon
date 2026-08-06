@@ -33,9 +33,11 @@
   --accent:#bd5b3d; --accent-hover:#a84b2e; --accent-ink:#a34a2b;
   --accent-weak:rgba(189,91,61,.10); --accent-weak-2:rgba(189,91,61,.16);
   --ring:rgba(189,91,61,.40);
+  --sev-crit-fg:#8f1a17; --sev-crit-bg:rgba(150,26,22,.15);
   --sev-high-fg:#a63a28; --sev-high-bg:rgba(180,64,46,.12);
   --sev-med-fg:#8a5e12;  --sev-med-bg:rgba(176,132,20,.14);
   --sev-low-fg:#5c6a4c;  --sev-low-bg:rgba(110,123,94,.14);
+  --sev-info-fg:#3f6079; --sev-info-bg:rgba(63,96,121,.12);
   --ok:#3f7d52; --warn:#9a6a16; --danger:#b4402e;
   /* node palette (graph) */
   --n-domain:#bd5b3d; --n-subdomain:#3f6f8f; --n-ip:#5c6a4c; --n-asn:#8a7b52;
@@ -62,9 +64,11 @@
   --accent:#d47a57; --accent-hover:#e08a67; --accent-ink:#e0906e;
   --accent-weak:rgba(212,122,87,.14); --accent-weak-2:rgba(212,122,87,.22);
   --ring:rgba(212,122,87,.45);
+  --sev-crit-fg:#ff9a80; --sev-crit-bg:rgba(255,120,96,.20);
   --sev-high-fg:#e88a70; --sev-high-bg:rgba(224,118,92,.16);
   --sev-med-fg:#e0b060;  --sev-med-bg:rgba(217,164,65,.16);
   --sev-low-fg:#a9b58c;  --sev-low-bg:rgba(169,181,140,.15);
+  --sev-info-fg:#8fb3cc; --sev-info-bg:rgba(120,165,200,.15);
   --ok:#77b98d; --warn:#dcae5e; --danger:#e0765c;
   --n-domain:#d47a57; --n-subdomain:#6aa0c4; --n-ip:#94a578; --n-asn:#c4ad78;
   --n-endpoint:#a39c90; --n-js:#c194db; --n-request:#e0a05a; --n-field:#6dc4a8;
@@ -80,9 +84,11 @@
   --accent:#d47a57; --accent-hover:#e08a67; --accent-ink:#e0906e;
   --accent-weak:rgba(212,122,87,.14); --accent-weak-2:rgba(212,122,87,.22);
   --ring:rgba(212,122,87,.45);
+  --sev-crit-fg:#ff9a80; --sev-crit-bg:rgba(255,120,96,.20);
   --sev-high-fg:#e88a70; --sev-high-bg:rgba(224,118,92,.16);
   --sev-med-fg:#e0b060;  --sev-med-bg:rgba(217,164,65,.16);
   --sev-low-fg:#a9b58c;  --sev-low-bg:rgba(169,181,140,.15);
+  --sev-info-fg:#8fb3cc; --sev-info-bg:rgba(120,165,200,.15);
   --ok:#77b98d; --warn:#dcae5e; --danger:#e0765c;
   --n-domain:#d47a57; --n-subdomain:#6aa0c4; --n-ip:#94a578; --n-asn:#c4ad78;
   --n-endpoint:#a39c90; --n-js:#c194db; --n-request:#e0a05a; --n-field:#6dc4a8;
@@ -206,9 +212,11 @@ svg.ic{width:1em;height:1em;flex:none;vertical-align:-.14em}
   font-size:var(--fs-xs);font-weight:500;line-height:1}
 .sev{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:var(--r-xs);
   font-size:var(--fs-xs);font-weight:600;line-height:1;letter-spacing:.01em}
+.sev.critical{color:var(--sev-crit-fg);background:var(--sev-crit-bg)}
 .sev.high{color:var(--sev-high-fg);background:var(--sev-high-bg)}
 .sev.medium{color:var(--sev-med-fg);background:var(--sev-med-bg)}
 .sev.low{color:var(--sev-low-fg);background:var(--sev-low-bg)}
+.sev.info{color:var(--sev-info-fg);background:var(--sev-info-bg)}
 .dot{width:7px;height:7px;border-radius:50%;flex:none}
 .method{font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 6px;border-radius:var(--r-xs);letter-spacing:.02em}
 .method.GET{color:#3f7d52;background:rgba(63,125,82,.12)}

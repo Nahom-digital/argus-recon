@@ -1449,8 +1449,9 @@ def _run_job(job_id: str, domain: str, extra: list[str], owner: str | None = Non
 
 
 # Pipeline stages the dashboard can switch off (mirrors main.ALL_MODULES).
-SCAN_MODULES = ["subdomain", "fingerprint", "crawl", "bruteforce",
-                "ip_enrich", "classify", "graph"]
+SCAN_MODULES = ["subdomain", "fingerprint", "http_analysis", "tls", "crawl",
+                "bruteforce", "bypass", "paramscan", "ip_enrich", "shodan",
+                "classify", "graph"]
 
 
 @app.route("/api/scan", methods=["POST"])
