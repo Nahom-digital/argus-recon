@@ -36,8 +36,12 @@ pointer to the dashboard and exits.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
 import os
+import re
+import shutil
+import subprocess
 import sys
 import time
 
@@ -80,6 +84,78 @@ def _stage(result, name, fn, *args, **kwargs):
         result.meta.setdefault("errors", []).append(
             {"stage": name, "error": str(exc)[:500]})
         return None
+
+# Curated toolchain whose versions are captured once per scan and stamped into
+# the result (meta.versions.tools). Each entry is the argv that prints a version;
+# only tools actually on PATH are probed, in parallel, with a short timeout, so a
+# missing or slow tool never delays or breaks a scan. bbot/waybackurls are left
+# out on purpose · their version probes are slow or unreliable.
+_TOOL_VERSION_CMDS = {
+    "nmap": ["nmap", "--version"],
+    "subfinder": ["subfinder", "-version"],
+    "httpx": ["httpx", "-version"],
+    "katana": ["katana", "-version"],
+    "naabu": ["naabu", "-version"],
+    "dnsx": ["dnsx", "-version"],
+    "ffuf": ["ffuf", "-V"],
+    "whatweb": ["whatweb", "--version"],
+    "nuclei": ["nuclei", "-version"],
+    "sqlmap": ["sqlmap", "--version"],
+    "dalfox": ["dalfox", "version"],
+    "arjun": ["arjun", "--version"],
+    "tlsx": ["tlsx", "-version"],
+    "cdncheck": ["cdncheck", "-version"],
+    "gitleaks": ["gitleaks", "version"],
+    "nomore403": ["nomore403", "--version"],
+}
+
+_VER_RE = re.compile(r"v?\d+\.\d+(?:\.\d+)?")
+
+
+def _one_tool_version(name: str, argv: list[str]) -> tuple[str, str | None]:
+    exe = shutil.which(argv[0])
+    if not exe:
+        return name, None
+    try:
+        out = subprocess.run([exe] + argv[1:], capture_output=True, text=True, timeout=6)
+        text = ((out.stdout or "") + "\n" + (out.stderr or "")).strip()
+        if not text:
+            return name, None
+        m = _VER_RE.search(text)
+        if m:
+            return name, m.group(0)
+        # No version token · fall back to the first line, but not if it is help
+        # or usage text (a wrong-flag or a shadowed binary, e.g. the python
+        # httpx that can mask ProjectDiscovery's). Better to record nothing.
+        line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        if re.search(r"usage|\[-h\]|\[options\]|--help", line, re.I):
+            return name, None
+        return name, (line[:60] or None)
+    except Exception:
+        return name, None
+
+
+def _capture_tool_versions() -> dict:
+    """Best-effort snapshot of the external toolchain versions used this run.
+    Bounded: parallel probes, each with its own timeout · returns whatever
+    finished, never raises."""
+    versions: dict[str, str] = {}
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            futs = [ex.submit(_one_tool_version, n, a)
+                    for n, a in _TOOL_VERSION_CMDS.items()]
+            done, _pending = concurrent.futures.wait(futs, timeout=15)
+            for fut in done:
+                try:
+                    name, ver = fut.result()
+                    if ver:
+                        versions[name] = ver
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return dict(sorted(versions.items()))
+
 
 # The stages a scan runs by default and can switch off from the dashboard. The
 # port scan is deliberately NOT here: it is opt-in (a toggle, like Tor and deep
@@ -158,6 +234,9 @@ def run_pipeline(args) -> ScanResult:
     owner = (os.environ.get("ARGUS_OWNER") or "").strip()
     if owner:
         result.meta["owner"] = owner
+    # Snapshot the toolchain versions used this run · recorded alongside the
+    # scanner/engine version so a result records exactly what produced it.
+    result.set_tool_versions(_capture_tool_versions())
     run = _selected(args)
     t0 = time.time()
 
@@ -177,7 +256,8 @@ def run_pipeline(args) -> ScanResult:
             return bool(args.passive) and shodan_enrich.available()
         return True
 
-    print(BANNER.format(ver="1.0.0", target=domain), file=sys.stderr)
+    print(BANNER.format(ver=config.SCANNER_VERSION.lstrip("v"), target=domain),
+          file=sys.stderr)
     log.info(f"modules: {', '.join(m for m in ALL_MODULES if _enabled(m))}"
              + ("  · deep DNS" if deep else "")
              + ("  · port scan" if args.portscan else "")

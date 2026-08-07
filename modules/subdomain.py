@@ -10,10 +10,13 @@ Two passive engines run in sequence, fast one first:
   2. BBOT (source "b"), the deep sweep: many more modules, ASN correlation,
      findings, and minutes rather than seconds. It adds to what pass 1 found.
 
-If neither is available we fall back to crt.sh certificate transparency plus a
-small DNS brute of common names. Whatever the source, every discovered host is
-then resolved · through the bulk resolver (source "r") when it is installed,
-otherwise the local resolver pool · and the apex domain's WHOIS is captured once.
+Alongside the engines, two more sources always contribute (they are unioned in,
+not held back as a last resort · treating them as fallbacks is what quietly
+weakened discovery): crt.sh certificate transparency (source "c"), and, on
+active scans, a DNS brute of a few hundred common names (source "dns-brute").
+Whatever the source, every discovered host is then resolved · through the bulk
+resolver (source "r") when it is installed, otherwise the local resolver pool ·
+and the apex domain's WHOIS is captured once.
 """
 from __future__ import annotations
 
@@ -43,16 +46,71 @@ SRC_PASSIVE = config.SOURCE_CODES["subfinder"]    # "n"
 SRC_DNSX = config.SOURCE_CODES["dnsx"]            # "r"
 
 COMMON_SUBS = [
-    "www", "mail", "webmail", "smtp", "pop", "imap", "ns1", "ns2", "dns",
-    "api", "api-v1", "api-v2", "dev", "staging", "stage", "test", "qa", "uat",
-    "admin", "portal", "dashboard", "app", "apps", "mobile", "m", "beta",
-    "shop", "store", "blog", "news", "support", "help", "docs", "cdn", "static",
-    "assets", "img", "images", "media", "files", "download", "downloads",
-    "vpn", "remote", "gateway", "gw", "proxy", "auth", "sso", "login", "secure",
-    "git", "gitlab", "jenkins", "ci", "jira", "confluence", "wiki", "status",
-    "monitor", "grafana", "kibana", "prometheus", "db", "database", "sql",
-    "redis", "mysql", "postgres", "mongo", "internal", "intranet", "corp",
-    "vpn2", "old", "new", "backup", "demo", "sandbox", "preview", "edge",
+    # mail / DNS infrastructure
+    "www", "www2", "www3", "ww1", "web", "web1", "web2", "mail", "mail1",
+    "mail2", "mail3", "webmail", "smtp", "smtp1", "smtp2", "pop", "pop3",
+    "imap", "mx", "mx1", "mx2", "mx3", "relay", "mta", "mailgw", "exchange",
+    "owa", "autodiscover", "autoconfig", "ns", "ns1", "ns2", "ns3", "ns4",
+    "dns", "dns1", "dns2", "resolver",
+    # APIs / services
+    "api", "api1", "api2", "api3", "apis", "api-v1", "api-v2", "api-dev",
+    "api-staging", "api-prod", "rest", "graphql", "grpc", "ws", "wss",
+    "socket", "gateway", "gateway-api", "apigw", "gw", "proxy", "edge",
+    # environments
+    "dev", "dev1", "dev2", "development", "staging", "stage", "staging2",
+    "test", "test1", "test2", "testing", "qa", "uat", "prod", "production",
+    "preprod", "pre", "preview", "live", "demo", "demo2", "sandbox",
+    "sandbox2", "integration", "perf", "load", "old", "new",
+    # admin / management
+    "admin", "administrator", "adminpanel", "manage", "manager", "cpanel",
+    "whm", "plesk", "webadmin", "panel", "console", "control", "controlpanel",
+    "portal", "portal2", "dashboard", "root", "mgmt", "ops", "devops",
+    "infra", "tools", "jump", "bastion",
+    # auth / identity
+    "auth", "sso", "login", "signin", "register", "oauth", "openid", "idp",
+    "accounts", "account", "id", "identity", "keycloak", "ldap", "ad",
+    "radius", "saml", "secure",
+    # apps / mobile
+    "app", "apps", "app1", "app2", "app3", "my", "mobile", "m", "ios",
+    "android", "wap", "touch", "amp", "beta",
+    # storage / files / backup
+    "s3", "bucket", "buckets", "storage", "blob", "uploads", "upload", "ftp",
+    "sftp", "ftps", "share", "shares", "drive", "nas", "backup", "backups",
+    "dump", "archive", "files", "download", "downloads",
+    # content / cdn / media
+    "cdn", "cdn2", "static", "static2", "assets", "assets2", "img", "images",
+    "media", "cache", "stream", "streaming", "vod", "video",
+    # devops / ci / repos
+    "git", "git2", "gitlab", "github", "bitbucket", "gerrit", "svn", "repo",
+    "code", "registry", "docker", "harbor", "nexus", "artifactory", "k8s",
+    "kubernetes", "rancher", "argocd", "vault", "consul", "portainer",
+    "jenkins", "ci", "cicd", "build", "builds", "drone", "teamcity", "sonar",
+    # monitoring / logging
+    "status", "monitor", "grafana", "kibana", "prometheus", "metrics", "logs",
+    "log", "logging", "elk", "elastic", "elasticsearch", "splunk", "nagios",
+    "zabbix", "sentry", "alerts", "uptime", "health", "stats",
+    # data stores / queues
+    "db", "database", "sql", "redis", "mysql", "postgres", "mongo", "search",
+    "solr", "kafka", "rabbitmq", "mq", "queue", "worker", "cron", "scheduler",
+    # collaboration / support / business
+    "jira", "confluence", "wiki", "chat", "mattermost", "meet", "voip", "sip",
+    "pbx", "crm", "erp", "sap", "zendesk", "helpdesk", "desk", "ticket",
+    "tickets", "support", "help", "docs", "blog", "news", "forum", "forums",
+    "community", "feedback", "survey", "shop", "store", "checkout",
+    # finance
+    "pay", "payment", "payments", "billing", "invoice", "wallet", "bank",
+    "finance",
+    # marketing / analytics
+    "newsletter", "campaign", "marketing", "promo", "ads", "analytics",
+    "track", "tracking", "tag", "gtm",
+    # network / access / scope
+    "vpn", "vpn1", "vpn2", "vpn3", "remote", "ssh", "rdp", "citrix", "vnc",
+    "public", "private", "external", "ext", "internal", "internal2",
+    "intranet", "corp", "dmz", "cloud", "aws", "azure", "gcp",
+    # hosts / nodes / balancers
+    "server", "server1", "server2", "host", "host1", "host2", "node1",
+    "node2", "srv1", "srv2", "vm1", "vm2", "cluster", "lb", "lb1", "lb2",
+    "haproxy", "nginx", "apache", "traefik",
 ]
 
 
@@ -564,20 +622,36 @@ def run(result: ScanResult, domain: str, *, passive: bool = False,
         elif deep:
             log.warning("deep DNS requested but no key configured · skipping")
 
-        # Fallback / supplement with crt.sh if the passive engines gave little.
-        if (quick + n + deep_added) < 3:
-            log.info("supplementing with certificate transparency")
-            for h in crtsh_subdomains(domain):
-                result.add_subdomain(h, source=SRC_CRTSH)
+        # Certificate transparency (crt.sh, source "c") ALWAYS runs. It is a
+        # passive, free, comprehensive source that regularly surfaces hosts the
+        # OSINT engines miss. It used to be gated behind "the engines found < 3",
+        # and once the fast subfinder pass ("quick") was folded into that sum it
+        # essentially stopped running · that was the discovery regression. Union
+        # it in unconditionally; add_subdomain dedupes, so overlap is free.
+        ct = 0
+        log.info("certificate transparency (crt.sh)")
+        for h in crtsh_subdomains(domain):
+            result.add_subdomain(h, source=SRC_CRTSH)
+            ct += 1
+        log.info(f"crt.sh contributed {ct} candidate hosts")
 
-        # Always ensure apex + common names are considered.
+        # Always ensure the apex is present.
         result.add_subdomain(domain, source="seed")
-        if (quick + n) == 0:
+
+        # DNS brute of common names ALWAYS runs on active scans (it used to only
+        # fire when every other source found literally nothing). It catches
+        # hosts that have no certificate and no inbound links · the exact gap
+        # the fallback-only gate left open. Skipped in passive mode, where the
+        # contract is to send nothing the target would not otherwise see.
+        if not passive:
             log.info(f"DNS-brute of {len(COMMON_SUBS)} common names")
             candidates = [f"{s}.{domain}" for s in COMMON_SUBS]
+            brute_added = 0
             for host, ips in _resolve_many(candidates).items():
                 if ips:
                     result.add_subdomain(host, source="dns-brute", ips=ips)
+                    brute_added += 1
+            log.info(f"DNS-brute resolved {brute_added} common names")
 
     # Resolve everything we have so IP links are complete.
     hosts = [r["host"] for r in result._subdomains.values()]  # type: ignore[attr-defined]

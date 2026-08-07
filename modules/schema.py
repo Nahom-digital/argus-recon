@@ -10,6 +10,7 @@ flattens them to lists for the JSON on disk.
 from __future__ import annotations
 
 import json
+import platform
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +51,21 @@ class ScanResult:
         self.meta: dict[str, Any] = {
             "domain": self.domain,
             "tool": "argus-recon",
-            "version": "1.0.0",
+            # Scanner version (semantic) · kept at the top level for backward
+            # compatibility with readers that already look at meta.version.
+            "version": config.SCANNER_VERSION,
+            # Concrete build behind the semantic version (git short commit).
+            "engine": config.BUILD_REV,
+            # Full, structured version record surfaced in history / details /
+            # findings / reports. `tools` is filled in by the engine once the
+            # external toolchain versions have been captured for this run.
+            "versions": {
+                "scanner": config.SCANNER_VERSION,
+                "engine": config.BUILD_REV,
+                "python": platform.python_version(),
+                "scanned_at": datetime.now().strftime("%Y-%m-%d"),
+                "tools": {},   # tool_name -> version string
+            },
             "started_at": _now_iso(),
             "finished_at": None,
             "scan_id": f"{self.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
@@ -518,6 +533,17 @@ class ScanResult:
     def mark_module(self, name: str, status: str, note: str = "", duration: float | None = None):
         self.meta["modules"][name] = {"status": status, "note": note,
                                        "duration": round(duration, 1) if duration else None}
+
+    def record_tool_version(self, name: str, version: str | None) -> None:
+        """Stamp the version of an external tool used on this run. Best-effort ·
+        callers pass whatever `tool --version` reported; blanks are ignored."""
+        if name and version:
+            self.meta["versions"]["tools"][str(name)] = str(version)[:80]
+
+    def set_tool_versions(self, versions: dict) -> None:
+        """Bulk-record captured toolchain versions (see main._capture_tool_versions)."""
+        for name, ver in (versions or {}).items():
+            self.record_tool_version(name, ver)
 
     # ------------------------------------------------------------------ #
     # Serialisation

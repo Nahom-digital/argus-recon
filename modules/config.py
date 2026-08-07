@@ -40,6 +40,46 @@ ENV_FILE = ROOT / ".env"
 SCANS_DIR.mkdir(exist_ok=True)
 WORDLISTS_DIR.mkdir(exist_ok=True)
 
+# --------------------------------------------------------------------------- #
+# Version · stamped into every scan so a result always records which build
+# produced it (shown in history, details, findings and reports) and so the
+# admin version-management page has a single source of truth for "installed".
+# --------------------------------------------------------------------------- #
+def _read_version() -> str:
+    try:
+        v = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+_VERSION_RAW = _read_version()
+# Semantic scanner version, always "v"-prefixed for display (e.g. "v2.5.0").
+SCANNER_VERSION = _VERSION_RAW if _VERSION_RAW.startswith("v") else f"v{_VERSION_RAW}"
+
+
+def _git_build() -> str:
+    """Short commit the code is running from · the concrete build behind the
+    semantic version. Best-effort: a tarball install with no git returns
+    'unknown', which is fine · SCANNER_VERSION still names the release. Reads a
+    ref only (rev-parse), so it never walks the (huge) scans working tree."""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=4)
+        rev = (out.stdout or "").strip()
+        if rev:
+            return rev
+    except Exception:
+        pass
+    return "unknown"
+
+
+BUILD_REV = _git_build()
+
 # Built graph payloads are cached here (keyed by the scan file's mtime) so the
 # one-off cost of building a huge scan's graph is paid once and survives a
 # restart · a later view of the same scan is served straight from disk.
