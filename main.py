@@ -52,7 +52,7 @@ from modules.util import (get_logger, registrable_root, registrable_domain,
 from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
                      classifier, graph_loader, securitytrails, tor, probe,
                      deepcrawl, portscan, wayback, http_analysis, tls_analysis,
-                     bypass403, paramscan, shodan_enrich)
+                     bypass403, paramscan, shodan_enrich, falsepos)
 
 log = get_logger("main")
 
@@ -360,6 +360,12 @@ def run_pipeline(args) -> ScanResult:
     #     tool would not honour the proxy.
     if _enabled("paramscan") and not tor.active():
         _stage(result, "paramscan", paramscan.run, result)
+
+    # 6d. False-positive / soft-404 review · re-labels discovered files that are
+    #     really web pages or error pages (a 200 text/html served for a file
+    #     request). Pure post-pass over captured bodies · no network, so it is
+    #     unconditional. Must run after crawl + bruteforce have added their files.
+    _stage(result, "falsepos", falsepos.run, result)
 
     # 7. IP enrichment
     if "ip_enrich" in run:

@@ -341,6 +341,10 @@ class ScanResult:
             rec = {"url": url, "host": host_of(url), "kind": kind, "subtype": subtype,
                    "sources": [], "status": status, "size": size, "found_on": [],
                    "content_type": content_type, "final_url": final_url,
+                   # verdict · set by modules.falsepos after discovery: "file"
+                   # (genuine), "webpage" (HTML served for a file request) or
+                   # "false_positive" (a 200 that is really an error page).
+                   "verdict": "file", "fp_reason": "",
                    "req_headers": {}, "resp_headers": {}, "resp_body": ""}
             self._files[url] = rec
         if source and source not in rec["sources"]:
@@ -587,6 +591,11 @@ class ScanResult:
             "fields": fields,
             "js_files": len(self._js_files),
             "files": len(self._files),
+            # Files re-labelled by modules.falsepos as a web page / soft-404 ·
+            # surfaced so the dashboard can report "N files (M flagged)".
+            "files_false_positive": sum(
+                1 for r in self._files.values()
+                if r.get("verdict", "file") != "file"),
             "secrets": len(self._secrets),
             "findings": len(self._findings),
             "findings_by_severity": self._findings_severity_counts(),
