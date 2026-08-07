@@ -46,6 +46,7 @@ from modules import tor
 from modules import portscan
 from modules import wayback
 from modules import securitytrails
+from modules import shodan_enrich
 from modules import access_log
 from modules import auth
 from modules.util import resolve_tool
@@ -1777,6 +1778,12 @@ INTEGRATIONS = [
      "desc": "Passive subdomain discovery and DNS history. Without a key the "
              "deep-DNS stage stays locked.",
      "get_url": "https://securitytrails.com/app/account/credentials"},
+    {"id": "shodan", "env": "SHODAN_KEY", "attr": "SHODAN_KEY",
+     "label": "Shodan", "unlocks": "Port scan enrichment",
+     "desc": "Folds Shodan's known open ports, services, versions and CVEs for "
+             "each IP into the port scan. Without a key the free InternetDB "
+             "source is used instead.",
+     "get_url": "https://account.shodan.io/"},
     {"id": "ipinfo", "env": "IPINFO_TOKEN", "attr": "IPINFO_TOKEN",
      "label": "IPinfo", "unlocks": "IP enrichment",
      "desc": "Geolocation, ASN and owner lookups for resolved IPs. Falls back to "
@@ -1826,7 +1833,29 @@ def api_admin_set_integration(key_id):
                 out["quota"] = securitytrails.check(force=True)
             except Exception as exc:
                 out["quota_error"] = str(exc)[:200]
+    # Shodan gets the same immediate liveness check · the admin sees at once
+    # whether the key works and how many query credits remain.
+    if key_id == "shodan" and body.get("check", True):
+        try:
+            out["shodan"] = shodan_enrich.check(force=True)
+        except Exception as exc:
+            out["shodan_error"] = str(exc)[:200]
     return jsonify(out)
+
+
+@app.route("/api/admin/integrations/<key_id>/test")
+def api_admin_test_integration(key_id):
+    """Test connection for an integration without changing its key · powers the
+    admin 'Test connection' button and the API-status line."""
+    _require_admin()
+    if key_id == "shodan":
+        return jsonify({"shodan": shodan_enrich.check(force=True)})
+    if key_id == "securitytrails":
+        try:
+            return jsonify({"quota": securitytrails.check(force=True)})
+        except Exception as exc:
+            return jsonify({"error": str(exc)[:200]})
+    return jsonify({"error": "no connection test available for this integration"}), 400
 
 
 @app.route("/favicon.ico")

@@ -38,6 +38,32 @@ def available() -> bool:
     return bool(config.SHODAN_KEY) or config.SHODAN_USE_INTERNETDB
 
 
+def check(force: bool = True) -> dict:
+    """Test the configured Shodan access for the admin panel. With a key it hits
+    the api-info endpoint and reports plan + remaining credits; with no key it
+    reports that the free InternetDB path will be used. Never raises · every
+    error is returned in the dict so the caller can render a status line."""
+    if not config.SHODAN_KEY:
+        return {"ok": bool(config.SHODAN_USE_INTERNETDB), "mode": "internetdb",
+                "detail": "No API key set · the free InternetDB source will be used."}
+    session = make_session()
+    url = f"{config.SHODAN_API_BASE}/api-info"
+    try:
+        data = httpcache.get_json(session, url, params={"key": config.SHODAN_KEY},
+                                  cache_key="shodan-apiinfo", ttl=0 if force else None)
+    except Exception as exc:
+        return {"ok": False, "mode": "api", "error": str(exc)[:200]}
+    if not data or "__status__" in data:
+        code = (data or {}).get("__status__")
+        return {"ok": False, "mode": "api",
+                "error": (f"Shodan API returned HTTP {code}" if code
+                          else "no response from Shodan")}
+    return {"ok": True, "mode": "api", "plan": data.get("plan"),
+            "query_credits": data.get("query_credits"),
+            "scan_credits": data.get("scan_credits"),
+            "monitored_ips": data.get("monitored_ips")}
+
+
 def _public_ips(result: ScanResult) -> list[str]:
     out: list[str] = []
     for rec in result._ips.values():          # type: ignore[attr-defined]

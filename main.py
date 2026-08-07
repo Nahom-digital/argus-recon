@@ -9,7 +9,8 @@ scan into ./scans:
     1. subdomain discovery + infra        (modules.subdomain: fast passive → BBOT,
                                            bulk resolver)
     2. mass HTTP probe                    (modules.probe · live hosts + scheme)
-   2a. port / service scan (optional)     (modules.portscan, nmap -A)
+   2a. port / service scan (optional)     (modules.portscan, nmap -A;
+                                           + Shodan intel merged in)
    2b. web archive mining (optional)      (modules.wayback · archived URLs)
     3. tech-stack fingerprinting          (modules.fingerprint, WhatWeb -a 3)
     4. deep crawl pre-pass                (modules.deepcrawl · JS-aware discovery)
@@ -164,8 +165,9 @@ def _capture_tool_versions() -> dict:
 #
 # http_analysis / tls / bypass / paramscan are active-only web-surface reviews:
 # they run by default in a normal scan and are skipped in a passive one (they
-# send requests to the target). shodan is the mirror image · a passive intel
-# lookup that runs only in passive mode. All are individually skippable.
+# send requests to the target). shodan runs as part of the port scan (active,
+# merged into nmap's port store) and also covers the passive path, where it is
+# the only host-intel source. All are individually skippable.
 ALL_MODULES = ["subdomain", "fingerprint", "http_analysis", "tls", "crawl",
                "bruteforce", "bypass", "paramscan", "ip_enrich", "shodan",
                "classify", "graph"]
@@ -253,7 +255,12 @@ def run_pipeline(args) -> ScanResult:
         if module in ACTIVE_REVIEWS:
             return not args.passive
         if module == "shodan":
-            return bool(args.passive) and shodan_enrich.available()
+            # Shodan now runs as part of the port scan (active · merged with
+            # nmap). Here it covers the passive path only: a passive scan does no
+            # port scan, so this is where its host intel comes from. The
+            # not-portscan guard keeps it from running twice if both are set.
+            return (bool(args.passive) and not args.portscan
+                    and shodan_enrich.available())
         return True
 
     print(BANNER.format(ver=config.SCANNER_VERSION.lstrip("v"), target=domain),
@@ -300,6 +307,13 @@ def run_pipeline(args) -> ScanResult:
         # "http" · WhatWeb against the exact port, tags folded onto the record.
         _stage(result, "portscan_fingerprint", portscan.fingerprint_web_ports,
                result, timeout=args.tool_timeout)
+        # Shodan enrichment · now part of the port scan. Known open ports,
+        # services, versions and CVEs (the Shodan REST API when a key is set in
+        # the admin panel, else the free InternetDB via a plain fetch) merge into
+        # the same port store nmap wrote to, so the asset view is one combined
+        # surface: nmap ports + service/banner detection + Shodan intel.
+        if "shodan" in run and shodan_enrich.available():
+            _stage(result, "shodan", shodan_enrich.run, result, passive=False)
 
     # 2b. Web archive (opt-in). Nothing is sent to the target: these are URLs the
     #     internet archive recorded over the years, which is where retired admin
