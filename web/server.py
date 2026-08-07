@@ -50,6 +50,7 @@ from modules import shodan_enrich
 from modules import xss_scan
 from modules import sqli_scan
 from modules import nuclei_scan
+from modules import versioning
 from modules import access_log
 from modules import auth
 from modules.util import resolve_tool
@@ -1958,6 +1959,50 @@ def api_admin_test_integration(key_id):
         except Exception as exc:
             return jsonify({"error": str(exc)[:200]})
     return jsonify({"error": "no connection test available for this integration"}), 400
+
+
+# --------------------------------------------------------------------------- #
+# Version management · view available versions and downgrade (admin only).
+# --------------------------------------------------------------------------- #
+@app.route("/api/admin/version")
+def api_admin_version():
+    """Installed version plus the tags/releases and recent commits on GitHub."""
+    _require_admin()
+    fetch = request.args.get("fetch", "1") not in ("0", "false", "no")
+    try:
+        return jsonify(versioning.list_versions(fetch=fetch))
+    except Exception as exc:
+        return jsonify({"error": str(exc)[:300],
+                        "current": versioning.current()}), 200
+
+
+@app.route("/api/admin/version/downgrade", methods=["POST"])
+def api_admin_version_downgrade():
+    """Start a corruption-safe downgrade to a chosen tag / commit."""
+    user = _require_admin()
+    body = request.get_json(silent=True) or {}
+    target = (body.get("target") or "").strip()
+    if not versioning.valid_ref(target):
+        return jsonify({"error": "invalid or missing version reference"}), 400
+    try:
+        out = versioning.downgrade(target, user.get("sub") or "admin")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"could not start downgrade: {exc}"}), 500
+    return jsonify(out)
+
+
+@app.route("/api/admin/version/status")
+def api_admin_version_status():
+    """Progress of the running/last downgrade, the audit log, and the live log."""
+    _require_admin()
+    st = versioning.status()
+    tail = ""
+    log_name = request.args.get("log")
+    if log_name:
+        tail = versioning.log_tail(log_name)
+    return jsonify({"status": st, "history": versioning.history(), "log": tail})
 
 
 @app.route("/favicon.ico")
