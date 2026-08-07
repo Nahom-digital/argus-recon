@@ -16,10 +16,16 @@ scan into ./scans:
     4. deep crawl pre-pass                (modules.deepcrawl · JS-aware discovery)
     5. crawl -> HTML parse -> JS parse    (modules.crawler, async transport)
     6. smart bruteforce                   (modules.bruteforce, ffuf)
+   6b. access-control bypass             (modules.bypass403 · 401/403 tricks)
+   6c. parameter discovery               (modules.paramscan · arjun)
+   6d. XSS testing (optional)            (modules.xss_scan · dalfox)
+   6e. SQL injection testing (optional)  (modules.sqli_scan · sqlmap)
+   6f. false-positive / soft-404 review  (modules.falsepos · re-label files)
     7. IP enrichment                      (modules.ip_enrich, ipinfo.io)
     8. field-intent classification        (modules.classifier)
-    9. storage                            (scans/{domain}_{timestamp}.json)
-   10. graph load                         (modules.graph_loader → Neo4j / kuzu)
+    9. Nuclei scanning (optional)         (modules.nuclei_scan · smart templates)
+   10. storage                            (scans/{domain}_{timestamp}.json)
+   11. graph load                         (modules.graph_loader → Neo4j / kuzu)
 
 Two switches change the shape of a run rather than a step of it:
 
@@ -53,7 +59,8 @@ from modules.util import (get_logger, registrable_root, registrable_domain,
 from modules import (subdomain, fingerprint, crawler, bruteforce, ip_enrich,
                      classifier, graph_loader, securitytrails, tor, probe,
                      deepcrawl, portscan, wayback, http_analysis, tls_analysis,
-                     bypass403, paramscan, shodan_enrich, falsepos)
+                     bypass403, paramscan, shodan_enrich, falsepos,
+                     xss_scan, sqli_scan, nuclei_scan)
 
 log = get_logger("main")
 
@@ -375,6 +382,16 @@ def run_pipeline(args) -> ScanResult:
     if _enabled("paramscan") and not tor.active():
         _stage(result, "paramscan", paramscan.run, result)
 
+    # 6d. XSS testing (opt-in) · dalfox against the discovered parameters. Active
+    #     and intrusive · a toggle, off by default · and stood down over Tor.
+    if args.xss and not tor.active():
+        _stage(result, "xss", xss_scan.run, result)
+
+    # 6e. SQL injection testing (opt-in) · sqlmap against the discovered
+    #     parameters (URL query + form/JSON bodies), every technique exercised.
+    if args.sqli and not tor.active():
+        _stage(result, "sqli", sqli_scan.run, result)
+
     # 6d. False-positive / soft-404 review · re-labels discovered files that are
     #     really web pages or error pages (a 200 text/html served for a file
     #     request). Pure post-pass over captured bodies · no network, so it is
@@ -394,6 +411,13 @@ def run_pipeline(args) -> ScanResult:
     # 8. Classification
     if "classify" in run:
         _stage(result, "classify", classifier.run, result)
+
+    # 9. Nuclei (opt-in) · the deepest, last stage. Runs with a template
+    #    selection derived from everything learned above (tech, ports, services),
+    #    so it tests what is actually there instead of every template blindly.
+    #    Active and intrusive · a toggle · and stood down over Tor.
+    if args.nuclei and not tor.active():
+        _stage(result, "nuclei", nuclei_scan.run, result)
 
     result.meta["elapsed_sec"] = round(time.time() - t0, 1)
     errs = result.meta.get("errors") or []
@@ -508,6 +532,15 @@ def main(argv=None):
                         "(off by default; sends nothing to the target)")
     p.add_argument("--wayback-timeout", type=int, default=config.WAYBACK_TIMEOUT,
                    help="max seconds for the web-archive pass")
+    p.add_argument("--xss", action="store_true",
+                   help="test discovered parameters for XSS (dalfox); active, "
+                        "off by default")
+    p.add_argument("--sqli", action="store_true",
+                   help="test discovered parameters for SQL injection (sqlmap); "
+                        "active, off by default")
+    p.add_argument("--nuclei", action="store_true",
+                   help="run Nuclei near the end with a template selection "
+                        "derived from the detected stack; active, off by default")
     p.add_argument("--no-prompt", action="store_true",
                    help=argparse.SUPPRESS)   # accepted for compatibility; never prompts
     p.add_argument("--no-bbot", action="store_true",

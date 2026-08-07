@@ -47,6 +47,9 @@ from modules import portscan
 from modules import wayback
 from modules import securitytrails
 from modules import shodan_enrich
+from modules import xss_scan
+from modules import sqli_scan
+from modules import nuclei_scan
 from modules import access_log
 from modules import auth
 from modules.util import resolve_tool
@@ -1558,6 +1561,20 @@ def api_launch():
         return jsonify({"error": "the port-scan engine is not installed on this "
                                  "machine · run ./install.sh to add it"}), 400
     want_wayback = bool(body.get("wayback"))
+    want_xss = bool(body.get("xss"))
+    want_sqli = bool(body.get("sqli"))
+    want_nuclei = bool(body.get("nuclei"))
+    # The active vulnerability scanners are intrusive: they cannot run in a
+    # passive scan, and each needs its engine installed.
+    for label, want, mod in (("XSS", want_xss, xss_scan),
+                             ("SQL injection", want_sqli, sqli_scan),
+                             ("Nuclei", want_nuclei, nuclei_scan)):
+        if want and body.get("passive"):
+            return jsonify({"error": f"{label} testing is an active probe · it "
+                                     "cannot run in a passive scan"}), 400
+        if want and not mod.available():
+            return jsonify({"error": f"the {label} engine is not installed on this "
+                                     "machine · run ./install.sh to add it"}), 400
 
     # Allowance: daily scans, how many at once, and which of the heavier options
     # this account may reach for at all.
@@ -1569,7 +1586,8 @@ def api_launch():
         try:
             auth.check_scan_allowed(owner, running=running, options={
                 "portscan": want_portscan, "tor": want_tor,
-                "wayback": want_wayback, "deep": bool(body.get("deep"))})
+                "wayback": want_wayback, "deep": bool(body.get("deep")),
+                "xss": want_xss, "sqli": want_sqli, "nuclei": want_nuclei})
         except auth.AuthError as exc:
             return jsonify({"error": str(exc), "quota": auth.quota(owner)}), 429
 
@@ -1588,6 +1606,12 @@ def api_launch():
         extra.append("--portscan")
     if want_wayback:
         extra.append("--wayback")
+    if want_xss:
+        extra.append("--xss")
+    if want_sqli:
+        extra.append("--sqli")
+    if want_nuclei:
+        extra.append("--nuclei")
     if body.get("no_bbot"):
         extra.append("--no-bbot")
     if body.get("no_probe"):

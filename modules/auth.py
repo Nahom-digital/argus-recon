@@ -525,7 +525,9 @@ def check_scan_allowed(username: str, *, running: int = 0,
         raise AuthError(f"you already have {running} scan(s) running · your "
                         f"limit is {limits['concurrent']} at a time")
     for opt, label in (("portscan", "port scan"), ("tor", "Tor routing"),
-                       ("wayback", "web archive mining"), ("deep", "deep DNS")):
+                       ("wayback", "web archive mining"), ("deep", "deep DNS"),
+                       ("xss", "XSS testing"), ("sqli", "SQL injection testing"),
+                       ("nuclei", "Nuclei scanning")):
         if (options or {}).get(opt) and not limits.get(opt, True):
             raise AuthError(f"{label} is not enabled for your account")
 
