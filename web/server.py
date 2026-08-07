@@ -501,6 +501,36 @@ def _scan_files() -> list[Path]:
                   key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+# Hidden scans · a soft "remove from Recent Scans" that keeps the scan file on
+# disk (still reachable by its id, and un-hideable) rather than deleting it. The
+# set is a small JSON file next to the scans.
+_HIDDEN_FILE = config.SCANS_DIR / ".hidden.json"
+_HIDDEN_LOCK = threading.Lock()
+
+
+def _load_hidden() -> set[str]:
+    try:
+        data = json.loads(_HIDDEN_FILE.read_text(encoding="utf-8"))
+        return set(data.get("hidden") or [])
+    except Exception:
+        return set()
+
+
+def _set_hidden(scan_id: str, hidden: bool) -> None:
+    with _HIDDEN_LOCK:
+        cur = _load_hidden()
+        if hidden:
+            cur.add(scan_id)
+        else:
+            cur.discard(scan_id)
+        try:
+            tmp = _HIDDEN_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"hidden": sorted(cur)}), encoding="utf-8")
+            tmp.replace(_HIDDEN_FILE)
+        except Exception:
+            pass
+
+
 # A full scan document can be tens of MB. Parsing it on every request (the graph
 # builder, a raw-JSON open, and each expanded row all call _load) is what made a
 # big scan feel like the dashboard had gone offline. Cache the most-recently-read
@@ -887,11 +917,37 @@ def _require_scan_access(scan_id: str) -> None:
 # --------------------------------------------------------------------------- #
 @app.route("/api/scans")
 def api_scans():
-    rows = [_summary(p) for p in _scan_files()]
-    if auth.configured():
-        user = current_user()
-        rows = [r for r in rows if auth.may_see(user, r.get("owner"))]
-    return jsonify(rows)
+    show_all = request.args.get("all") in ("1", "true", "yes", "on")
+    hidden = _load_hidden()
+    user = current_user() if auth.configured() else None
+    out = []
+    for r in (_summary(p) for p in _scan_files()):
+        sid = r.get("scan_id")
+        is_hidden = sid in hidden
+        if is_hidden and not show_all:
+            continue
+        if is_hidden:
+            r["hidden"] = True
+        if user is not None and not auth.may_see(user, r.get("owner")):
+            continue
+        out.append(r)
+    return jsonify(out)
+
+
+@app.route("/api/scan/<scan_id>/hide", methods=["POST"])
+def api_scan_hide(scan_id):
+    """Soft-remove a scan from Recent Scans without deleting it (or restore it
+    with {"hidden": false}). The scan file stays on disk and reachable by id."""
+    if not SCAN_ID_RE.match(scan_id):
+        abort(400, "bad scan id")
+    _require_scan_access(scan_id)
+    if not _may("delete"):
+        return jsonify({"error": "your account cannot manage scans"}), 403
+    body = request.get_json(silent=True) or {}
+    hide = bool(body.get("hidden", True))
+    _set_hidden(scan_id, hide)
+    _SUMMARY_CACHE.pop(scan_id, None)
+    return jsonify({"scan_id": scan_id, "hidden": hide})
 
 
 @app.route("/api/scan/<scan_id>")
@@ -966,8 +1022,30 @@ def api_scan_delete(scan_id):
         store.forget(scan_id)
     except Exception:
         pass
+    # Temporary files · the built graph caches for this scan (keyed by mtime).
+    try:
+        for gz in config.GRAPHCACHE_DIR.glob(f"{scan_id}.*.json.gz"):
+            gz.unlink(missing_ok=True)
+    except Exception:
+        pass
+    # Related logs · only when explicitly asked (?logs=1): the streamed job log
+    # and its record for whichever job produced this scan.
+    purged_logs = 0
+    if request.args.get("logs") in ("1", "true", "yes", "on"):
+        try:
+            with _JOBS_LOCK:
+                for jid, job in list(_JOBS.items()):
+                    if job.get("scan_id") == scan_id:
+                        (JOBS_DIR / f"{jid}.log").unlink(missing_ok=True)
+                        _JOBS.pop(jid, None)
+                        purged_logs += 1
+            if purged_logs:
+                _persist_jobs()
+        except Exception:
+            pass
     _SUMMARY_CACHE.pop(scan_id, None)
-    return jsonify({"deleted": scan_id})
+    _set_hidden(scan_id, False)     # a deleted scan is no longer merely hidden
+    return jsonify({"deleted": scan_id, "logs_purged": purged_logs})
 
 
 # --------------------------------------------------------------------------- #
