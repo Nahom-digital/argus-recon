@@ -379,11 +379,47 @@ TLSX_BIN = os.environ.get("ARGUS_TLSX", "tlsx")
 BYPASS_ENABLE = os.environ.get("ARGUS_BYPASS", "1") != "0"
 BYPASS_MAX_TARGETS = _int_env("ARGUS_BYPASS_MAX_TARGETS", 40)
 BYPASS_THREADS = _int_env("ARGUS_BYPASS_THREADS", 12)
+# Optional external 403/401 bypass binary (nomore403). The native catalogue runs
+# regardless; when this is installed its results are merged in as well.
+NOMORE403_BIN = os.environ.get("ARGUS_NOMORE403", "nomore403")
 
 # Parameter discovery (module "A") · arjun when installed, against a bounded set
 # of the most interesting endpoints.
 ARJUN_BIN = os.environ.get("ARGUS_ARJUN", "arjun")
 PARAM_MAX_TARGETS = _int_env("ARGUS_PARAM_MAX_TARGETS", 25)
+
+# --------------------------------------------------------------------------- #
+# XSS testing (module "X") · dalfox against discovered parameters/URLs. Active
+# and intrusive, so it is an explicit opt-in toggle (--xss), off by default.
+# --------------------------------------------------------------------------- #
+XSS_ENABLE = os.environ.get("ARGUS_XSS", "1") != "0"       # admin kill-switch
+DALFOX_BIN = os.environ.get("ARGUS_DALFOX", "dalfox")
+XSS_MAX_TARGETS = _int_env("ARGUS_XSS_MAX_TARGETS", 40)
+XSS_TIMEOUT = _int_env("ARGUS_XSS_TIMEOUT", 900)
+
+# --------------------------------------------------------------------------- #
+# SQL injection testing (module "Q") · sqlmap against discovered parameters
+# (URL query, POST/JSON bodies). Active and intrusive · opt-in toggle (--sqli).
+# --------------------------------------------------------------------------- #
+SQLI_ENABLE = os.environ.get("ARGUS_SQLI", "1") != "0"     # admin kill-switch
+SQLMAP_BIN = os.environ.get("ARGUS_SQLMAP", "sqlmap")
+SQLI_MAX_TARGETS = _int_env("ARGUS_SQLI_MAX_TARGETS", 25)
+SQLI_TIMEOUT = _int_env("ARGUS_SQLI_TIMEOUT", 1200)
+SQLI_LEVEL = _int_env("ARGUS_SQLI_LEVEL", 2)   # sqlmap --level (1..5)
+SQLI_RISK = _int_env("ARGUS_SQLI_RISK", 2)     # sqlmap --risk  (1..3)
+
+# --------------------------------------------------------------------------- #
+# Nuclei scanning (module "N") · runs near the end of the pipeline with a
+# template selection derived from what the scan already learned (technologies,
+# open ports, services). Active · opt-in toggle (--nuclei), off by default.
+# --------------------------------------------------------------------------- #
+NUCLEI_BIN = os.environ.get("ARGUS_NUCLEI", "nuclei")
+NUCLEI_TIMEOUT = _int_env("ARGUS_NUCLEI_TIMEOUT", 1800)
+NUCLEI_MAX_TARGETS = _int_env("ARGUS_NUCLEI_MAX_TARGETS", 80)
+NUCLEI_SEVERITY = os.environ.get("ARGUS_NUCLEI_SEVERITY",
+                                 "low,medium,high,critical")
+NUCLEI_RATE = _int_env("ARGUS_NUCLEI_RATE", 150)
+NUCLEI_TEMPLATES_DIR = os.environ.get("ARGUS_NUCLEI_TEMPLATES", "").strip()
 
 # --------------------------------------------------------------------------- #
 # External-lookup response cache (modules.httpcache) · a small on-disk cache so a
@@ -431,6 +467,9 @@ SOURCE_CODES = {
     "tls": "T",             # TLS / certificate review
     "bypass": "x",          # 403/401 access-control bypass probe
     "param": "A",           # parameter discovery
+    "xss": "X",             # reflected/stored/DOM XSS testing
+    "sqli": "Q",            # SQL injection testing
+    "nuclei": "N",          # template-based vulnerability scan
 }
 # Human labels for the dashboard legend (still no real tool names).
 SOURCE_LABELS = {
@@ -451,6 +490,9 @@ SOURCE_LABELS = {
     "T": "tls review",
     "x": "403 bypass",
     "A": "param discovery",
+    "X": "xss",
+    "Q": "sql injection",
+    "N": "template scan",
     "crawler": "crawler",
     "js": "JS analysis",
     "robots": "robots.txt",

