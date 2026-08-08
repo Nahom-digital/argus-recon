@@ -22,6 +22,9 @@
         <label class="chk" id="torChk" title="Route the whole scan through Tor"><input type="checkbox" id="optTor"> via Tor</label>
         <label class="chk" id="portscanChk" title="Scan every discovered IP for open ports & services"><input type="checkbox" id="optPortscan"> port scan</label>
         <label class="chk" id="waybackChk" title="Mine the web archive for URLs this domain used to serve"><input type="checkbox" id="optWayback"> web archive</label>
+        <label class="chk" id="xssChk" title="Test discovered parameters for XSS (active)"><input type="checkbox" id="optXss"> XSS test</label>
+        <label class="chk" id="sqliChk" title="Test discovered parameters for SQL injection (active)"><input type="checkbox" id="optSqli"> SQLi test</label>
+        <label class="chk" id="nucleiChk" title="Run Nuclei with templates chosen from the detected stack (active)"><input type="checkbox" id="optNuclei"> Nuclei</label>
       </div>
       <span class="quota-chip" id="quotaChip" hidden></span>
       <button class="btn" type="button" id="optsToggle" aria-expanded="false" aria-controls="scanOpts">

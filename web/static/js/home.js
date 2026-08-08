@@ -222,6 +222,28 @@ function reflectPortscan() {
     reason: chk.title });
 }
 
+/* The active vulnerability scanners (XSS, SQLi, Nuclei) send crafted requests to
+   the target, so they cannot run in a passive scan · lock them while passive is on,
+   mirroring the port-scan rule. */
+const ACTIVE_SCANNERS = {
+  xssChk:    ['optXss',    'Test discovered parameters for XSS (active)'],
+  sqliChk:   ['optSqli',   'Test discovered parameters for SQL injection (active)'],
+  nucleiChk: ['optNuclei', 'Run Nuclei with templates chosen from the detected stack (active)'],
+};
+function reflectActiveScanners() {
+  const passive = document.getElementById('optPassive');
+  const passiveOn = !!(passive && passive.checked);
+  Object.entries(ACTIVE_SCANNERS).forEach(([chkId, [boxId, activeTitle]]) => {
+    const chk = document.getElementById(chkId);
+    const box = document.getElementById(boxId);
+    if (!chk || !box) return;
+    chk.classList.toggle('locked', passiveOn);
+    if (passiveOn) box.checked = false;
+    box.disabled = passiveOn;
+    chk.title = passiveOn ? 'Active probe · turn off “passive” to use it' : activeTitle;
+  });
+}
+
 /* The archive pass always has a path that works · the index over plain HTTP
    when the dedicated engine is not installed · so this toggle is never locked.
    Say which of the two it will use, since the engine is meaningfully wider. */
@@ -286,6 +308,8 @@ function scanRow(s) {
   if (s.started_at) meta.push(icon('clock') + ' ' + timeAgo(s.started_at));
   if (s.duration_sec != null) meta.push(fmtDur(s.duration_sec));
   meta.push(fmtBytes(s.size));
+  // Scanner version this run was produced by (see modules.config.SCANNER_VERSION).
+  if (s.version) meta.push(`<span class="ver" title="Scanner version">${esc(s.version)}</span>`);
   // a single-target or Tor run must not look identical to a full direct one
   if (s.scope === 'host')
     meta.push(`<span class="how">${icon('point-filled')} single host</span>`);
@@ -535,6 +559,9 @@ function jobOpts(j) {
   if (o.tor) tags.push('via Tor');
   if (o.portscan) tags.push('port scan');
   if (o.wayback) tags.push('web archive');
+  if (o.xss) tags.push('XSS');
+  if (o.sqli) tags.push('SQLi');
+  if (o.nuclei) tags.push('Nuclei');
   if (o.single) tags.push('single host');
   if (o.passive) tags.push('passive');
   if (o.deep) tags.push('deep DNS');
@@ -804,6 +831,9 @@ function scanOptions() {
     tor: document.getElementById('optTor').checked,
     portscan: document.getElementById('optPortscan').checked,
     wayback: document.getElementById('optWayback').checked,
+    xss: document.getElementById('optXss').checked,
+    sqli: document.getElementById('optSqli').checked,
+    nuclei: document.getElementById('optNuclei').checked,
     single: scope === 'single',
     exact_scope: scope === 'exact',
     no_bbot: !on('bbot'),
@@ -855,7 +885,19 @@ function wireOptions() {
     if (box && box.disabled) { e.preventDefault(); formError(null, portscanChk.title); }
   });
   const passiveBox = document.getElementById('optPassive');
-  if (passiveBox) passiveBox.addEventListener('change', reflectPortscan);
+  if (passiveBox) passiveBox.addEventListener('change', () => {
+    reflectPortscan();
+    reflectActiveScanners();
+  });
+  // The active scanners lock while passive is on · explain in place if clicked.
+  Object.keys(ACTIVE_SCANNERS).forEach(chkId => {
+    const chk = document.getElementById(chkId);
+    if (chk) chk.addEventListener('click', e => {
+      const box = document.getElementById(ACTIVE_SCANNERS[chkId][0]);
+      if (box && box.disabled) { e.preventDefault(); formError(null, chk.title); }
+    });
+  });
+  reflectActiveScanners();
   const btn = document.getElementById('optsToggle');
   const panel = document.getElementById('scanOpts');
   if (!btn || !panel) return;
