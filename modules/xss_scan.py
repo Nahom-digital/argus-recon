@@ -8,8 +8,10 @@ Every proof-of-concept dalfox returns becomes a finding carrying the XSS type
 evidence and a severity.
 
 Opt-in (the --xss toggle), active (it sends crafted requests to the target), and
-bounded by a target cap and a wall-clock budget. Needs dalfox installed, and it
-never runs over Tor (the Go binary would not honour the scan's proxy).
+bounded by a target cap and a wall-clock budget. Needs dalfox installed. Over Tor
+it is handed the SOCKS proxy natively (dalfox speaks --proxy socks5), so it runs
+through the circuit rather than standing down · it is only skipped if no proxy
+can be resolved, never run in the clear.
 """
 from __future__ import annotations
 
@@ -71,17 +73,48 @@ def _parse(text: str) -> list[dict]:
     return out
 
 
+def _json_body(target: dict) -> str:
+    body = (target.get("body") or "").strip()
+    if body[:1] in ("{", "["):
+        try:
+            json.loads(body)
+            return body
+        except Exception:
+            pass
+    obj = {p: "1" for p in (target.get("params") or [])} or {"q": "1"}
+    return json.dumps(obj)
+
+
 def _cmd_for(binp: str, target: dict, outfile: Path) -> tuple[list[str], str]:
+    """dalfox argv for one target. The request's own channels are reused: its body
+    (as JSON when the endpoint speaks JSON, else form), and its Cookie header, so
+    reflected input is tested wherever the browser actually put it, not only in the
+    query string."""
     cmd = [binp, "url"]
     url = target["url"]
-    if target["method"] == "POST":
+    if target["method"] == "POST" or target.get("body"):
         base = url.split("?", 1)[0]
-        data = "&".join(f"{p}=1" for p in target["params"]) or "x=1"
-        cmd += [base, "-d", data, "-X", "POST"]
+        if target.get("is_json"):
+            data = _json_body(target)
+            cmd += [base, "-d", data, "-X", "POST",
+                    "-H", "Content-Type: application/json"]
+        else:
+            data = (target.get("body") or "").strip() \
+                or "&".join(f"{p}=1" for p in (target.get("params") or [])) or "x=1"
+            cmd += [base, "-d", data, "-X", "POST"]
     else:
         if "?" not in url and target["params"]:
             url = url + "?" + "&".join(f"{p}=1" for p in target["params"])
         cmd += [url]
+    cookies = target.get("cookies")
+    if cookies:
+        cmd += ["-C", cookies]
+    # dalfox is a Go binary · torsocks cannot cover it, so it is handed the SOCKS
+    # proxy natively when the scan runs over Tor.
+    if tor.active():
+        proxy = tor.proxy_url("socks5")
+        if proxy:
+            cmd += ["--proxy", proxy]
     cmd += ["--format", "json", "-o", str(outfile), "--silence", "--no-color",
             "--no-spinner", "--skip-bav", "--worker", "10", "--timeout", "10"]
     return cmd, url
@@ -150,8 +183,12 @@ def run(result: ScanResult) -> None:
     if not config.XSS_ENABLE:
         result.mark_module("xss", "skip", note="disabled")
         return
-    if tor.active():
-        result.mark_module("xss", "skip", note="not run over Tor")
+    # Over Tor, dalfox is handed the SOCKS proxy natively (see _cmd_for) rather
+    # than skipped · but only when a proxy can actually be resolved. If Tor is on
+    # and no proxy is available, skip: never let the tool reach out in the clear.
+    if tor.active() and not tor.proxy_url("socks5"):
+        result.mark_module("xss", "skip",
+                           note="Tor on but no usable proxy · skipped to avoid a leak")
         return
     binp = resolve_tool(config.DALFOX_BIN)
     if not binp:
@@ -167,7 +204,8 @@ def run(result: ScanResult) -> None:
     per_target = max(60, config.XSS_TIMEOUT // max(1, len(targets)))
     deadline = t0 + config.XSS_TIMEOUT
     log.info(f"XSS testing {len(targets)} endpoint"
-             f"{'s' if len(targets) != 1 else ''} (dalfox)")
+             f"{'s' if len(targets) != 1 else ''} (dalfox"
+             + (", over Tor" if tor.active() else "") + ")")
     tmpd = Path(tempfile.mkdtemp(prefix="argus-xss-"))
     tested = found = 0
     for i, target in enumerate(targets):

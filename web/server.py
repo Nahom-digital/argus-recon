@@ -418,6 +418,23 @@ def _log_stage_warning(job_id: str) -> str:
     return ""
 
 
+def _log_tor_blocked(job_id: str) -> str:
+    """A Tor scan whose exit was being blocked prints main.TOR_BLOCKED_MARKER on
+    its own line. Return the human detail when present, so the dashboard can raise
+    a popup · a thin scan over Tor is usually a blocked exit, not a clean target."""
+    log_path = JOBS_DIR / f"{job_id}.log"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    for ln in reversed(text.splitlines()):
+        if ln.startswith("##ARGUS_TOR_BLOCKED"):
+            detail = ln[len("##ARGUS_TOR_BLOCKED"):].strip()
+            return ("The target appears to be blocking Tor exit nodes. "
+                    + detail).strip()[:600]
+    return ""
+
+
 def _find_scan_after(domain: str, since: float):
     """A saved scan for `domain` written at/after `since`. Used when reconciling
     an orphaned job to tell whether it actually finished before the restart. The
@@ -1528,6 +1545,11 @@ def _run_job(job_id: str, domain: str, extra: list[str], owner: str | None = Non
             _JOBS[job_id].update(status="failed",
                                  error=f"Could not start the scan: {exc}",
                                  finished=time.time())
+    # Whatever the outcome, if the run was over Tor and the exit was being blocked,
+    # carry that to the UI as a popup · it explains a thin result honestly.
+    blocked = _log_tor_blocked(job_id)
+    if blocked and job_id in _JOBS:
+        _JOBS[job_id]["tor_blocked"] = blocked
     _save_job(job_id)
 
 

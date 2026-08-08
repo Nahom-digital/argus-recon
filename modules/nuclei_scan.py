@@ -8,7 +8,8 @@ blindly · then folds each result into the findings list with the template id,
 name, severity, matched location, description and references.
 
 Opt-in (the --nuclei toggle), active, bounded by a target cap and a wall-clock
-budget, and stood down over Tor (the Go binary would not honour the proxy).
+budget. Over Tor it is handed the SOCKS proxy natively (nuclei speaks -proxy
+socks5), so it runs through the circuit rather than standing down.
 Requires nuclei installed with its templates (install.sh does both).
 """
 from __future__ import annotations
@@ -83,8 +84,12 @@ def _parse_jsonl(text: str) -> list[dict]:
 
 def run(result: ScanResult) -> None:
     t0 = time.time()
-    if tor.active():
-        result.mark_module("nuclei", "skip", note="not run over Tor")
+    # Over Tor, nuclei is handed the SOCKS proxy natively (it supports -proxy)
+    # rather than skipped. Skip only when Tor is on and no proxy resolves, so the
+    # scanner never reaches a target in the clear.
+    if tor.active() and not tor.proxy_url("socks5"):
+        result.mark_module("nuclei", "skip",
+                           note="Tor on but no usable proxy · skipped to avoid a leak")
         return
     binp = resolve_tool(config.NUCLEI_BIN)
     if not binp:
@@ -112,9 +117,14 @@ def run(result: ScanResult) -> None:
         cmd += ["-tags", ",".join(plan["tags"])]
     if config.NUCLEI_TEMPLATES_DIR:
         cmd += ["-t", config.NUCLEI_TEMPLATES_DIR]
+    if tor.active():
+        proxy = tor.proxy_url("socks5")
+        if proxy:
+            cmd += ["-proxy", proxy]
 
     log.info(f"nuclei · {len(targets)} target(s), "
-             f"{len(plan['tags'])} tag(s) from {plan['reason']}")
+             f"{len(plan['tags'])} tag(s) from {plan['reason']}"
+             + (", over Tor" if tor.active() else ""))
     run_cmd(cmd, timeout=config.NUCLEI_TIMEOUT, log=log)
 
     text = ""

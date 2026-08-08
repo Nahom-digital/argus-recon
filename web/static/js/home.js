@@ -631,10 +631,44 @@ function jobRowHtml(j) {
   </div>`;
 }
 
+/* A Tor scan whose exit was blocked · the operator is told once, as a popup, so a
+   thin result over Tor is never mistaken for a clean target. Shown per job id. */
+const torPopupShown = new Set();
+function maybeTorBlockedPopup(jobs) {
+  for (const j of jobs) {
+    if (j.tor_blocked && !torPopupShown.has(j.id)) {
+      torPopupShown.add(j.id);
+      showTorBlockedPopup(j);
+    }
+  }
+}
+
+function showTorBlockedPopup(j) {
+  const scrim = h('div', { class: 'modal-scrim' });
+  scrim.innerHTML = `<div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="tbTitle">
+    <div class="modal-head">${icon('alert-triangle')}<h3 id="tbTitle">Tor exit nodes are being blocked</h3></div>
+    <p class="modal-body">${esc(j.tor_blocked)}
+      <br><span class="faint">Your address was not exposed · the scan stayed on Tor
+      throughout. Results for ${esc(j.domain)} may be incomplete because the target
+      refused the Tor exit. Re-running picks a fresh circuit, or scan without Tor if
+      the target is known to block it.</span></p>
+    <div class="modal-actions">
+      <button class="btn primary" id="tbOk">Understood</button>
+    </div>
+  </div>`;
+  document.body.appendChild(scrim);
+  const close = () => { scrim.remove(); document.removeEventListener('keydown', onKey); };
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  scrim.querySelector('#tbOk').addEventListener('click', close);
+  scrim.addEventListener('click', e => { if (e.target === scrim) close(); });
+  document.addEventListener('keydown', onKey);
+}
+
 async function loadJobs() {
   const wrap = document.getElementById('jobsWrap');
   let jobs = [];
   try { jobs = await getJSON(withBase('/api/jobs')); } catch (e) { return; }
+  maybeTorBlockedPopup(jobs);
   const active = jobs.filter(j => JOB_ACTIVE.includes(j.status));
   const recent = jobs.filter(j => !JOB_ACTIVE.includes(j.status)).slice(0, 3);
   const show = [...active, ...recent];

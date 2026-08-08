@@ -90,13 +90,13 @@ so an exported scan does not disclose the toolchain; the mapping is here.
 | built-in TLS review | `T` | 3b · tls review | TLS versions, cipher, full certificate (issuer / SAN / expiry), weak-protocol probe | — |
 | built-in bypass probe + [nomore403](https://github.com/devploit/nomore403) | `x` | 6b · bypass | Replays 401 / 403 with 60+ path / header / method tricks (the iamj0ker/bypass-403 "Joker" and nomore403 catalogues) to find front-door-only access control | native catalogue runs with no external tool |
 | [arjun](https://github.com/s0md3v/Arjun) | `A` | 6c · params | Hidden query / body parameter discovery on the interesting endpoints | JS-extracted parameters only |
-| [dalfox](https://github.com/hahwul/dalfox) | `X` | 6d · XSS (toggle) | Reflected / stored / DOM XSS against discovered parameters | XSS toggle stays off |
-| [sqlmap](https://github.com/sqlmapproject/sqlmap) | `Q` | 6e · SQLi (toggle) | SQL injection against discovered parameters, every technique · endpoint / param / payload / DBMS | SQLi toggle stays off |
+| [dalfox](https://github.com/hahwul/dalfox) | `X` | 6d · XSS (toggle) | Reflected / stored / DOM XSS across every user-controlled channel · URL query, form and JSON bodies, and the Cookie header. Findings carry the payload and a replayable request | XSS toggle stays off |
+| [sqlmap](https://github.com/sqlmapproject/sqlmap) | `Q` | 6e · SQLi (toggle) | SQL injection across every user-controlled channel · URL query, form and JSON bodies, the Cookie header, and (via level) User-Agent / Referer. Every technique · endpoint / param / payload / DBMS | SQLi toggle stays off |
 | [ffuf](https://github.com/ffuf/ffuf) or [feroxbuster](https://github.com/epi052/feroxbuster) | `f` | 6 · bruteforce | Content discovery against a calibrated per-host baseline | no bruteforce stage |
 | [ipinfo.io](https://ipinfo.io) | `i` | 7 · enrich | Provider, ASN, country, hosting-or-not per IP | IPs stay bare |
 | [Shodan](https://www.shodan.io) / [InternetDB](https://internetdb.shodan.io) | `S` | 2a · port scan (+ passive) | Known open ports, services, versions, CVEs and TLS / org / ASN / geo, merged into the port scan's own results (also the passive-scan intel path). Key set in the admin panel | InternetDB (free, no key) when there is no Shodan key |
 | [nuclei](https://github.com/projectdiscovery/nuclei) | `N` | 9 · nuclei (toggle) | Template scan with a selection derived from the detected stack (technologies / ports / services), not every template | Nuclei toggle stays off |
-| [tor](https://www.torproject.org) + torsocks | — | 0 · transport | Routes the entire scan through Tor | Tor toggle stays locked |
+| [tor](https://www.torproject.org) + torsocks | — | 0 · transport | Routes the entire scan through Tor · every request, DNS lookup, and external tool (sqlmap, dalfox, nuclei get the SOCKS proxy natively). Detects a target rejecting Tor exit nodes and raises a popup | Tor toggle stays locked |
 | [kuzu](https://kuzudb.com) (or Neo4j) | — | 10 · graph | Stores the scan graph for querying | graph still renders from the JSON |
 
 `./install.sh` installs all of these. `./install.sh --check` reports which are
@@ -113,11 +113,11 @@ are in the bar; the rest are behind **Options**.
 |--------|---------|--------------|
 | **deep DNS** | off | Larger subdomain set, full current DNS records, and historical DNS (previous IPs, name servers, MX, with dates). Needs an API key. If the key's monthly allowance is spent, the launcher says so before the scan starts and offers: run without it, or paste another key |
 | **passive** | off | Passive enumeration only. Nothing is sent to the target, and passive host intelligence (Shodan with a key, else the free InternetDB) is folded into the results. Rules out the port scan and the active HTTP/TLS/bypass reviews |
-| **via Tor** | off | Routes every request, name lookup and external tool through Tor. If a circuit cannot be established the scan aborts rather than falling back to a direct connection |
+| **via Tor** | off | Routes every request, name lookup and external tool through Tor · the active scanners (sqlmap, dalfox, nuclei) are handed the SOCKS proxy natively, and sqlmap re-checks the circuit so a broken proxy aborts the tool instead of leaking. If a circuit cannot be established the scan aborts rather than falling back to a direct connection. If the target is rejecting Tor exit nodes, the dashboard says so in a popup |
 | **port scan** | off | Scans every discovered IP for open ports and services, fingerprints each open web port, and hands non-standard web ports (`:8080`, `:8443`) to the crawler as seeds. Folds in Shodan's known ports / services / CVEs for each IP. Slow, and it touches infrastructure directly |
 | **web archive** | off | Mines the internet archive for URLs this domain used to serve: retired admin panels, old API versions, files published then deleted. Sends nothing to the target. What it finds is re-checked by the crawler |
-| **XSS test** | off | Tests discovered parameters for reflected / stored / DOM XSS (dalfox). Active · sends crafted requests to the target. Findings carry the type, parameter, payload and evidence |
-| **SQLi test** | off | Tests discovered parameters (URL query, form / JSON bodies) for SQL injection (sqlmap), every technique. Findings carry the endpoint, parameter, payload and back-end DBMS |
+| **XSS test** | off | Tests every user-controlled channel · URL query, form and JSON bodies, and the Cookie header · for reflected / stored / DOM XSS (dalfox). Active · sends crafted requests to the target. Findings carry the type, parameter, the payload sent and a replayable request |
+| **SQLi test** | off | Tests every user-controlled channel · URL query, form and JSON bodies, the Cookie header, and (via level) User-Agent / Referer · for SQL injection (sqlmap), every technique. Findings carry the endpoint, parameter, payload and back-end DBMS |
 | **Nuclei** | off | Runs near the end with a template selection derived from the detected stack (technologies, ports, services), not every template. Each result is a finding |
 
 ### Scope

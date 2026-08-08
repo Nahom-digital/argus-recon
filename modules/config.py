@@ -405,7 +405,9 @@ SQLI_ENABLE = os.environ.get("ARGUS_SQLI", "1") != "0"     # admin kill-switch
 SQLMAP_BIN = os.environ.get("ARGUS_SQLMAP", "sqlmap")
 SQLI_MAX_TARGETS = _int_env("ARGUS_SQLI_MAX_TARGETS", 25)
 SQLI_TIMEOUT = _int_env("ARGUS_SQLI_TIMEOUT", 1200)
-SQLI_LEVEL = _int_env("ARGUS_SQLI_LEVEL", 2)   # sqlmap --level (1..5)
+# --level 3 so sqlmap reaches the Cookie (>=2) and User-Agent / Referer (>=3)
+# vectors by default, not only GET/POST params · set 5 to add the Host header.
+SQLI_LEVEL = _int_env("ARGUS_SQLI_LEVEL", 3)   # sqlmap --level (1..5)
 SQLI_RISK = _int_env("ARGUS_SQLI_RISK", 2)     # sqlmap --risk  (1..3)
 
 # --------------------------------------------------------------------------- #

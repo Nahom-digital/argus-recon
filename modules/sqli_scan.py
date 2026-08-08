@@ -14,6 +14,7 @@ target cap and a wall-clock budget so it cannot turn a scan into an overnight jo
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -59,22 +60,66 @@ def _parse_sqlmap(text: str) -> list[dict]:
     return out
 
 
+def _json_body(target: dict) -> str:
+    """A JSON request body for sqlmap to walk · the one actually captured when it
+    is valid JSON, otherwise a minimal object built from the field names so every
+    key is still exercised."""
+    body = (target.get("body") or "").strip()
+    if body[:1] in ("{", "["):
+        try:
+            json.loads(body)
+            return body
+        except Exception:
+            pass
+    obj = {p: "1" for p in (target.get("params") or [])} or {"q": "1"}
+    return json.dumps(obj)
+
+
+def _tor_args() -> list[str]:
+    """Route sqlmap through the Tor proxy the engine already verified, and have
+    sqlmap re-check the circuit so a broken proxy aborts the tool instead of it
+    ever reaching out in the clear. 127.0.0.1 (the normal case) uses sqlmap's
+    native --tor with --check-tor; a non-local proxy falls back to --proxy."""
+    socks = (tor.state() or {}).get("socks") or ""
+    host, _, port = socks.partition(":")
+    if host == "127.0.0.1" and port:
+        return ["--tor", "--tor-type=SOCKS5", f"--tor-port={port}", "--check-tor"]
+    pu = tor.proxy_url("socks5")
+    return ["--proxy", pu] if pu else []
+
+
 def _cmd_for(binp: str, target: dict, per_target: int) -> tuple[list[str], str, str]:
-    """Build the sqlmap argv for one target. Returns (cmd, url, data)."""
+    """Build the sqlmap argv for one target. Returns (cmd, url, data).
+
+    Every user-controlled channel the request used is handed to sqlmap: the query
+    string, the body (as JSON when the endpoint speaks JSON, else form-encoded),
+    and the Cookie header. --level then reaches the header vectors sqlmap knows
+    (Cookie at >=2, User-Agent / Referer at >=3, Host at 5)."""
     cmd = [binp, "--batch", "--disable-coloring", "-v", "0",
            "--level", str(config.SQLI_LEVEL), "--risk", str(config.SQLI_RISK),
            "--technique", "BEUSTQ", "--random-agent", "--flush-session",
            "--threads", "4", "--timeout", "15", "--retries", "1"]
     url = target["url"]
     data = ""
-    if target["method"] == "POST":
+    params = target.get("params") or []
+    has_body = target["method"] == "POST" or bool(target.get("body"))
+    if has_body:
         base = url.split("?", 1)[0]
-        data = "&".join(f"{p}=1" for p in target["params"]) or "x=1"
+        if target.get("is_json"):
+            data = _json_body(target)
+        else:
+            data = (target.get("body") or "").strip() \
+                or "&".join(f"{p}=1" for p in params) or "x=1"
         cmd += ["-u", base, "--data", data]
     else:
-        if "?" not in url and target["params"]:
-            url = url + "?" + "&".join(f"{p}=1" for p in target["params"])
+        if "?" not in url and params:
+            url = url + "?" + "&".join(f"{p}=1" for p in params)
         cmd += ["-u", url]
+    cookies = target.get("cookies")
+    if cookies:
+        cmd += ["--cookie", cookies]      # tested at --level >= 2
+    if tor.active():
+        cmd += _tor_args()
     return cmd, url, data
 
 
@@ -116,8 +161,13 @@ def run(result: ScanResult) -> None:
     if not config.SQLI_ENABLE:
         result.mark_module("sqli", "skip", note="disabled")
         return
-    if tor.active():
-        result.mark_module("sqli", "skip", note="not run over Tor")
+    # Over Tor, sqlmap is handed the proxy natively (see _tor_args) instead of
+    # being skipped · but only if a usable proxy can be resolved. If Tor is on and
+    # we cannot route the tool, skip it: a scan that leaks the operator's address
+    # is worse than one missing SQLi coverage.
+    if tor.active() and not _tor_args():
+        result.mark_module("sqli", "skip",
+                           note="Tor on but no usable proxy · skipped to avoid a leak")
         return
     binp = resolve_tool(config.SQLMAP_BIN)
     if not binp:
@@ -134,7 +184,8 @@ def run(result: ScanResult) -> None:
     deadline = t0 + config.SQLI_TIMEOUT
     log.info(f"SQL injection testing {len(targets)} endpoint"
              f"{'s' if len(targets) != 1 else ''} (sqlmap, level {config.SQLI_LEVEL}"
-             f"/risk {config.SQLI_RISK})")
+             f"/risk {config.SQLI_RISK}"
+             + (", over Tor" if tor.active() else "") + ")")
     tested = found = 0
     for target in targets:
         if time.time() >= deadline:

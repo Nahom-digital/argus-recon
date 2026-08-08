@@ -71,6 +71,35 @@ SRC_PORTSCAN = config.SOURCE_CODES["portscan"]
 # otherwise-finished scan (web.server · _run_job).
 STAGE_ERROR_MARKER = "##ARGUS_STAGE_ERRORS"
 
+# Same channel, for a Tor scan whose target is rejecting Tor exit nodes: the
+# dashboard turns it into a popup so the operator knows the results are thin
+# because the exit was blocked, not because the surface was clean.
+TOR_BLOCKED_MARKER = "##ARGUS_TOR_BLOCKED"
+
+
+def _detect_tor_block(result) -> dict | None:
+    """A Tor scan where most requests that reached the target came back forbidden
+    or rate-limited is the signature of an exit node being blocked (Cloudflare and
+    friends do this). Report the ratio so the operator can tell "clean" from
+    "blocked". Only fires with enough requests to be meaningful."""
+    blocked = requested = 0
+    try:
+        for e in result.iter_endpoints():
+            if not e.get("in_scope"):
+                continue
+            st = e.get("status")
+            if st is None:
+                continue
+            requested += 1
+            if st in (403, 429, 503):
+                blocked += 1
+    except Exception:
+        return None
+    if requested >= 8 and blocked >= requested * 0.6:
+        return {"blocked": blocked, "requested": requested,
+                "ratio": round(blocked / requested, 2)}
+    return None
+
 
 def _stage(result, name, fn, *args, **kwargs):
     """Run one pipeline stage without letting a single tool's failure abort the
@@ -599,6 +628,18 @@ def main(argv=None):
         result = run_pipeline(args)
         if args.tor:
             result.meta["tor"] = tor.state()
+            blocked = _detect_tor_block(result)
+            if blocked:
+                result.meta["tor_blocked"] = blocked
+                # A marker line the dashboard's job runner lifts out of the log to
+                # raise the "Tor exit is being blocked" popup.
+                print(f"{TOR_BLOCKED_MARKER} {blocked['blocked']}/"
+                      f"{blocked['requested']} in-scope requests were rejected "
+                      f"(HTTP 403/429/503) · the target appears to be blocking Tor "
+                      f"exit nodes", file=sys.stderr)
+                log.warning("target appears to be blocking Tor exit nodes "
+                            f"({blocked['blocked']}/{blocked['requested']} requests "
+                            "forbidden or rate-limited)")
 
         # 9. Storage
         path = result.save()
