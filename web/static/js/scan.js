@@ -539,6 +539,16 @@ function buildSecretFilter(containerId, prefix) {
 }
 
 /* Findings · by severity (worst first) and by type. */
+/* Friendly labels for the finding-type filter · the raw category value stays the
+   filter key (so matching is unchanged), only the shown text is nicer. */
+const FINDING_CAT_LABELS = {
+  sqli: 'SQL injection', xss: 'XSS', 'access-control': '403 bypass',
+  nuclei: 'Nuclei', vuln: 'vulnerability', exposure: 'exposure',
+  misconfig: 'misconfiguration', secret: 'secret', param: 'parameters',
+  tls: 'TLS', http: 'HTTP', port: 'ports',
+};
+const findingCatLabel = c => FINDING_CAT_LABELS[c] || c;
+
 function buildFindingFilter(containerId, prefix) {
   const items = allFindings();
   const order = ['critical', 'high', 'medium', 'low', 'info'];
@@ -548,7 +558,7 @@ function buildFindingFilter(containerId, prefix) {
   const catCounts = facetCounts(items, f => f.category);
   const catOpts = [['', `all types (${[...catCounts.keys()].length})`]];
   [...catCounts.entries()].sort((a, b) => b[1] - a[1])
-    .forEach(([c, n]) => catOpts.push([c, `${c} (${n})`]));
+    .forEach(([c, n]) => catOpts.push([c, `${findingCatLabel(c)} (${n})`]));
   panelFilter(containerId, prefix, [
     { key: 'findSev', id: 'FindSev', aria: 'Filter findings by severity',
       value: F.findSev, options: sevOpts, onChange: refreshFindings },
@@ -632,6 +642,12 @@ function renderFindingList() {
 /* One finding · summary row (severity, title, confidence) that expands to the
    risk, the fix, the raw evidence, a parsed breakdown, tags and references.
    Same expand vocabulary as the file rows: instant detail, animated chevron. */
+const findWhen = f => {
+  const t = f.last_seen || f.first_seen;
+  return t ? String(t).replace('T', ' ').slice(0, 16) : '';
+};
+const findScanVer = () => (SCAN && SCAN.meta && SCAN.meta.version) || '';
+
 function findRow(f) {
   const src = (f.sources || []).map(sc =>
     `<span class="src-chip mini" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`).join('');
@@ -665,10 +681,12 @@ function findRow(f) {
       <svg class="ic find-chev"><use href="#i-chevron-down"></use></svg>
     </button>
     <div class="find-meta">
-      ${f.category ? `<span class="find-cat">${esc(f.category)}</span>` : ''}
+      ${f.category ? `<span class="find-cat">${esc(findingCatLabel(f.category))}</span>` : ''}
       ${host ? `<span class="find-host" title="${esc(f.target || host)}">${esc(host)}${esc(tgtPath)}</span>` : ''}
       ${f.occurrences > 1 ? `<span class="faint">seen ${f.occurrences}x</span>` : ''}
+      ${findWhen(f) ? `<span class="faint" title="when this finding was recorded">${esc(findWhen(f))}</span>` : ''}
       ${src ? `<span class="find-src">${src}</span>` : ''}
+      ${findScanVer() ? `<span class="faint mono" title="scanner version">${esc(findScanVer())}</span>` : ''}
     </div>
     ${det ? `<div class="find-det">${det}</div>` : ''}
   </div>`;
