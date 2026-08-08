@@ -503,8 +503,10 @@ def quota(username: str) -> dict:
     usage = rec.get("usage") or {}
     used = int(usage.get("scans", 0)) if usage.get("day") == _today() else 0
     cap = int(limits.get("daily_scans", 0))
-    return {"daily_scans": cap, "used": used,
-            "remaining": None if cap == 0 else max(0, cap - used),
+    # Bonus scan credits an admin has granted · usable beyond the daily cap.
+    credits = max(0, int(rec.get("credits", 0)))
+    return {"daily_scans": cap, "used": used, "credits": credits,
+            "remaining": None if cap == 0 else max(0, cap - used) + credits,
             "concurrent": int(limits.get("concurrent", 0))}
 
 
@@ -547,10 +549,34 @@ def record_scan(username: str) -> None:
         usage["scans"] = int(usage.get("scans", 0)) + 1
         rec["usage"] = usage
         rec["total_scans"] = int(rec.get("total_scans", 0)) + 1
+        # A scan past the daily cap spends one bonus credit, if any remain.
+        cap = int(effective_limits(rec).get("daily_scans", 0))
+        if cap and usage["scans"] > cap and int(rec.get("credits", 0)) > 0:
+            rec["credits"] = int(rec["credits"]) - 1
         try:
             _write(data)
         except Exception:
             pass
+
+
+def grant_credits(username: str, amount: int) -> dict:
+    """Give (or, with a negative amount, remove) bonus scan credits · scans an
+    account may run beyond its daily cap. Returns the account's updated quota."""
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        raise AuthError("credits must be a whole number")
+    with _LOCK:
+        data = _read()
+        rec = (data or {}).get("users", {}).get(username) if data else None
+        if not rec:
+            raise AuthError("unknown account")
+        rec["credits"] = max(0, int(rec.get("credits", 0)) + amount)
+        try:
+            _write(data)
+        except Exception:
+            pass
+    return quota(username)
 
 
 def may_see(claims: dict | None, owner: str | None) -> bool:

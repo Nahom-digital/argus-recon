@@ -1824,6 +1824,57 @@ def api_admin_delete_user(username):
     return jsonify({"deleted": username})
 
 
+@app.route("/api/admin/users/<username>/credits", methods=["POST"])
+def api_admin_grant_credits(username):
+    """Grant (or remove, with a negative amount) bonus scan credits · scans this
+    account may run beyond its daily cap."""
+    _require_admin()
+    body = request.get_json(silent=True) or {}
+    amount = body.get("credits", body.get("amount"))
+    try:
+        q = auth.grant_credits(username, amount)
+    except auth.AuthError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"user": username, "quota": q})
+
+
+@app.route("/api/admin/user/<username>/assets")
+def api_admin_user_assets(username):
+    """One operator's footprint: scan history, the domains they scanned,
+    aggregate findings by severity, and their current scan quota."""
+    _require_admin()
+    ownerless = username in ("(none)", "-", "")
+    scans: list[dict] = []
+    domains: dict[str, int] = {}
+    sev = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    findings_total = 0
+    for p in _scan_files():
+        s = _summary(p)
+        owner = s.get("owner")
+        if ownerless:
+            if owner:
+                continue
+        elif owner != username:
+            continue
+        scans.append(s)
+        dom = s.get("domain")
+        if dom:
+            domains[dom] = domains.get(dom, 0) + 1
+        st = s.get("stats") or {}
+        findings_total += int(st.get("findings", 0) or 0)
+        for k in sev:
+            sev[k] += int((st.get("findings_by_severity") or {}).get(k, 0) or 0)
+    return jsonify({
+        "user": username,
+        "quota": None if ownerless else auth.quota(username),
+        "scan_count": len(scans),
+        "scans": scans,
+        "domains": sorted(domains.items(), key=lambda kv: (-kv[1], kv[0])),
+        "findings_total": findings_total,
+        "findings_by_severity": sev,
+    })
+
+
 @app.route("/api/admin/access")
 def api_admin_access():
     _require_admin()

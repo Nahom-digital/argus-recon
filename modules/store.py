@@ -175,6 +175,12 @@ def build_summary(doc: dict, *, scan_id: str, mtime: float, size: int) -> dict:
         "started_at": meta.get("started_at"),
         "finished_at": meta.get("finished_at"),
         "duration_sec": meta.get("duration_sec"),
+        # Scanner version this run was produced by · shown in the scan library,
+        # scan details, findings and reports (see modules.config.SCANNER_VERSION).
+        "version": meta.get("version"),
+        "engine": meta.get("engine"),
+        "scanned_at": (meta.get("versions") or {}).get("scanned_at")
+                      or (meta.get("started_at") or "")[:10],
         "stats": meta.get("stats", {}),
         "modules": meta.get("modules", {}),
         "scope": meta.get("scope", "apex"),
