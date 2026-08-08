@@ -87,34 +87,62 @@ def _cmd_for(binp: str, target: dict, outfile: Path) -> tuple[list[str], str]:
     return cmd, url
 
 
+def _poc_request(poc: dict, url: str) -> str:
+    """The exact request that carried the payload. dalfox's `data` field is the
+    full PoC URL it fired (the payload is already embedded in the query), so it is
+    the proof of concept · fall back to the tested URL when dalfox omits it."""
+    data = str(poc.get("data") or poc.get("poc") or "").strip()
+    if data.startswith("http"):
+        return data
+    return url
+
+
+def _curl_for(method: str, request_url: str) -> str:
+    """A copy-paste reproduction of the request the scanner sent."""
+    if method == "POST":
+        base, _, body = request_url.partition("?")
+        return f"curl -sk -X POST '{base}'" + (f" --data '{body}'" if body else "")
+    return f"curl -sk '{request_url}'"
+
+
 def _emit(result: ScanResult, target: dict, url: str, pocs: list[dict]) -> None:
     seen: set[str] = set()
     for poc in pocs:
         kind, sev = _classify(poc)
-        param = poc.get("param") or poc.get("parameter") or "?"
-        payload = poc.get("payload") or poc.get("data") or ""
-        evidence = poc.get("evidence") or poc.get("message_str") or poc.get("data") or ""
-        dedup = f"{param}:{kind}"
+        param = poc.get("param") or poc.get("parameter") or ""
+        payload = str(poc.get("payload") or "").strip()
+        request = _poc_request(poc, url)
+        evidence = poc.get("evidence") or poc.get("message_str") or ""
+        # A credible PoC has to carry something an operator can reproduce · a
+        # payload, or a payload-bearing request that is not just the bare URL we
+        # pointed dalfox at. Without either it is noise (typically a catch-all host
+        # echoing the path), so it is not worth a finding.
+        if not payload and request == url:
+            continue
+        curl = _curl_for(target["method"], request)
+        param_lbl = param or "query"
+        dedup = f"{param_lbl}:{kind}"
         if dedup in seen:
             continue
         seen.add(dedup)
         result.add_finding(
-            title=f"{kind} in '{param}' on {url.split('?')[0]}",
+            title=f"{kind} in '{param_lbl}' on {url.split('?')[0]}",
             category="xss", severity=sev, confidence=90 if sev == "high" else 65,
             source=SRC, target=url,
-            evidence=(f"parameter {param} · {kind}"
+            evidence=(f"parameter {param_lbl} · {kind}"
                       + (f" · payload: {payload[:200]}" if payload else "")
-                      + (f" · {str(evidence)[:160]}" if evidence else "")),
-            parsed={"type": kind, "parameter": param, "method": target["method"],
-                    "payload": payload, "evidence": str(evidence)[:400],
-                    "cwe": poc.get("cwe")},
+                      + (f" · request: {request[:200]}" if request else "")),
+            parsed={"type": kind, "parameter": param_lbl,
+                    "method": target["method"], "payload": payload,
+                    "request": request, "curl": curl,
+                    "evidence": str(evidence)[:400], "cwe": poc.get("cwe")},
             risk=("User input is reflected into the page without correct output "
                   "encoding · an attacker can run script in a victim's session."),
             recommendation=("Context-encode all user input on output and apply a "
                             "strict Content-Security-Policy."),
             tags=["xss", kind.split()[0].lower()],
             refs=["https://owasp.org/www-community/attacks/xss/"],
-            signature=f"xss:{url.split('?')[0]}:{param}:{kind}")
+            signature=f"xss:{url.split('?')[0]}:{param_lbl}:{kind}")
 
 
 def run(result: ScanResult) -> None:

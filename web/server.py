@@ -1708,6 +1708,32 @@ def api_job_stop(job_id):
     return jsonify({"job": job})
 
 
+@app.route("/api/jobs/<job_id>", methods=["DELETE"])
+def api_job_delete(job_id):
+    """Remove a job from the Running & recent list · forget its record and its
+    streamed log only. The saved scan it produced stays in the library, reachable
+    by its id: this clears the job row, never the scan. A job that is still running
+    must be stopped first so its worker is never orphaned."""
+    if not SCAN_ID_RE.match(job_id):
+        abort(400)
+    job = _JOBS.get(job_id)
+    if not job:
+        abort(404, "unknown job")
+    if not _may_see_job(job):
+        abort(403, "this scan belongs to another account")
+    if job.get("status") in _ACTIVE_STATES:
+        return jsonify({"error": "this scan is still running · stop it first, then "
+                                 "remove it from the list"}), 409
+    with _JOBS_LOCK:
+        _JOBS.pop(job_id, None)
+    try:
+        (JOBS_DIR / f"{job_id}.log").unlink(missing_ok=True)
+    except Exception:
+        pass
+    _persist_jobs()
+    return jsonify({"deleted": job_id})
+
+
 def _may_see_job(job: dict) -> bool:
     """A running scan is visible on the same terms as a finished one."""
     if not auth.configured():

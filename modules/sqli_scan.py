@@ -80,6 +80,12 @@ def _cmd_for(binp: str, target: dict, per_target: int) -> tuple[list[str], str, 
 
 def _emit(result: ScanResult, target: dict, url: str, data: str,
           hits: list[dict]) -> None:
+    if data:
+        request = f"{url.split('?', 1)[0]} (POST {data})"
+        curl = f"curl -sk -X POST '{url.split('?', 1)[0]}' --data '{data}'"
+    else:
+        request = url
+        curl = f"curl -sk '{url}'"
     for h in hits:
         dbms = h.get("dbms") or "unknown"
         payload = (h.get("payloads") or [""])[0]
@@ -94,7 +100,8 @@ def _emit(result: ScanResult, target: dict, url: str, data: str,
             parsed={"parameter": h["param"], "place": h["place"],
                     "types": h.get("types"), "titles": h.get("titles"),
                     "payloads": h.get("payloads"), "dbms": dbms,
-                    "method": target["method"], "data": data},
+                    "method": target["method"], "request": request,
+                    "curl": curl, "data": data},
             risk=("The parameter is concatenated into a SQL query · an attacker "
                   "can read or modify the database, and often reach the host."),
             recommendation=("Use parameterised queries / prepared statements for "

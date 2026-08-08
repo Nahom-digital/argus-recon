@@ -26,6 +26,30 @@ def _url_params(url: str) -> list[str]:
     return [k for k, _ in parse_qsl(q, keep_blank_values=True) if k]
 
 
+# Markers that mean a URL was lifted verbatim out of JavaScript source (a template
+# literal, a framework binding, a concatenated fragment) rather than being a real,
+# resolvable request. Pointing sqlmap / dalfox at one wastes the budget and, on a
+# catch-all host that answers 200 for everything, invents a "vulnerability" with no
+# real payload behind it. Such URLs stay in the endpoint inventory as references ·
+# they are only skipped as active-injection targets.
+_JS_ARTIFACTS = ("${", "`", "{{", "}}", "<%", "%>", "[object", "undefined/",
+                 "/undefined", "=undefined", ":undefined")
+
+
+def _is_testable_url(url: str) -> bool:
+    """False for a URL that carries an unexpanded template / interpolation marker,
+    or a parameter whose name is itself such a fragment · nothing real to inject."""
+    low = url.lower()
+    if any(tok in low for tok in _JS_ARTIFACTS):
+        return False
+    # A parameter *name* that is a placeholder (e.g. ?${k}=v) is equally unusable.
+    for p in _url_params(url):
+        pl = p.lower()
+        if "$" in pl or "{" in pl or "}" in pl or "`" in pl:
+            return False
+    return True
+
+
 def collect(result: ScanResult, *, limit: int = 40,
             need_params: bool = True) -> list[dict]:
     """Return up to `limit` injectable targets, best first. When `need_params`
@@ -36,6 +60,8 @@ def collect(result: ScanResult, *, limit: int = 40,
     for e in result.iter_endpoints():
         url = e.get("url")
         if not url or not e.get("in_scope"):
+            continue
+        if not _is_testable_url(url):
             continue
         method = (e.get("method") or "GET").upper()
         field_names = [f.get("name") for f in (e.get("fields") or [])

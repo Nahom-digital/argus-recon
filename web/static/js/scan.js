@@ -648,6 +648,59 @@ const findWhen = f => {
 };
 const findScanVer = () => (SCAN && SCAN.meta && SCAN.meta.version) || '';
 
+/* The active scanners (XSS, SQLi, Nuclei) each send a crafted request · the part
+   an operator actually needs from the finding is that proof of concept: the
+   payload that was sent and a request they can replay. Surface it as its own
+   block with copy buttons instead of leaving it buried among the parsed
+   key/values (or showing nothing at all, which is what "just says there's a bug"
+   looked like). The same keys are then dropped from the generic Detail block so
+   they are not shown twice. */
+const POC_CATS = new Set(['xss', 'sqli', 'nuclei']);
+const POC_SKIP_KEYS = new Set(['request', 'curl', 'payload', 'payloads', 'data']);
+
+function findPoc(f) {
+  const p = (f.parsed && typeof f.parsed === 'object') ? f.parsed : {};
+  const payload = p.payload
+    || (Array.isArray(p.payloads) ? (p.payloads.find(Boolean) || '') : (p.payloads || ''));
+  const repro = p.curl || p.request || p.data || '';
+  const line = (label, val) => {
+    val = String(val);
+    return `<div class="poc-line">
+      <span class="poc-k">${label}</span>
+      <code class="poc-code">${esc(val)}</code>
+      <button type="button" class="poc-copy" data-copy="${esc(val)}"
+        title="Copy to clipboard" aria-label="Copy ${esc(label.toLowerCase())}">${icon('copy')}</button>
+    </div>`;
+  };
+  const rows = [];
+  if (payload) rows.push(line('Payload', payload));
+  if (repro && String(repro) !== String(payload)) rows.push(line('Request', repro));
+  if (!rows.length) return '';
+  return `<div class="find-block find-poc">
+    <span class="find-lbl">Proof of concept</span>
+    <div class="poc-body">${rows.join('')}</div>
+  </div>`;
+}
+
+/* One delegated listener for the PoC copy buttons · findings render in two places
+   (the side panel and the detail view), so a single document-level handler beats
+   wiring each container. Idempotent: attached once. */
+let _pocCopyWired = false;
+function wirePocCopy() {
+  if (_pocCopyWired) return;
+  _pocCopyWired = true;
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('.poc-copy[data-copy]');
+    if (!b) return;
+    e.stopPropagation();
+    if (navigator.clipboard) navigator.clipboard.writeText(b.dataset.copy);
+    b.classList.add('done');
+    b.innerHTML = icon('circle-check-filled');
+    setTimeout(() => { b.classList.remove('done'); b.innerHTML = icon('copy'); }, 1400);
+  });
+}
+wirePocCopy();
+
 function findRow(f) {
   const src = (f.sources || []).map(sc =>
     `<span class="src-chip mini" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`).join('');
@@ -657,15 +710,18 @@ function findRow(f) {
   const tags = (f.tags || []).slice(0, 6).map(t => `<span class="tag mono">${esc(t)}</span>`).join('');
   const refs = (f.refs || []).map(r =>
     `<a class="find-ref" href="${esc(r)}" target="_blank" rel="noopener">${icon('external-link')}${esc(splitUrl(r).host || r)}</a>`).join('');
+  const poc = POC_CATS.has(f.category) ? findPoc(f) : '';
   const parsed = (f.parsed && typeof f.parsed === 'object')
     ? Object.entries(f.parsed)
-        .filter(([, v]) => v != null && v !== '' && (!Array.isArray(v) || v.length))
+        .filter(([k, v]) => v != null && v !== '' && (!Array.isArray(v) || v.length)
+                && !(poc && POC_SKIP_KEYS.has(k)))
         .slice(0, 8)
         .map(([k, v]) => `<div class="find-kv"><span class="k">${esc(k)}</span><span class="v mono">${
           esc(Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : String(v))).slice(0, 300)
         }</span></div>`).join('')
     : '';
   const det = [
+    poc,
     f.risk ? `<div class="find-block"><span class="find-lbl">Risk</span><p>${esc(f.risk)}</p></div>` : '',
     f.recommendation ? `<div class="find-block"><span class="find-lbl">Fix</span><p>${esc(f.recommendation)}</p></div>` : '',
     f.evidence ? `<div class="find-block"><span class="find-lbl">Evidence</span><pre class="find-ev">${esc(f.evidence)}</pre></div>` : '',

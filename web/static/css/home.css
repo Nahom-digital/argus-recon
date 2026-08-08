@@ -177,6 +177,15 @@
 .job .jstate.stopped{color:var(--muted)}
 .job .jstop:hover{color:var(--danger)}
 .job .jstop:hover svg{color:var(--danger)}
+/* remove-from-list · same danger vocabulary as the Recent Scans row delete, but
+   this one only clears the job record, never the saved scan */
+.job .jdel:hover{color:var(--danger)}
+.job .jdel:hover svg{color:var(--danger)}
+.job .jdel span{font-size:var(--fs-xs)}
+.job .jdel.confirm{color:#fff;background:var(--danger);border-color:var(--danger)}
+.job .jdel.confirm svg{color:#fff}
+.job{transition:opacity .18s var(--ease),transform .18s var(--ease)}
+.job.removing{opacity:0;transform:translateX(10px)}
 .job .job-log{flex-basis:100%}
 .job-log{font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--ink-2);
   background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm);
@@ -196,6 +205,8 @@
 @media (prefers-reduced-motion: reduce){
   .tool{transition:none}
   .tool:active{transform:none}
+  .job{transition:none}
+  .job.removing{transform:none}
 }
 
 /* The modal itself now lives in app.css · the home page's key dialog and the

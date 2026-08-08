@@ -603,12 +603,21 @@ function jobIndicator(j) {
 }
 
 function jobStatusHtml(j) {
+  const active = JOB_ACTIVE.includes(j.status);
   const stop = j.status === 'running' || j.status === 'queued'
     ? `<button class="btn sm ghost jstop" data-stop="${esc(j.id)}">${icon('x')} stop</button>` : '';
+  // A finished run can be cleared from this list. It only forgets the job row and
+  // its log · the saved scan it produced stays in the library, so this is never a
+  // way to lose a result. Active runs must be stopped first, so no button here.
+  const del = active ? ''
+    : `<button class="btn sm ghost jdel" data-del-job="${esc(j.id)}"
+         title="Remove from this list · the saved scan is kept"
+         aria-label="Remove this job from the list">${icon('trash')}</button>`;
   return `<span class="jstate ${esc(j.status)}">${jobIndicator(j)} ${esc(j.status)}</span>`
     + (j.status === 'done' ? ' <a href="#" data-reload="1">view result</a>' : '')
     + stop
-    + `<button class="btn sm ghost" data-toggle-log="${esc(j.id)}">${icon('terminal-2')} log</button>`;
+    + `<button class="btn sm ghost" data-toggle-log="${esc(j.id)}">${icon('terminal-2')} log</button>`
+    + del;
 }
 
 function jobRowHtml(j) {
@@ -696,6 +705,10 @@ function wireJobRow(root) {
     if (b._wired) return; b._wired = true;
     b.addEventListener('click', () => stopJob(b.dataset.stop, b));
   });
+  root.querySelectorAll('[data-del-job]').forEach(b => {
+    if (b._wired) return; b._wired = true;
+    b.addEventListener('click', () => deleteJob(b.dataset.delJob, b));
+  });
   root.querySelectorAll('[data-reload]').forEach(a => {
     if (a._wired) return; a._wired = true;
     a.addEventListener('click', e => { e.preventDefault(); loadScans(); });
@@ -712,6 +725,46 @@ async function stopJob(id, btn) {
   } catch (e) { /* the poll below reports the real state */ }
   jobsSignature = '';            // force a rebuild so the row's buttons refresh
   loadJobs();
+}
+
+/* Remove a finished job from the Running & recent list. Two steps · the first
+   click arms the button ("remove?"), the second does it, so a stray click never
+   clears a row. It forgets only the job record and its streamed log; the saved
+   scan the run produced stays in the library, reachable from Recent Scans. */
+async function deleteJob(id, btn) {
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.classList.add('confirm');
+    btn.innerHTML = icon('trash') + '<span>remove?</span>';
+    setTimeout(() => {
+      if (!btn.isConnected || btn.dataset.armed !== '1') return;
+      btn.dataset.armed = '';
+      btn.classList.remove('confirm');
+      btn.innerHTML = icon('trash');
+    }, 3000);
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>';
+  try {
+    await sendJSON(withBase(`/api/jobs/${encodeURIComponent(id)}`), 'DELETE');
+  } catch (e) {
+    btn.disabled = false;
+    btn.dataset.armed = '';
+    btn.classList.remove('confirm');
+    btn.innerHTML = icon('trash');
+    formError(null, e.message);
+    return;
+  }
+  openLogs.delete(id);
+  const row = document.querySelector(`.job[data-job="${CSS.escape(id)}"]`);
+  jobsSignature = '';            // force a rebuild so the window refills next poll
+  if (row) {
+    row.classList.add('removing');
+    setTimeout(() => { row.remove(); loadJobs(); }, 180);
+  } else {
+    loadJobs();
+  }
 }
 
 /* Refresh one open terminal.

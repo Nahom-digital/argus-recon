@@ -354,8 +354,30 @@
 .find-ref{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--accent-ink);text-decoration:none}
 .find-ref:hover{text-decoration:underline}
 .find-ref .ic{width:12px;height:12px}
+/* proof of concept · the payload sent and a replayable request for an active
+   finding (XSS / SQLi / Nuclei), each on its own copyable line */
+.find-poc{margin-top:10px}
+.find-poc .poc-body{display:flex;flex-direction:column;gap:6px;margin-top:3px}
+.poc-line{display:flex;align-items:flex-start;gap:8px}
+.poc-k{flex:none;width:58px;padding-top:6px;font-size:10px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.04em;color:var(--faint)}
+.poc-code{flex:1;min-width:0;font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--ink-2);
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--r-xs);padding:6px 8px;
+  white-space:pre-wrap;word-break:break-all;max-height:140px;overflow:auto}
+.poc-copy{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-xs);color:var(--muted);
+  cursor:pointer;transition:background .12s var(--ease),color .12s var(--ease),
+  border-color .12s var(--ease),transform .12s var(--ease)}
+.poc-copy svg{width:14px;height:14px}
+.poc-copy:hover{background:var(--hover);color:var(--accent-ink);border-color:var(--border-strong)}
+.poc-copy:active{transform:scale(.94)}
+.poc-copy:focus-visible{outline:2px solid var(--ring);outline-offset:1px}
+.poc-copy.done{color:var(--ok);border-color:var(--ok)}
+.poc-copy.done svg{color:var(--ok)}
 @media (prefers-reduced-motion:reduce){
   .find-row .find-chev,.find-row .find-sum{transition:none}
+  .poc-copy{transition:none}
+  .poc-copy:active{transform:none}
 }
 
 /* ---- open ports (port-scan layer inside an IP card) ----------------------- */
