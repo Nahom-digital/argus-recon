@@ -220,3 +220,8 @@
 .key-note svg{width:15px;height:15px;flex:none;margin-top:1px}
 .key-note.ok{color:var(--ok);background:rgba(63,125,82,.12)}
 .key-note[hidden]{display:none}
+
+/* scanner version chip in a scan-library row's meta line */
+.scan-row .meta .ver{font-family:var(--mono);font-size:var(--fs-xs);
+  color:var(--muted);border:1px solid var(--border);border-radius:var(--r-xs);
+  padding:0 5px}

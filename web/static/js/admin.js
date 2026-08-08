@@ -13,6 +13,7 @@ let EDITING = null;                 // username being edited, or null = new
 const PERMS = [
   ['umSeeAll', 'see_all'], ['umDelete', 'delete'], ['umPortscan', 'portscan'],
   ['umTor', 'tor'], ['umWayback', 'wayback'], ['umDeep', 'deep'],
+  ['umXss', 'xss'], ['umSqli', 'sqli'], ['umNuclei', 'nuclei'],
 ];
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -20,6 +21,8 @@ document.addEventListener('DOMContentLoaded', () => {
   wireUserModal();
   wirePasswordForm();
   wireAccessFilters();
+  const vr = document.getElementById('versionRefresh');
+  if (vr) vr.addEventListener('click', loadVersion);
   loadOverview();
   loadUsers();
 });
@@ -40,6 +43,7 @@ function wireTabs() {
     if (tab === 'access') loadAccess();
     if (tab === 'scans') loadOverview();
     if (tab === 'integrations') loadIntegrations();
+    if (tab === 'version') loadVersion();
   }));
 }
 
@@ -55,6 +59,8 @@ async function loadIntegrations() {
   host.innerHTML = `<div class="intg-rows">${items.map(intgRow).join('')}</div>`;
   host.querySelectorAll('.intg-save').forEach(btn =>
     btn.addEventListener('click', () => saveIntegration(btn.dataset.id)));
+  host.querySelectorAll('.intg-test').forEach(btn =>
+    btn.addEventListener('click', () => testIntegration(btn.dataset.id)));
   host.querySelectorAll('.intg-field .toggle-eye').forEach(btn =>
     btn.addEventListener('click', () => {
       const inp = btn.parentElement.querySelector('input');
@@ -83,9 +89,24 @@ function intgRow(i) {
         <button class="toggle-eye" type="button" title="Show or hide" aria-label="Show or hide">${icon('eye')}</button>
       </div>
       <button class="btn primary sm intg-save" data-id="${esc(i.id)}">${icon('key')}Save</button>
+      ${['shodan', 'securitytrails'].includes(i.id)
+        ? `<button class="btn sm intg-test" data-id="${esc(i.id)}" title="Test the connection">${icon('refresh')}Test</button>`
+        : ''}
     </div>
     <p class="form-msg intg-msg" role="alert" hidden></p>
   </div>`;
+}
+
+function intgTestNote(d) {
+  if (d.shodan) {
+    const s = d.shodan;
+    if (s.mode === 'internetdb') return { ok: true, text: s.detail || 'No key · using the free InternetDB.' };
+    if (s.ok) return { ok: true, text: `Connected · plan ${s.plan || 'n/a'}, ${fmtNum(s.query_credits || 0)} query credits.` };
+    return { ok: false, text: `Shodan test failed: ${s.error || 'unknown error'}` };
+  }
+  if (d.quota) return { ok: true, text: `Connected · ${fmtNum(d.quota.remaining ?? 0)} deep-DNS lookups left.` };
+  if (d.error) return { ok: false, text: d.error };
+  return { ok: true, text: 'Connected.' };
 }
 
 async function saveIntegration(id) {
@@ -101,16 +122,143 @@ async function saveIntegration(id) {
     const d = await sendJSON(withBase('/api/admin/integrations/' + encodeURIComponent(id)), 'POST', { value });
     input.value = '';
     let note = value.trim() ? 'Saved.' : 'Cleared.';
-    if (d.quota_error) note = `Saved, but the key check failed: ${d.quota_error}`;
-    else if (d.quota && d.quota.remaining != null) note = `Saved · ${fmtNum(d.quota.remaining)} deep-DNS lookups left.`;
+    let bad = false;
+    if (d.quota_error) { note = `Saved, but the key check failed: ${d.quota_error}`; bad = true; }
+    else if (d.shodan_error) { note = `Saved, but the connection test failed: ${d.shodan_error}`; bad = true; }
+    else if (d.shodan || d.quota) { const t = intgTestNote(d); note = `Saved · ${t.text}`; bad = !t.ok; }
     msg.textContent = note;
-    msg.classList.add(d.quota_error ? 'err' : 'ok');
+    msg.classList.add(bad ? 'err' : 'ok');
     msg.hidden = false;
     loadIntegrations();
   } catch (e) {
     msg.textContent = e.message || 'Could not save the key.';
     msg.classList.add('err'); msg.hidden = false;
   } finally { btn.disabled = false; }
+}
+
+async function testIntegration(id) {
+  const row = document.querySelector(`.intg-row[data-id="${CSS.escape(id)}"]`);
+  if (!row) return;
+  const msg = row.querySelector('.intg-msg');
+  const btn = row.querySelector('.intg-test');
+  btn.disabled = true;
+  msg.hidden = true; msg.classList.remove('ok', 'err');
+  try {
+    const d = await getJSON(withBase(`/api/admin/integrations/${encodeURIComponent(id)}/test`));
+    const t = intgTestNote(d);
+    msg.textContent = t.text;
+    msg.classList.add(t.ok ? 'ok' : 'err');
+    msg.hidden = false;
+  } catch (e) {
+    msg.textContent = e.message || 'Connection test failed.';
+    msg.classList.add('err'); msg.hidden = false;
+  } finally { btn.disabled = false; }
+}
+
+/* ---- version management (view + downgrade) -------------------------------- */
+let VERSION_POLL = null;
+
+async function loadVersion() {
+  const cur = document.getElementById('versionCurrent');
+  const body = document.getElementById('versionBody');
+  if (!cur || !body) return;
+  cur.textContent = 'Loading…';
+  let d;
+  try { d = await getJSON(withBase('/api/admin/version')); }
+  catch (e) {
+    cur.innerHTML = `<span class="err">Could not read version info: ${esc(e.message || '')}</span>`;
+    return;
+  }
+  const c = d.current || {};
+  cur.innerHTML = `<span class="ver-badge">${esc(c.version || '?')}</span>
+    <span class="ver-commit mono">${esc(c.commit || '')}</span>
+    <span class="faint">${esc(c.branch || '')}${c.subject ? ' · ' + esc(c.subject) : ''}</span>`;
+  const rows = [];
+  (d.tags || []).forEach(t => rows.push(verRow(t.ref, t.date, t.subject, t.ref, true)));
+  (d.commits || []).forEach(cm => rows.push(
+    verRow(cm.short, (cm.date || '').slice(0, 10), cm.subject, cm.commit, false, cm.current)));
+  body.innerHTML = rows.join('') ||
+    `<tr><td colspan="4" class="faint" style="padding:14px">No other versions found on GitHub.</td></tr>`;
+  body.querySelectorAll('.ver-go').forEach(btn =>
+    btn.addEventListener('click', () => downgrade(btn.dataset.ref, btn.dataset.label)));
+  loadVersionStatus();
+  loadVersionHistory();
+}
+
+function verRow(label, date, subject, ref, isTag, isCurrent) {
+  return `<tr>
+    <td>${isTag ? icon('tag') : ''}<span class="mono">${esc(label)}</span>${
+      isCurrent ? ' <span class="tag">current</span>' : ''}</td>
+    <td class="faint">${esc(date || '')}</td>
+    <td class="truncate" title="${esc(subject || '')}">${esc(subject || '')}</td>
+    <td>${isCurrent ? '' :
+      `<button class="btn sm ver-go" data-ref="${esc(ref)}" data-label="${esc(label)}"
+        title="Downgrade to this version">${icon('download')} use</button>`}</td>
+  </tr>`;
+}
+
+async function downgrade(ref, label) {
+  if (!confirm(`Downgrade the dashboard to ${label}?\n\nThe current version is backed `
+    + `up first and restored automatically if anything fails. The dashboard will `
+    + `restart, so it may be briefly unavailable.`)) return;
+  const box = document.getElementById('versionStatus');
+  box.hidden = false;
+  box.className = 'ver-status running';
+  box.textContent = `Starting downgrade to ${label}…`;
+  try {
+    await sendJSON(withBase('/api/admin/version/downgrade'), 'POST', { target: ref });
+  } catch (e) {
+    box.className = 'ver-status err';
+    box.textContent = e.message || 'Could not start the downgrade.';
+    return;
+  }
+  // Poll status · the service will restart under us, so tolerate fetch failures.
+  if (VERSION_POLL) clearInterval(VERSION_POLL);
+  VERSION_POLL = setInterval(loadVersionStatus, 3000);
+}
+
+async function loadVersionStatus() {
+  const box = document.getElementById('versionStatus');
+  if (!box) return;
+  let d;
+  try { d = await getJSON(withBase('/api/admin/version/status')); }
+  catch (e) { return; }   // server may be mid-restart · keep polling
+  const st = d.status || {};
+  if (!st.status || st.status === 'idle') { if (!VERSION_POLL) box.hidden = true; return; }
+  box.hidden = false;
+  const map = {
+    starting: ['running', 'Preparing downgrade…'],
+    running: ['running', 'Downgrade in progress · backing up, checking out, verifying…'],
+    success: ['ok', `Downgraded to ${st.target || ''} (was ${st.previous || ''}). Backup: ${st.backup || 'n/a'}.`],
+    rolled_back: ['err', `Downgrade failed and was rolled back: ${st.error || ''}. The dashboard is back on its previous version.`],
+    failed: ['err', `Downgrade failed: ${st.error || ''}.`],
+  };
+  const [cls, text] = map[st.status] || ['running', st.status];
+  box.className = 'ver-status ' + cls;
+  box.textContent = text;
+  if (st.status === 'success' || st.status === 'rolled_back' || st.status === 'failed') {
+    if (VERSION_POLL) { clearInterval(VERSION_POLL); VERSION_POLL = null; }
+    loadVersionHistory();
+  }
+}
+
+async function loadVersionHistory() {
+  const host = document.getElementById('versionHistory');
+  if (!host) return;
+  let d;
+  try { d = await getJSON(withBase('/api/admin/version/status')); }
+  catch (e) { return; }
+  const h = d.history || [];
+  if (!h.length) { host.innerHTML = `<p class="faint" style="padding:10px 2px">No downgrades recorded.</p>`; return; }
+  host.innerHTML = `<div class="atable-wrap"><table class="atable"><thead><tr>
+    <th>When</th><th>User</th><th>From</th><th>To</th><th>Status</th></tr></thead><tbody>${
+    h.map(e => `<tr>
+      <td class="faint">${esc((e.time || '').replace('T', ' ').slice(0, 19))}</td>
+      <td>${esc(e.user || '?')}</td>
+      <td class="mono faint">${esc(e.previous_commit || e.previous_version || '')}</td>
+      <td class="mono">${esc(e.target || '')}</td>
+      <td>${esc(e.status || '')}</td>
+    </tr>`).join('')}</tbody></table></div>`;
 }
 
 /* ---- overview ------------------------------------------------------------- */
@@ -298,11 +446,58 @@ function openUserModal(user) {
   document.getElementById('umRole').value = user ? user.role : 'user';
   document.getElementById('umDaily').value = l.daily_scans != null ? l.daily_scans : 10;
   document.getElementById('umConcurrent').value = l.concurrent != null ? l.concurrent : 1;
+  const credits = user && user.credits != null ? user.credits : 0;
+  const cr = document.getElementById('umCredits');
+  cr.value = credits; cr.dataset.current = credits;
   PERMS.forEach(([id, key]) => { document.getElementById(id).checked = !!l[key]; });
   document.getElementById('umSave').textContent = user ? 'Save changes' : 'Create account';
   document.getElementById('umMsg').hidden = true;
+  // View-this-account's-assets · only meaningful for an existing account.
+  const assets = document.getElementById('umAssets');
+  assets.hidden = !user; assets.innerHTML = '';
+  if (user) {
+    assets.innerHTML = `<button class="btn sm" type="button" id="umViewAssets">`
+      + `${icon('radar-2')} View ${esc(user.username)}'s scans & findings</button>`
+      + `<div id="umAssetsBody"></div>`;
+    document.getElementById('umViewAssets').addEventListener('click',
+      () => loadUserAssets(user.username));
+  }
   document.getElementById('userModal').hidden = false;
   setTimeout(() => document.getElementById(user ? 'umDaily' : 'umUser').focus(), 30);
+}
+
+async function loadUserAssets(username) {
+  const body = document.getElementById('umAssetsBody');
+  if (!body) return;
+  body.innerHTML = `<p class="faint" style="padding:8px 0">Loading…</p>`;
+  let d;
+  try { d = await getJSON(withBase(`/api/admin/user/${encodeURIComponent(username)}/assets`)); }
+  catch (e) { body.innerHTML = `<p class="form-msg err" style="display:block">${esc(e.message || 'Could not load assets.')}</p>`; return; }
+  const sev = d.findings_by_severity || {};
+  const q = d.quota || {};
+  const domains = d.domains || [];
+  const sevTags = ['critical', 'high', 'medium', 'low', 'info']
+    .filter(s => sev[s]).map(s => `<span class="tag">${s}: ${fmtNum(sev[s])}</span>`).join('');
+  body.innerHTML = `
+    <div class="um-assets-stats">
+      <span>${fmtNum(d.scan_count || 0)} scans</span>
+      <span>${fmtNum(d.findings_total || 0)} findings</span>
+      <span>${fmtNum(domains.length)} domains</span>
+      ${q.daily_scans != null
+        ? `<span>${q.remaining == null ? '∞' : fmtNum(q.remaining)} scans left today${q.credits ? ` (+${fmtNum(q.credits)} credits)` : ''}</span>`
+        : ''}
+    </div>
+    <div class="um-tags">${sevTags || '<span class="faint">no findings</span>'}</div>
+    <div class="um-tags">${domains.slice(0, 24).map(([dom, n]) =>
+      `<span class="tag">${esc(dom)} · ${fmtNum(n)}</span>`).join('') || ''}</div>
+    <div class="atable-wrap"><table class="atable"><thead><tr>
+      <th>Scan</th><th>Findings</th><th>Version</th><th>When</th></tr></thead><tbody>${
+      (d.scans || []).slice(0, 60).map(s => `<tr>
+        <td><a href="${withBase('/scan/' + encodeURIComponent(s.scan_id))}">${esc(s.domain)}</a></td>
+        <td>${fmtNum((s.stats || {}).findings || 0)}</td>
+        <td class="mono faint">${esc(s.version || '')}</td>
+        <td class="faint">${esc((s.started_at || '').replace('T', ' ').slice(0, 16))}</td>
+      </tr>`).join('') || '<tr><td colspan="4" class="faint">no scans</td></tr>'}</tbody></table></div>`;
 }
 
 function closeUserModal() { document.getElementById('userModal').hidden = true; }
@@ -334,6 +529,7 @@ function wireUserModal() {
     const role = document.getElementById('umRole').value;
     const password = document.getElementById('umPass').value;
 
+    const wantCredits = num('umCredits');
     try {
       if (EDITING) {
         await sendJSON(withBase(`/api/admin/users/${encodeURIComponent(EDITING)}`),
@@ -341,11 +537,19 @@ function wireUserModal() {
         if (password)
           await sendJSON(withBase(`/api/admin/users/${encodeURIComponent(EDITING)}/password`),
             'POST', { new_password: password });
+        // Credits are a running balance · grant the delta to reach the entered total.
+        const curCredits = parseInt(document.getElementById('umCredits').dataset.current || '0', 10) || 0;
+        if (wantCredits !== curCredits)
+          await sendJSON(withBase(`/api/admin/users/${encodeURIComponent(EDITING)}/credits`),
+            'POST', { credits: wantCredits - curCredits });
         toast(`${EDITING} updated`);
       } else {
         const name = document.getElementById('umUser').value.trim().toLowerCase();
         await sendJSON(withBase('/api/admin/users'), 'POST',
           { username: name, password, role, limits });
+        if (wantCredits > 0)
+          await sendJSON(withBase(`/api/admin/users/${encodeURIComponent(name)}/credits`),
+            'POST', { credits: wantCredits });
         toast(`${name} created`);
       }
       closeUserModal();
@@ -371,7 +575,7 @@ function reflectRole() {
     box.disabled = admin;
     if (admin) box.checked = true;
   });
-  ['umDaily', 'umConcurrent'].forEach(id => {
+  ['umDaily', 'umConcurrent', 'umCredits'].forEach(id => {
     const el = document.getElementById(id);
     el.disabled = admin;
     if (admin) el.value = 0;

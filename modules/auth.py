@@ -292,6 +292,7 @@ def _public(name: str, rec: dict) -> dict:
         "scans_today": int(usage.get("scans", 0)) if usage.get("day") == _today() else 0,
         "locked": bool(rec.get("locked_until", 0) > time.time()),
         "total_scans": int(rec.get("total_scans", 0)),
+        "credits": max(0, int(rec.get("credits", 0))),
     }
 
 

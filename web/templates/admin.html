@@ -31,6 +31,8 @@
       <svg class="ic"><use href="#i-radar-2"></use></svg> Scans</button>
     <button class="atab" data-tab="integrations" role="tab" aria-selected="false">
       <svg class="ic"><use href="#i-plug-connected"></use></svg> Integrations</button>
+    <button class="atab" data-tab="version" role="tab" aria-selected="false">
+      <svg class="ic"><use href="#i-history"></use></svg> Version</button>
     <button class="atab" data-tab="account" role="tab" aria-selected="false">
       <svg class="ic"><use href="#i-key"></use></svg> My password</button>
   </nav>
@@ -110,6 +112,37 @@
     </div>
   </section>
 
+  <!-- VERSION ------------------------------------------------------------- -->
+  <section class="atab-panel" id="tab-version" role="tabpanel" hidden>
+    <div class="panel">
+      <div class="phead">
+        <svg class="ic"><use href="#i-history"></use></svg>
+        <h3>Installed version</h3>
+        <button class="btn sm" id="versionRefresh" style="margin-left:auto"
+                title="Re-check GitHub for available versions">
+          <svg class="ic"><use href="#i-refresh"></use></svg> Check GitHub</button>
+      </div>
+      <div id="versionCurrent" class="ver-current">Loading…</div>
+      <div id="versionStatus" class="ver-status" hidden></div>
+      <p class="ns-help" style="margin:12px 0 8px">Roll the dashboard back to an
+        earlier version from GitHub. The current version is backed up first, then
+        the chosen version is checked out, its dependencies restored and the tree
+        verified before the service restarts · if anything fails it rolls back
+        automatically, so a downgrade cannot leave the dashboard broken.</p>
+      <div class="atable-wrap">
+        <table class="atable" id="versionTable">
+          <thead><tr><th>Version</th><th>Date</th><th>Change</th><th></th></tr></thead>
+          <tbody id="versionBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <div class="phead"><svg class="ic"><use href="#i-list-details"></use></svg>
+        <h3>Downgrade log</h3></div>
+      <div id="versionHistory" class="ver-history"></div>
+    </div>
+  </section>
+
   <!-- MY PASSWORD --------------------------------------------------------- -->
   <section class="atab-panel" id="tab-account" role="tabpanel" hidden>
     <div class="panel">
@@ -154,6 +187,8 @@
             <input class="input" id="umDaily" type="number" min="0" max="10000" inputmode="numeric"></label>
           <label class="field"><span>Scans at once <small class="faint">(0 = unlimited)</small></span>
             <input class="input" id="umConcurrent" type="number" min="0" max="100" inputmode="numeric"></label>
+          <label class="field"><span>Bonus scan credits <small class="faint">(extra scans beyond the daily cap)</small></span>
+            <input class="input" id="umCredits" type="number" min="0" max="100000" inputmode="numeric"></label>
         </div>
         <fieldset class="um-perms">
           <legend>Allowed to</legend>
@@ -163,7 +198,11 @@
           <label class="chk"><input type="checkbox" id="umTor"> route scans over Tor</label>
           <label class="chk"><input type="checkbox" id="umWayback"> mine the web archive</label>
           <label class="chk"><input type="checkbox" id="umDeep"> use deep DNS</label>
+          <label class="chk"><input type="checkbox" id="umXss"> run XSS tests</label>
+          <label class="chk"><input type="checkbox" id="umSqli"> run SQL injection tests</label>
+          <label class="chk"><input type="checkbox" id="umNuclei"> run Nuclei scans</label>
         </fieldset>
+        <div id="umAssets" class="um-assets" hidden></div>
         <p class="form-msg" id="umMsg" role="alert" hidden></p>
         <div class="modal-actions">
           <button class="btn ghost" type="button" id="umCancel">Cancel</button>

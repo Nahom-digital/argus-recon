@@ -215,3 +215,25 @@
 
 /* ---- modal scrim (shared with the home page's key dialog) ----------------- */
 .admin-page .modal-scrim,.auth-page .modal-scrim{z-index:var(--z-modal)}
+
+/* ---- version management --------------------------------------------------- */
+.ver-current{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px;
+  font-size:var(--fs-sm);padding:4px 0 2px}
+.ver-badge{font-family:var(--mono);font-size:var(--fs-sm);font-weight:600;
+  color:var(--accent-ink);background:var(--accent-weak);
+  border:1px solid var(--accent-weak-2);border-radius:var(--r-pill);padding:2px 10px}
+.ver-commit{color:var(--muted)}
+.ver-status{margin:12px 0 4px;padding:9px 12px;border-radius:var(--r-sm);
+  font-size:var(--fs-sm);border:1px solid var(--border)}
+.ver-status.running{color:var(--sev-med-fg);background:var(--sev-med-bg);border-color:transparent}
+.ver-status.ok{color:var(--ok);background:rgba(63,125,82,.12);border-color:transparent}
+.ver-status.err{color:var(--danger);background:var(--sev-high-bg);border-color:transparent}
+#versionTable td .tag{margin-left:6px}
+.ver-history{font-size:var(--fs-sm)}
+
+/* ---- per-account assets (in the edit modal) ------------------------------- */
+.um-assets{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
+.um-assets-stats{display:flex;flex-wrap:wrap;gap:8px 16px;margin:10px 0;
+  font-size:var(--fs-sm);color:var(--ink-2)}
+.um-assets-stats span{font-variant-numeric:tabular-nums}
+.um-tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
