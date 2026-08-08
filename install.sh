@@ -295,6 +295,8 @@ install_apt_recon_tools() {
   local need_apt=()
   command -v whatweb >/dev/null || need_apt+=(whatweb)
   command -v ffuf    >/dev/null || command -v feroxbuster >/dev/null || need_apt+=(ffuf)
+  # nmap powers the port scan (and Shodan enrichment merges into its results).
+  command -v nmap    >/dev/null || need_apt+=(nmap)
   # tor + torsocks power the optional "via Tor" scan. Not fatal if absent — the
   # toggle just stays locked in the dashboard — but install them so it works.
   command -v tor      >/dev/null || need_apt+=(tor)
@@ -303,7 +305,7 @@ install_apt_recon_tools() {
     say "installing recon tools: ${need_apt[*]}  (needs sudo)"
     apt_install "${need_apt[@]}" || warn "install manually later: ${need_apt[*]}"
   else
-    say "whatweb + ffuf/feroxbuster + tor already present ✔"
+    say "whatweb + ffuf/feroxbuster + nmap + tor already present ✔"
   fi
 }
 
@@ -407,6 +409,89 @@ install_bbot() {
   fi
 }
 
+# nuclei — template-based vulnerability scanner (Go). Its templates are fetched
+# too, so the first Nuclei scan does not stall downloading them.
+install_nuclei() {
+  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+  if command -v nuclei >/dev/null 2>&1 || [ -x "$gobin/nuclei" ]; then
+    say "nuclei already present ✔"
+  else
+    install_go_toolchain || { warn "nuclei needs Go — skipped (the Nuclei toggle stays off)"; return 0; }
+    mkdir -p "$gobin"
+    say "installing nuclei (go install → $gobin) …"
+    GOBIN="$gobin" go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
+      || warn "  could not install nuclei — the Nuclei toggle stays unavailable"
+    case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
+  fi
+  if command -v nuclei >/dev/null 2>&1 || [ -x "$gobin/nuclei" ]; then
+    say "updating nuclei templates …"
+    { "$gobin/nuclei" -update-templates -silent >/dev/null 2>&1 \
+      || nuclei -update-templates -silent >/dev/null 2>&1; } || true
+  fi
+}
+
+# dalfox — XSS scanner (Go).
+install_dalfox() {
+  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+  if command -v dalfox >/dev/null 2>&1 || [ -x "$gobin/dalfox" ]; then
+    say "dalfox already present ✔"; return 0
+  fi
+  install_go_toolchain || { warn "dalfox needs Go — skipped (the XSS toggle stays off)"; return 0; }
+  mkdir -p "$gobin"
+  say "installing dalfox (go install → $gobin) …"
+  GOBIN="$gobin" go install github.com/hahwul/dalfox/v2@latest \
+    || warn "  could not install dalfox — the XSS toggle stays unavailable"
+  case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
+}
+
+# nomore403 — 403/401 bypass (Go). Optional: Argus's native catalogue covers the
+# same techniques, so this only augments it.
+install_nomore403() {
+  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+  if command -v nomore403 >/dev/null 2>&1 || [ -x "$gobin/nomore403" ]; then
+    say "nomore403 already present ✔"; return 0
+  fi
+  install_go_toolchain || return 0     # non-fatal: native bypass catalogue still runs
+  mkdir -p "$gobin"
+  say "installing nomore403 (go install → $gobin) …"
+  GOBIN="$gobin" go install github.com/devploit/nomore403@latest \
+    || warn "  could not install nomore403 — Argus uses its native bypass catalogue"
+  case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
+}
+
+# sqlmap — SQL injection tester (Python). apt first, then pipx, then a source
+# clone with a wrapper on PATH · so it lands even on a distro without the package.
+install_sqlmap() {
+  if command -v sqlmap >/dev/null 2>&1; then say "sqlmap already present ✔"; return 0; fi
+  say "installing sqlmap …"
+  apt_install sqlmap >/dev/null 2>&1 || true
+  command -v sqlmap >/dev/null 2>&1 && { say "sqlmap ready ✔"; return 0; }
+  command -v pipx >/dev/null 2>&1 && { pipx install sqlmap >/dev/null 2>&1 || true; }
+  command -v sqlmap >/dev/null 2>&1 && { say "sqlmap ready ✔"; return 0; }
+  local dst="$HOME/.local/share/sqlmap"
+  if command -v git >/dev/null 2>&1; then
+    [ -d "$dst/.git" ] || git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git "$dst" >/dev/null 2>&1 || true
+    if [ -f "$dst/sqlmap.py" ]; then
+      mkdir -p "$HOME/.local/bin"
+      printf '#!/usr/bin/env bash\nexec python3 "%s/sqlmap.py" "$@"\n' "$dst" > "$HOME/.local/bin/sqlmap"
+      chmod +x "$HOME/.local/bin/sqlmap"
+      say "sqlmap installed from source ✔"
+    fi
+  fi
+  command -v sqlmap >/dev/null 2>&1 || warn "  could not install sqlmap — the SQLi toggle stays unavailable"
+}
+
+# Python recon helpers · arjun (parameter discovery) and wafw00f (WAF detect).
+# Optional; each degrades gracefully when absent.
+install_pip_recon_tools() {
+  local t
+  for t in arjun wafw00f; do
+    command -v "$t" >/dev/null 2>&1 && continue
+    command -v pipx >/dev/null 2>&1 && { pipx install "$t" >/dev/null 2>&1 || true; }
+    command -v "$t" >/dev/null 2>&1 || apt_install "$t" >/dev/null 2>&1 || true
+  done
+}
+
 # The one call both a fresh install and --upgrade make: every external tool
 # Argus can use, installing whatever is missing and leaving the rest alone.
 install_external_tools() {
@@ -414,6 +499,44 @@ install_external_tools() {
   install_go_tools
   install_wayback
   install_bbot
+  install_nuclei
+  install_dalfox
+  install_nomore403
+  install_sqlmap
+  install_pip_recon_tools
+}
+
+# --------------------------------------------------------------------------- #
+# Post-install validation · verify every dependency and report what is missing,
+# so the operator sees at a glance which features are ready and which need a
+# manual step. Required tools failing is loud; optional ones are a soft warning
+# (Argus degrades to a fallback for each).
+# --------------------------------------------------------------------------- #
+validate_dependencies() {
+  dsection "Dependency check"
+  local gobin="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+  _have() { command -v "$1" >/dev/null 2>&1 || [ -x "$gobin/$1" ] || [ -x "$gobin/$1-pd" ]; }
+  local req_missing=0 t
+  for t in python3 git curl; do
+    if _have "$t"; then dcheck pass "$t"; else dcheck fail "$t" "REQUIRED"; req_missing=1; fi
+  done
+  # Optional engines · each maps to a feature that degrades or locks when absent.
+  declare -A opt=(
+    [nmap]="port scan" [nuclei]="Nuclei scan" [sqlmap]="SQL injection"
+    [dalfox]="XSS testing" [nomore403]="403 bypass (native fallback)"
+    [whatweb]="fingerprint" [ffuf]="content brute" [tor]="Tor routing"
+    [httpx]="mass probe" [katana]="deep crawl" [subfinder]="passive names"
+    [dnsx]="bulk resolver" [bbot]="passive enum" [waybackurls]="web archive"
+    [arjun]="param discovery" [wafw00f]="WAF detect" [go]="Go tool builds"
+  )
+  for t in "${!opt[@]}"; do
+    if _have "$t"; then dcheck pass "$t" "${opt[$t]}"; else dcheck warn "$t" "optional · ${opt[$t]} limited"; fi
+  done
+  if [ "$req_missing" = 0 ]; then
+    ok "all required dependencies present."
+  else
+    err "some REQUIRED dependencies are missing (see above) — install them and re-run."
+  fi
 }
 
 install_python_env() {
@@ -817,7 +940,9 @@ case "${1:-}" in
     # A second --check asks the doctor to repair the SQLite store if it is
     # corrupt (the rebuild is safe — the store is a derived cache).
     DOCTOR_REPAIR=1
-    doctor; exit $?
+    doctor; rc=$?
+    validate_dependencies
+    exit $rc
     ;;
 
   --status)
@@ -843,6 +968,13 @@ case "${1:-}" in
 
   --restart)
     unit_exists || { err "the service is not installed — run ./install.sh first"; exit 1; }
+    # A restart verifies (and installs anything missing from) the dependencies
+    # first · a tool that vanished, or a new one a recent version needs, is put
+    # back before the service comes up. Idempotent, so it is fast when all present.
+    say "verifying dependencies before restart …"
+    install_base_packages
+    install_external_tools
+    validate_dependencies
     say "restarting $SERVICE …"
     systemctl --user restart "$SERVICE.service"
     if wait_live 25; then report_live; else
@@ -905,6 +1037,7 @@ if [ "${1:-}" = "--upgrade" ]; then
   install_external_tools
   # shellcheck source=/dev/null
   source "$HERE/bootstrap.sh"; _argus_bootstrap "$HERE" || warn "dependency refresh reported problems"
+  validate_dependencies
 
   # An upgrade always lands on a running service. Do a full force-style unit
   # reinstall rather than a soft restart: tear the unit down, rewrite it, reload
@@ -964,6 +1097,12 @@ install_external_tools
 # 3. Python venv + requirements
 # --------------------------------------------------------------------------- #
 install_python_env
+
+# --------------------------------------------------------------------------- #
+# 3b. validate · verify every dependency and report what is missing before we
+#     register the service, so the operator sees the state of the toolchain.
+# --------------------------------------------------------------------------- #
+validate_dependencies
 
 # --------------------------------------------------------------------------- #
 # 4. administrator account (turns authentication on)
