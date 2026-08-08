@@ -272,8 +272,14 @@ function renderPanel(s) {
   const mods = Object.entries(m.modules || {}).map(([name, d]) =>
     `<div class="modline"><span class="dot ${d.status === 'ok' ? 'ok' : d.status === 'empty' ? 'empty' : 'skip'}"></span>
       ${esc(name)}<span class="faint" style="margin-left:auto">${d.note ? esc(d.note) : d.status}${d.duration ? ' · ' + d.duration + 's' : ''}</span></div>`).join('');
+  const ver = m.versions || {};
+  const toolCount = Object.keys(ver.tools || {}).length;
+  const verVal = (m.version || ver.scanner || '')
+    + (m.engine ? ` · ${m.engine}` : '')
+    + (toolCount ? ` · ${toolCount} tools` : '');
   document.getElementById('ovBody').innerHTML = `<div class="ov">
     ${kv('domain', m.domain)}
+    ${kv('scanner', verVal)}
     ${kv('scanned', m.started_at ? new Date(m.started_at).toLocaleString() : '')}
     ${kv('duration', m.duration_sec != null ? fmtDur(m.duration_sec) : '')}
     ${kv('registrar', wh.registrar)}
@@ -869,6 +875,12 @@ function secRow(x) {
 }
 
 /* Files: expandable · source + request + response (item 10) */
+function fpBadge(f) {
+  if (!f.verdict || f.verdict === 'file') return '';
+  const label = f.verdict === 'webpage' ? 'web page' : 'false positive';
+  return `<span class="fp-badge ${esc(f.verdict)}" title="${esc(f.fp_reason || label)}">${label}</span>`;
+}
+
 function fileRow(f, i) {
   const p = splitUrl(f.url);
   const srcs = (f.sources || []).map(sc => `<span class="src-chip mini" title="${esc(sourceMeta(sc).label)}">${esc(sc)}</span>`).join('');
@@ -876,6 +888,7 @@ function fileRow(f, i) {
     <button class="fsummary">
       <span class="tag mono">${esc(f.subtype || f.kind)}</span>
       <span class="name mono" title="${esc(f.url)}">${esc(p.path)}</span>
+      ${fpBadge(f)}
       ${f.status ? `<span class="st ${statusClass(f.status)}">${f.status}</span>` : ''}
       <svg class="ic fchev"><use href="#i-chevron-down"></use></svg>
     </button>
@@ -1813,7 +1826,7 @@ function dvFilesBody(files) {
       <td><span class="tag mono">${esc(f.subtype || f.kind)}</span></td>
       <td class="mono"><span class="chip-host" data-host="${esc(u.host)}">${esc(u.host)}</span></td>
       <td>${ips.map(ip => `<span class="chip-ip" data-ip="${esc(ip)}">${icon('server-2')}${esc(ip)}</span>`).join(' ') || '<span class="faint">·</span>'}</td>
-      <td class="mono wrap">${esc(u.path)}</td>
+      <td class="mono wrap">${esc(u.path)} ${fpBadge(f)}</td>
       <td class="${statusClass(f.status)} mono">${f.status || '·'}</td>
       <td class="mono faint">${esc(f.size != null ? fmtBytes(f.size) : '')}</td>
       <td class="faint">${esc((f.content_type || '').split(';')[0])}</td>

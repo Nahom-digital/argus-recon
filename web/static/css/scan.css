@@ -557,3 +557,9 @@
   .trow .c-type{display:none}
   .trow .expand{display:none}
 }
+
+/* false-positive / web-page badge on a discovered file (modules.falsepos) */
+.fp-badge{font-size:var(--fs-xs);border-radius:var(--r-xs);padding:0 6px;
+  white-space:nowrap;font-family:var(--sans)}
+.fp-badge.webpage{color:var(--sev-info-fg);background:var(--sev-info-bg)}
+.fp-badge.false_positive{color:var(--sev-med-fg);background:var(--sev-med-bg)}
