@@ -217,6 +217,8 @@ function reportSummary(s, m) {
     <div class="kvgrid">
       ${kv('domain', m.domain)}
       ${kv('scan id', m.scan_id)}
+      ${kv('scanner version', (m.version || (m.versions || {}).scanner || '')
+        + (m.engine ? ' · ' + m.engine : ''))}
       ${kv('started', m.started_at ? new Date(m.started_at).toLocaleString() : '')}
       ${kv('duration', m.duration_sec != null ? fmtDur(m.duration_sec) : '')}
       ${kv('registrar', wh.registrar)}
